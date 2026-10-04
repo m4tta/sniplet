@@ -1,0 +1,16 @@
+target/
+/target-app/
+/target-platform/
+/.reference/
+/artifacts/
+/dist/
+/dist-linux-test/
+*.log
+*.tmp
+.DS_Store
+.env
+.env.*
+!.env.example
+*.clippy
+*.sniplet
+*.source.png

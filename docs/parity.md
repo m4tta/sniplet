@@ -1,0 +1,159 @@
+# Sniplet parity checklist
+
+
+
+## Status and evidence
+
+Use exactly one status in each row:
+
+- **Not run** — no implementation or verification claim.
+- **In progress** — implementation exists but the acceptance check is incomplete.
+- **Verified** — acceptance evidence is attached to the current commit.
+- **Failed** — the acceptance check ran and exposed a defect.
+- **Blocked** — an external capability or environment prevented the check; record the reason.
+- **Unsupported** — intentionally unavailable on this platform with a tested user-visible explanation.
+
+Evidence should be a test name, CI run, desktop test record, screenshot/recording, or issue link. A screenshot of Sniplet is visual evidence only; it does not prove behavior. Replace the template owner and milestone values as work is scheduled.
+
+## Shortcut baseline for product Help
+
+
+
+The `C`, `B`, `Z`, and modified-key commands require editor context that a plain `Tool::from_key` lookup cannot model. Tool keys, including `A`, must preserve text-input focus. Help text may list commands only after dispatcher behavior exists and has an input regression test.
+
+## Product shell and editor chrome
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| SHELL-01 | First launch explains capture permission/capability and recovers after denial. | Not run | — | — |
+| SHELL-02 | Closing the editor follows the specified background lifecycle; tray/menu can reopen and quit. | In progress | The main and visible titlebar close paths minimize when a tray exists and quit when it does not; tray/menu reopen and quit plus Ctrl/Cmd+Q use shared commands. A packaged native lifecycle test on each desktop remains open. | Shell qualification |
+| SHELL-03 | Main editor is a single canvas below a compact combined title/toolbar row. | In progress | Windows native window accepted toolbar clicks and canvas drawing on October 2, 2026; exact visual/layout comparison remains open. | Editor qualification |
+| SHELL-04 | Left export controls appear in canonical order: Copy, Save, Pin, Upload when configured, draggable file. | In progress | The toolbar code and `toolbar_menu_and_canvas_have_layout` test cover Copy, Save, Pin, Upload, and drag-file controls in order. Conditional upload visibility and pixel comparison remain open. | Editor qualification |
+| SHELL-05 | Tool order begins Select/Crop, Arrow, Text, Ruler, Rectangle, Backdrop, Freehand, Magnifier, More. | In progress | The toolbar's primary sequence and Backdrop insertion follow the target order; GPUI layout/overflow tests pass. Wide-window order and pixels still need reference comparison. | Editor qualification |
+| SHELL-06 | Wide windows expose all tools; narrow windows move tools into More without changing order. | In progress | GPUI test `narrow_toolbar_keeps_export_and_overflow_controls_visible` passed on Windows and WSL2; exact tool order and pixels remain open. | Editor qualification |
+| SHELL-07 | Right inspectors show pixel color/copy hint, logical or physical image dimensions, and zoom. | In progress | The toolbar renders the sampled color with Tab hint, source image dimensions, and zoom percentage. A logical/physical dimension toggle and scaled-display validation remain open. | Editor qualification |
+| SHELL-08 | Selected annotation opens a floating upper-right property strip without reflowing the canvas. | In progress | GPUI tests `floating_palette_updates_the_selected_annotation`, `text_size_buttons_render_and_undo_each_change`, and the counter/magnifier/spotlight control tests pass. Canvas reflow and reference placement still need visual comparison. | Editor qualification |
+| SHELL-09 | Selection handles, accent state, spacing, typography, shadows, and icon scale match the reference at 1× and 2×. | Not run | — | — |
+| SHELL-10 | Settings use General, Hotkeys, Uploading, Advanced, and License/application sections only where implemented. | In progress | Settings, capture-shortcut, and cloud-upload panels persist implemented values. Appearance follows the system by default and offers immediate, persistent Light/Dark overrides. Canonical section structure, Advanced, and License/application presentation remain open. | Shell qualification |
+
+## Capture and import
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| CAP-01 | Fullscreen capture selects a monitor and preserves its physical pixel bounds. | In progress | Windows native self-test selected the primary monitor and reported a 2560×1440 capture before cropping its verification PNG. Multiple monitors and rotated/scaled displays remain open. | Capture qualification |
+| CAP-02 | Area overlay supports drag in every direction, Escape cancellation, and exact pixel output. | In progress | GPUI tests cover exact pixels, capture-scoped Escape handling, stale-session isolation, overlay removal, document preservation, successful editor activation, and cancellation without editor activation. The corrected Linux app suites passed 11/11 ordinary and 31/31 all-feature tests, plus strict default/all-feature lint. Native Windows input then verified twice that button- and shortcut-started area cancellation removes the overlay while leaving the editor minimized and the other application visible. The earlier restoration observation is retained only as superseded history. Native multi-direction, held-drag, startup-delay, existing-document/clipboard, and mixed-DPI checks remain open; see the [current correction](platform-testing.md#october-3-2026-cancellation-visibility-correction) and [historical regression record](platform-testing.md#october-3-2026-capture-focus-regression-fix). | Capture qualification |
+| CAP-03 | Repeat-area capture reuses the physical region correctly after display changes. | In progress | Area capture stores the monitor index, native monitor ID, and physical rectangle; Repeat crops that rectangle only when the display ID and bounds still agree. `repeat_capture_requires_the_original_physical_pixel_bounds` and `repeat_before_area_capture_keeps_the_document_and_reports_the_error` pass. Native topology-change behavior remains open. | Capture qualification |
+| CAP-04 | Active-window and any-window capture choose the intended window without focus races. | In progress | Capture Window now shows a frozen desktop overlay with a capture cursor and camera marker. Hover selects the frontmost eligible window at the pointer; the blue fill and border respect higher windows. Click removes the overlay before ID-based capture; Escape/right-click leave the editor hidden. GPUI tests cover overlap, capture ordering, and cancellation, with platform tests for z-order/negative coordinates and overlay tests for scale/display mapping and occlusion subtraction. Native Windows checks captured an inactive Chrome window behind Spotify at 1818×1365 with no overlay in the result. macOS, physical Linux, and spanning-window qualification remain open; see the [October 4 record](platform-testing.md#october-4-2026-arrow-palette-and-hover-window-capture). | Capture qualification |
+| CAP-05 | Window presentation supports the implemented shadow, transparency, solid, and wallpaper modes. | Not run | — | — |
+| CAP-06 | Delayed capture counts down, fires once, and can be cancelled. | In progress | Delayed capture waits three seconds and takes one monitor capture. Its capture-scoped Escape session can cancel before capture begins and leaves the editor hidden; countdown UI and a timed end-to-end cancellation regression remain open. | Capture qualification |
+| CAP-07 | Automatic scrolling capture works downward and upward with configured speed and height limit. | In progress | Automatic downward capture injects scrolling, restores the pointer, stitches frames, detects identical end frames, supports Escape cancellation, and enforces a 40-frame limit; collection tests cover end, limit, and cancellation. Upward direction and user-configurable speed/height remain open. | Capture qualification |
+| CAP-08 | Manual scrolling capture warns when too fast and completes after an idle pause. | In progress | Manual mode records a chosen region and appends/stitches frames through the menu; `manually_supplied_frames_are_stitched_by_core` passes. Speed warning and idle-pause completion remain open. | Capture qualification |
+| CAP-09 | Mixed-scale and negative-coordinate display layouts have no overlay jump, seam, or resampling. | In progress | Unit tests cover exact native display-ID selection, Windows physical-to-logical origins, Linux/macOS logical origins, and coordinate fallback. Mixed-scale hardware capture/export remains open. | Capture qualification |
+| CAP-10 | Cursor inclusion policy is honored. | Not run | — | — |
+| CAP-11 | PNG and JPEG open by file picker and drag/drop; corrupt inputs fail gracefully. | In progress | File picker and drag/drop decode through `image::open`; project files also open. A bad startup path or corrupt image now leaves a usable editor with an error status. Native PNG/JPEG/drop and corrupt-file exercises remain open. | Import qualification |
+| CAP-12 | Clipboard image load, Paste Image, and Add Capture use distinct commands and object behavior. | In progress | Dispatcher has separate Paste and Add Capture commands. `added_image_keeps_existing_document_and_undo` and `added_capture_expands_canvas_and_undoes_in_one_step` pass; native clipboard and capture-append flows remain open. | Capture qualification |
+
+## Selection, navigation, and precision
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| SEL-01 | `V` activates Select/Crop; Enter crops the raster selection. | In progress | GPUI pointer/keyboard test `draw_crop_and_undo_via_real_pointer_and_keys` passed on Windows and WSL2; packaged/native crop pixels still need independent inspection. | Editor qualification |
+| SEL-02 | Raster selection auto-adjusts all edges; edge-specific and instant-preview variants work. | In progress | Application-menu Auto Adjust invokes corner-background trimming and `automatic_selection_trims_uniform_background` passes. The user requested A for Arrow, so the menu preserves Auto Adjust without that binding. Edge-specific variants and instant preview remain open. | Editor qualification |
+| SEL-03 | Command/Ctrl-click selects a monotone object; Shift constrains to a square. | In progress | The dispatcher implements monotone flood selection and Shift-constrained selection/shape geometry; `monotone_selection_flood_fills_only_the_connected_region` and tool constraint tests pass. Native modifier interaction remains open. | Editor qualification |
+| SEL-04 | Arrow keys nudge 1 px, Shift+nudge 10 px, and modified arrows resize by 1/10 px. | In progress | The focused dispatcher implements 1/10-pixel nudge and Command/Ctrl-arrow resize for raster selections and annotations. The full key/modifier matrix lacks a dedicated interaction test. | Editor qualification |
+| SEL-05 | Brackets shrink/grow all edges by 1 px; Shift changes the increment to 10 px. | In progress | Bracket dispatch expands/contracts symmetrically by 1 or 10 pixels with clipping and invalid-size rejection. A focused key regression test remains open. | Editor qualification |
+| SEL-06 | Right-drag and Space+drag pan without changing selection or annotation. | In progress | Right-, middle-, and Space-drag enter the pan path, which updates only viewport pan. Packaged pointer behavior remains open. | Editor qualification |
+| SEL-07 | Fit, 100%, selection, point, and region zoom commands preserve the pointer anchor. | In progress | Fit, actual size, selection fit, wheel/pointer zoom, quick zoom, and selection-corner zoom are implemented; `cursor_anchored_zoom_round_trips_coordinates` passes. Complete native command coverage remains open. | Editor qualification |
+| SEL-08 | Logical/physical dimensions toggle correctly on scaled displays. | Not run | — | — |
+| SEL-09 | Canvas can expand and place multiple captures side by side. | In progress | Add Capture expands the transparent canvas to the right, inserts the new capture as an editable image object, and groups both changes into one undo step. Three core canvas/project tests and `added_capture_expands_canvas_and_undoes_in_one_step` pass; native capture placement remains open. | Editor qualification |
+| SEL-10 | Snapping and measurement guides are predictable and can be imprinted. | Not run | — | — |
+
+## Raster tools and annotations
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| EDIT-01 | Delete removes/fills a raster selection from suitable surrounding pixels and deletes selected objects. | In progress | Delete removes the selected annotation or adds a border-sampled RemoveFill for a raster selection; core rendering and undo tests cover both underlying operations. Natural-background quality and native interaction remain open. | Editor qualification |
+| EDIT-02 | Blur/Erase family under `B` exposes blur, pixelate, text-only, and erase modes as implemented. | In progress | `B` cycles Blur, Pixelate, Erase, and Redact; GPUI test `blur_family_changes_preserve_bounds_and_undo` passed on Windows and WSL2. Exported pixels and the text-only mode remain open. | Editor qualification |
+| EDIT-03 | Arrow supports head, weight, curve/bend, reverse, classic, and hand-drawn variants. | In progress | Four variants are implemented: bold Solid, rounded Hand drawn, angular Thin, and Double ended using Thin heads. A tapered 1–30 size slider updates live with one undo step per drag. All variants preserve the start/middle/end controls and bend when restyled; legacy projects default to Solid. Core tests pin old Solid pixels and cover variant rendering, head hit testing, scaling, degeneracy, and serialization. GPUI pointer/key tests cover style changes, all controls, remembered choices, live size, grouped undo, Escape, and minimum-window layout in both themes. Native Windows verification covers all four style buttons and slider undo. Preview rendering now coalesces pointer input into one frame and releases replaced GPU images; exact pixel and input regressions accompany the [performance record](platform-testing.md#october-4-2026-interactive-preview-performance). Modifier-based reversal and exact reference pixel comparisons remain open. | Editor qualification |
+| EDIT-04 | Text supports size, color, background/point style, editing, and multiline layout. | In progress | Windows native input selected Text, typed and committed `Sniplet native UI test`, then Ctrl+Z removed it; GPUI text-entry/export test also passed. The remaining property and multiline matrix is open. | Editor qualification |
+| EDIT-05 | Rectangle and Oval support outline, fill, opacity, and hand-drawn style. | In progress | Rectangle/Oval render outline and optional fill with palette and width controls; vector rendering and resize tests pass. Opacity control and hand-drawn style remain open. | Editor qualification |
+| EDIT-06 | Ruler/line reports physical image distance and exports at the displayed endpoints. | In progress | Ruler creates a line plus grouped pixel-distance label and status; line rendering has endpoint/capsule regression coverage. Independent export endpoint comparison remains open. | Editor qualification |
+| EDIT-07 | Freehand supports live stroke, smoothing, and variability controls. | In progress | Pointer movement collects a live freehand polyline, and capsule rendering covers continuous diagonals, round caps, single points, and overlap alpha. Smoothing and variability controls remain open. | Editor qualification |
+| EDIT-08 | Highlighter supports cap style and remains visually translucent after export. | In progress | Highlighter renders a default translucent fill and core vector export coverage passes. Cap-style controls and exported-alpha reference comparison remain open. | Editor qualification |
+| EDIT-09 | Spotlight supports levels 1–9 and dims the outside region accurately. | In progress | GPUI test `magnifier_and_spotlight_property_buttons_change_rendering` passed on WSL2; the complete level range and exported pixels remain open. | Editor qualification |
+| EDIT-10 | Counter accepts 0–99 and subsequent counters increment from the selected value. | In progress | GPUI test `counter_buttons_clamp_and_set_the_next_value` passed on WSL2; native input and export remain open. | Editor qualification |
+| EDIT-11 | Magnifier renders a crisp callout from the correct source region and scale. | In progress | GPUI test `magnifier_and_spotlight_property_buttons_change_rendering` passed on WSL2; source alignment and scale still need independent pixel comparison. | Editor qualification |
+| EDIT-12 | Backdrop supports gradient, inset, rounded corners, and shadow. | In progress | Backdrop presets, 24/56/100-pixel padding, corner and shadow toggles are implemented; `live_preview_crop_backdrop_rounding_shadow_and_gradient_are_applied` passes. Native property flow and reference pixels remain open. | Editor qualification |
+| EDIT-13 | Pasted images and added captures remain movable objects until rasterized. | In progress | Paste/Add Capture encode PNG annotations with movable/resizable bounds. Add Capture also expands the canvas and remains a single undo group; core raster/canvas tests plus `added_image_keeps_existing_document_and_undo` and `added_capture_expands_canvas_and_undoes_in_one_step` pass. Native clipboard/capture append remains open. | Editor qualification |
+| EDIT-14 | Selection brings an object forward; Option/Alt-drag and copy/paste duplicate all properties. | In progress | Alt-drag duplicates the selected annotation with its kind/style and one grouped undo history. Bring-to-front on selection and annotation copy/paste are not implemented. | Editor qualification |
+| EDIT-15 | Undo/redo covers creation, deletion, transform, style, crop, and raster operations. | In progress | GPUI interaction tests cover draw/crop undo, one-step annotation resize, pasted image undo, and palette changes; the remaining operation matrix is open. | Editor qualification |
+| EDIT-16 | Aligned overlays can change opacity and produce a correct two-frame comparison GIF if supported. | Not run | — | — |
+
+## Export, pin, and sharing
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| OUT-01 | Copy full image and copy raster selection put correct pixels and dimensions on the clipboard. | In progress | Copy renders the whole document or crops to the current raster selection before calling the native clipboard adapter. Cross-application clipboard pixels and lifetime remain open. | Export qualification |
+| OUT-02 | Save and Save As produce valid PNG/JPEG with expected alpha, dimensions, color, and quality. | In progress | Native Save chooses PNG/JPEG/WebP from extension; `png_and_jpeg_encoders_produce_decodable_images` passes and Windows self-test reloads its PNG. Native JPEG quality/color/alpha comparison remains open. | Export qualification |
+| OUT-03 | Automatic format choice uses a documented deterministic rule when enabled. | Not run | — | — |
+| OUT-04 | Print uses the chosen orientation and image bounds. | Not run | — | — |
+| OUT-05 | Dragged temporary file is readable by the drop target and cleaned up after a safe lifetime. | In progress | The toolbar creates a rendered temporary PNG and exposes it as a GPUI external file drag. Drop-target readability and cleanup lifetime are not tested. | Export qualification |
+| OUT-06 | Copy/save hides or retains the editor and document exactly as configured. | In progress | `hide_after_export` defaults on and persists; successful whole-image copy/save minimizes only when a tray is available, while selection export and failed export retain the editor. Native copy/save lifecycle and document retention remain open. | Export qualification |
+| OUT-07 | Pin creates a borderless always-on-top image window with wheel resize and edit control. | In progress | Pin opens a transparent client-decorated popup, supports window drag, aspect-preserving wheel resize, Escape/right-click close, and a hover Edit control. `editing_a_pin_returns_the_unmodified_rgba_pixels` and resize-limit checks pass; packaged topmost behavior remains open. | Pin qualification |
+| OUT-08 | Pin opacity works; a semitransparent pin has no opaque shadow. | In progress | Hover controls and modified wheel input change image opacity from 20–100% in 10-point steps, and the pin requests a transparent client window; `pin_opacity_and_resize_keep_their_user_facing_limits` passes. Native compositor shadow/transparency inspection remains open. | Pin qualification |
+| OUT-09 | Pin remains sharp and interactive while moving across mixed-scale displays. | Not run | — | — |
+| OUT-10 | Configured cloud/S3 upload copies a valid URL and failures preserve the local image. | In progress | Presigned PUT and S3-compatible upload paths copy the returned URL only after success; loopback tests cover PNG body/content type, status errors, URL encoding/signing, unsafe prefixes, and credential isolation. A configured external service and native clipboard remain open. | Sharing qualification |
+| OUT-11 | Upload history can be reviewed and managed when cloud upload exists. | Not run | — | — |
+
+## OCR, QR, and color
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| DATA-01 | Global and in-editor OCR return expected fixture text without sending pixels remotely. | In progress | In-editor OCR uses the current selection/document and an offline Windows OCR or Tesseract backend; global Capture Text/QR captures an area, checks QR first, then recognizes and copies text. Native Windows OCR read a rendered fixture in a direct probe; the global end-to-end flow and macOS/Linux fixtures remain open. | Data qualification |
+| DATA-02 | OCR language and line-break settings change deterministic fixture output. | Not run | — | — |
+| DATA-03 | QR decoding accepts known fixtures and rejects invalid regions clearly. | In progress | `decodes_a_generated_qr_fixture` and `blank_image_contains_no_qr_codes` pass; the editor reports no-code and copies decoded text. Native selected-region/clipboard behavior remains open. | Data qualification |
+| DATA-04 | Tab copies exact pixel color and Shift+Tab copies nearby text color. | In progress | The visible rendered pixel under the pointer feeds Tab, while Shift+Tab chooses the darkest source pixel within a radius; source sampling tests pass. Native clipboard formats and text-color reference fixtures remain open. | Data qualification |
+| DATA-05 | `C` copies average selection color when a raster selection exists and chooses Counter otherwise. | In progress | The dispatcher implements the contextual split, core average-color calculation is tested, and counter sequencing/clamping has a GPUI regression test. Native clipboard behavior remains open. | Data qualification |
+| DATA-06 | Color formats and contrast checker agree with reference calculations. | In progress | Core color parsing/formatting and deterministic source analysis are tested, while the current editor displays/copies Hex RGB only. Other formats and a contrast checker are not implemented. | Data qualification |
+
+## Shortcuts, settings, and integration
+
+| ID | Capability / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| SYS-01 | Editor shortcuts dispatch by focus and selection context without conflicting mappings. | In progress | Tool shortcut assertions and GPUI text-focus regression pass; A/B/C/O/Z and modified commands dispatch by context. A complete focused-control and platform-keymap matrix remains open. | Integration qualification |
+| SYS-02 | Global capture/OCR/reopen shortcuts fire while Sniplet is unfocused. | In progress | Eight configurable bindings route area, screen, any window, scroll, repeat, active window, Capture Text/QR, and reopen to the shared dispatcher. Repeat and Capture Text/QR now have end behavior, but unfocused packaged execution has not been exercised. | Integration qualification |
+| SYS-03 | Shortcut recorder detects reserved/duplicate combinations and restores the prior binding. | In progress | Shortcut inputs parse all eight bindings, accept an empty string as disabled, and reject normalized duplicates or invalid keys before saving; OS registration failures are shown in status. Reserved-combination detection and restoration of a prior binding remain open. | Integration qualification |
+| SYS-04 | Every implemented setting persists atomically and has a tested default/migration path. | In progress | Settings use a synced temporary-file replacement; default, round-trip, replacement, and missing-new-field tests pass. Invalid startup preferences recover to defaults with a visible status. Native persistence of every UI field and migration beyond serde defaults remain open. | Integration qualification |
+| SYS-05 | Upload credentials use the OS credential store; settings JSON contains no secret. | In progress | `upload_settings_never_contain_credentials` passes and S3 credentials come from AWS environment variables. OS credential-store integration is not implemented. | Integration qualification |
+| SYS-06 | Tray/menu routes share the same command behavior as hotkey and CLI entry points. | In progress | Tray and global-hotkey events invoke the editor's shared dispatcher; reopen and quit share the runtime loop, and close quits instead of hiding when tray creation fails. Packaged tray behavior on each OS and broader CLI routes remain open. | Integration qualification |
+| SYS-07 | `sniplet://` supports show, capture, OCR, clipboard/file load, uploads, settings, and `then` actions as implemented. | Not run | — | — |
+| SYS-08 | Launch-at-startup behavior can be enabled and removed cleanly. | Not run | — | — |
+| SYS-09 | Confirmation policy for OCR, color, save, upload, and copy is respected. | Not run | — | — |
+| SYS-10 | Extreme scrolling dimensions receive a memory estimate and never crash from unchecked allocation. | In progress | Automatic collection has a validated nonzero frame cap and a test proving the cap stops collection. Memory estimation and checked final image-size allocation are not implemented. | Reliability qualification |
+
+## Cross-platform qualification
+
+Each row needs an independent result for each applicable environment. Add rows when a materially different compositor, DPI topology, or OS release reveals different behavior.
+
+| ID | Environment / acceptance target | Status | Evidence | Owner / milestone |
+| --- | --- | --- | --- | --- |
+| OS-MAC-01 | Supported macOS release: permission grant/deny/revoke, Retina capture, menu lifecycle, clipboard, pin/fullscreen. | Not run | — | — |
+| OS-WIN-01 | Supported Windows release: mixed per-monitor DPI, notification area, clipboard, topmost/virtual desktops. | In progress | Windows 11 build 26200: final format/check/build/strict Clippy passed with 32 core, 20 platform, and 26 all-feature app tests (78 distinct); native diagnostic passed, and an earlier native toolbar/canvas/text/undo flow was exercised. Mixed DPI, tray, clipboard, pin, and virtual desktops remain open; see [observed Windows run](platform-testing.md#observed-windows-run). | Windows qualification |
+| OS-WIN-CAPTURE-FIX-01 | Historical October 3 area-Escape and Window-hotkey regression build starts, captures, and preserves its editor state. | In progress | The focused 31-test app suite, default/all-feature strict lints, release build, packaged smoke, and packaged native self-test passed. After the approved restart, native OS input verified area capture from the button and `Ctrl+Shift+1`, with Escape canceling both and restoring the empty editor. That restoration behavior was later superseded by the requirement to leave the editor hidden; the Escape-delivery and overlay-removal observations remain valid. Minimized-editor Window-hotkey delivery remains open. See the [historical regression record](platform-testing.md#october-3-2026-capture-focus-regression-fix). | Windows capture regression |
+| OS-WIN-CANCEL-HIDDEN-01 | Windows area-capture Escape cancellation leaves the minimized editor hidden for button and global-shortcut starts. | Verified | Windows format, 31/31 all-feature app tests, default/all-feature strict app lint, release build, and packaged smoke passed. The 37,740,544-byte staged executable has SHA-256 `49AA991ED4008EC6FEF918253F4A77CCAAF872786B9F13E70192847FFF73F8D5`; the standard and prior capture-fix paths now contain that build. Native OS input verified two cancellation cycles, one button-started and one started with `Ctrl+Shift+1`: each removed the overlay, left Chrome visible, and left the editor minimized. Focused GPUI regressions preserve another active window and the existing document. See the [cancellation visibility correction](platform-testing.md#october-3-2026-cancellation-visibility-correction). | Windows capture regression |
+| OS-X11-01 | Linux X11: monitor/window capture, hotkeys, tray, clipboard, pin, and scroll injection. | In progress | Forced WSLg X11 editor smoke exited 0, but native capture was blocked by an XCB `GetImage` `X(Match)` error. A physical X11 desktop remains untested. | Linux qualification |
+| OS-WAY-01 | Linux Wayland: portal capture, compositor hotkey/tray/topmost capabilities, clear unsupported states. | Not run | — | — |
+| OS-WAY-WSLG-01 | WSLg: editor smoke closes cleanly and an incompatible capture protocol is reported without aborting. | In progress | October 2, 2026: the final Linux suite covered 78 distinct tests and strict Clippy passed; the final debug package smoke exited 0 through Wayland and forced X11, while native self-test returned a recoverable `UnsupportedVersion` error. See [observed WSLg run](platform-testing.md#observed-linux-run-wslg). | Linux qualification |
+| OS-CI-01 | Locked workspace format/check/build/test/UI-feature test/Clippy passes on Windows, macOS, and Linux CI. | Not run | — | — |
+| OS-CORE-01 | `sniplet-core` passes its independent platform-free verification suite. | In progress | The final 32-test suite and strict Clippy passed on Windows and Ubuntu 24.04.5/WSL2 on October 2, 2026. The working tree had no commit, so this is development evidence rather than release verification. | Core qualification |
+
+## Sign-off
+
+| Gate | Status | Evidence / approver |
+| --- | --- | --- |
+| No unresolved Failed rows in the release scope | Not run | — |
+| Every supported OS has a current desktop test record | Not run | — |
+| Mixed-DPI capture and export has physical-pixel evidence | Not run | — |
+| Shortcut map has no context collisions | Not run | — |
+| CI run is attached to the release commit | Not run | — |
+| Visual comparison has been reviewed at 1× and 2× | Not run | — |

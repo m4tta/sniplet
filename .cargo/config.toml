@@ -1,0 +1,3 @@
+[build]
+# GPUI's native backends are large; bound parallel compilation on desktop hosts.
+jobs = 2

@@ -1,0 +1,23 @@
+[package]
+name = "sniplet-app"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Sniplet, a precise cross-platform screenshot editor"
+
+[[bin]]
+name = "sniplet"
+path = "src/main.rs"
+
+[features]
+ui-tests = ["gpui-kit/test-support"]
+
+[dependencies]
+gpui-kit = "=0.7.0"
+sniplet-core = { path = "../sniplet-core" }
+sniplet-platform = { path = "../sniplet-platform" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+anyhow = "1"
+global-hotkey = "0.8"
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+serde_json = "1"

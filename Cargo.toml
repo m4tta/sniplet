@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/sniplet-core", "crates/sniplet-platform", "crates/sniplet-app"]
+default-members = ["crates/sniplet-app"]
+resolver = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
