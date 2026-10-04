@@ -4,6 +4,7 @@ set -eu
 workspace_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 output_name="${1:-dist}"
 profile="${SNIPLET_PACKAGE_PROFILE:-release}"
+app_id="io.github.m4tta.sniplet"
 
 case "$output_name" in
     ""|/*|..|../*|*/..|*/../*)
@@ -66,14 +67,14 @@ case "$(uname -s)" in
         cp "$workspace_root/LICENSE" "$bundle/Contents/Resources/LICENSE"
         cp "$workspace_root/assets/fonts/OFL.txt" "$bundle/Contents/Resources/licenses/NotoSans-OFL.txt"
         copy_documentation "$bundle/Contents/Resources/documentation"
-        cat > "$bundle/Contents/Info.plist" <<'PLIST'
+        cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key><string>Sniplet</string>
   <key>CFBundleExecutable</key><string>Sniplet</string>
-  <key>CFBundleIdentifier</key><string>fish.boxjelly.sniplet</string>
+  <key>CFBundleIdentifier</key><string>$app_id</string>
   <key>CFBundleName</key><string>Sniplet</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
@@ -100,7 +101,7 @@ PLIST
         cp "$workspace_root/LICENSE" "$bundle/LICENSE"
         cp "$workspace_root/assets/fonts/OFL.txt" "$bundle/share/licenses/sniplet/NotoSans-OFL.txt"
         copy_documentation "$bundle/share/doc/sniplet"
-        cat > "$bundle/share/applications/fish.boxjelly.sniplet.desktop" <<'DESKTOP'
+        cat > "$bundle/share/applications/$app_id.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Sniplet
@@ -109,9 +110,9 @@ Exec=sniplet
 Terminal=false
 Categories=Graphics;Utility;
 MimeType=image/png;image/jpeg;image/webp;
-StartupWMClass=Sniplet
+StartupWMClass=$app_id
 DESKTOP
-        chmod 0644 "$bundle/share/applications/fish.boxjelly.sniplet.desktop"
+        chmod 0644 "$bundle/share/applications/$app_id.desktop"
         printf 'Created portable Linux package: %s\n' "$bundle"
         ;;
     *)

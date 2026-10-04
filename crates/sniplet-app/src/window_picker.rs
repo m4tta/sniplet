@@ -432,7 +432,7 @@ fn open_snapshot(
         is_resizable: false,
         is_minimizable: false,
         display_id,
-        app_id: Some("fish.boxjelly.sniplet".into()),
+        app_id: Some(sniplet_platform::APP_ID.into()),
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };

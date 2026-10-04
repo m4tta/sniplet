@@ -44,9 +44,8 @@ The application menu includes text recognition and QR decoding.
 
 Save PNG/JPEG/WebP through the native save dialog. Ctrl/Cmd + Shift + S saves
 an editable `.sniplet` project and its `.source.png` companion; keep them together.
-Existing `.clippy` projects also open in Sniplet. On first launch, Sniplet copies
-your previous app settings when no Sniplet settings file exists; existing
-Sniplet settings take precedence.
+Existing `.clippy` projects also open in Sniplet.
+The application ID and preferences namespace are `io.github.m4tta.sniplet`.
 The dotted file control drags a rendered PNG into other applications.
 Pin creates a movable floating image; wheel resizes it, its hover controls change
 opacity or return it to the editor, and Escape/right-click closes it. Add Capture
@@ -191,7 +190,8 @@ and diagnostics have passed locally, while mixed-DPI hardware, tray/hotkey
 lifecycle, cross-application clipboard behavior, and pin behavior still need
 full desktop records. WSLg can open the editor through Wayland and X11, but its
 capture backends are incompatible; physical Linux X11/Wayland desktops have not
-been qualified. macOS and the GitHub Actions matrix have not been run. Exact
+been qualified. GitHub Actions builds and tests the workspace on all three
+platforms; native macOS desktop testing remains outstanding. Exact
 visual parity still needs 1×/2× reference comparisons and golden-image review.
 
 ## Research and scope

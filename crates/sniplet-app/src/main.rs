@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
                 cx,
             )));
             options.window_min_size = Some(size(px(900.0), px(560.0)));
-            options.app_id = Some("fish.boxjelly.sniplet".into());
+            options.app_id = Some(sniplet_platform::APP_ID.into());
             if settings.always_on_top && !args.iter().any(|a| a == "--normal-window") {
                 options.kind = WindowKind::PopUp;
             }

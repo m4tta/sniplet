@@ -5,6 +5,8 @@
 //! [`image::RgbaImage`], which can be passed directly to
 //! `sniplet_core::Document::new`.
 
+pub const APP_ID: &str = "io.github.m4tta.sniplet";
+
 mod capture;
 mod clipboard;
 mod error;

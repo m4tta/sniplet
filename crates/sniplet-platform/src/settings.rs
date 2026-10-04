@@ -115,26 +115,19 @@ impl Default for Settings {
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
-    legacy_path: Option<PathBuf>,
 }
 
 impl SettingsStore {
     pub fn for_app() -> Result<Self> {
-        let project = ProjectDirs::from("fish", "Box Jelly", "Sniplet")
+        let project = ProjectDirs::from("io.github", "m4tta", "sniplet")
             .ok_or(PlatformError::SettingsDirectoryUnavailable)?;
-        let legacy_path = ProjectDirs::from("fish", "Box Jelly", "Clippy")
-            .map(|project| project.config_dir().join("settings.json"));
         Ok(Self {
             path: project.config_dir().join("settings.json"),
-            legacy_path,
         })
     }
 
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            legacy_path: None,
-        }
+        Self { path: path.into() }
     }
 
     pub fn path(&self) -> &Path {
@@ -142,62 +135,25 @@ impl SettingsStore {
     }
 
     pub fn load(&self) -> Result<Settings> {
-        if let Some(settings) = Self::load_from(&self.path)? {
-            return Ok(settings);
-        }
-        let Some(legacy_path) = &self.legacy_path else {
-            return Ok(Settings::default());
-        };
-        let Some(settings) = Self::load_from(legacy_path)? else {
-            return Ok(Settings::default());
-        };
-
-        let temporary = self.temporary_file(&settings)?;
-        match temporary.persist_noclobber(&self.path) {
-            Ok(_) => Ok(settings),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                Ok(Self::load_from(&self.path)?.unwrap_or(settings))
-            }
-            Err(error) => Err(PlatformError::WriteFile {
-                path: self.path.clone(),
-                source: error.error,
-            }),
-        }
-    }
-
-    fn load_from(path: &Path) -> Result<Option<Settings>> {
-        let bytes = match fs::read(path) {
+        let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
+                return Ok(Settings::default());
             }
             Err(source) => {
                 return Err(PlatformError::ReadFile {
-                    path: path.to_owned(),
+                    path: self.path.clone(),
                     source,
                 });
             }
         };
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|source| PlatformError::InvalidSettings {
-                path: path.to_owned(),
-                source,
-            })
+        serde_json::from_slice(&bytes).map_err(|source| PlatformError::InvalidSettings {
+            path: self.path.clone(),
+            source,
+        })
     }
 
     pub fn save(&self, settings: &Settings) -> Result<()> {
-        let temporary = self.temporary_file(settings)?;
-        temporary
-            .persist(&self.path)
-            .map_err(|error| PlatformError::WriteFile {
-                path: self.path.clone(),
-                source: error.error,
-            })?;
-        Ok(())
-    }
-
-    fn temporary_file(&self, settings: &Settings) -> Result<tempfile::NamedTempFile> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|source| PlatformError::WriteFile {
             path: parent.to_owned(),
@@ -218,7 +174,13 @@ impl SettingsStore {
                 path: self.path.clone(),
                 source,
             })?;
-        Ok(temporary)
+        temporary
+            .persist(&self.path)
+            .map_err(|error| PlatformError::WriteFile {
+                path: self.path.clone(),
+                source: error.error,
+            })?;
+        Ok(())
     }
 }
 
@@ -268,67 +230,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settings_are_migrated_when_current_settings_are_missing() {
+    fn malformed_settings_are_reported_without_rewriting_the_file() {
         let directory = tempfile::tempdir().unwrap();
-        let legacy_path = directory.path().join("clippy/settings.json");
-        let path = directory.path().join("sniplet/settings.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        let legacy = Settings {
-            theme: ThemePreference::Dark,
-            auto_copy: false,
-            ..Settings::default()
-        };
-        fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        let store = SettingsStore {
-            path: path.clone(),
-            legacy_path: Some(legacy_path),
-        };
-
-        assert_eq!(store.load().unwrap(), legacy);
-        assert_eq!(SettingsStore::at(path).load().unwrap(), legacy);
-    }
-
-    #[test]
-    fn current_settings_win_over_legacy_settings() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sniplet/settings.json");
-        let legacy_path = directory.path().join("clippy/settings.json");
-        let current = Settings {
-            theme: ThemePreference::Light,
-            ..Settings::default()
-        };
-        let legacy = Settings {
-            theme: ThemePreference::Dark,
-            ..Settings::default()
-        };
-        let store = SettingsStore {
-            path,
-            legacy_path: Some(legacy_path.clone()),
-        };
-        store.save(&current).unwrap();
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        assert_eq!(store.load().unwrap(), current);
-    }
-
-    #[test]
-    fn malformed_legacy_settings_are_not_migrated() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sniplet/settings.json");
-        let legacy_path = directory.path().join("clippy/settings.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(&legacy_path, b"{").unwrap();
-        let store = SettingsStore {
-            path: path.clone(),
-            legacy_path: Some(legacy_path.clone()),
-        };
+        let path = directory.path().join("settings.json");
+        fs::write(&path, b"{").unwrap();
+        let store = SettingsStore::at(path.clone());
 
         assert!(matches!(
             store.load(),
-            Err(PlatformError::InvalidSettings { path, .. }) if path == legacy_path
+            Err(PlatformError::InvalidSettings { path: invalid_path, .. }) if invalid_path == path
         ));
-        assert!(!path.exists());
+        assert_eq!(fs::read(path).unwrap(), b"{");
     }
 
     #[test]
