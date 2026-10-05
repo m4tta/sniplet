@@ -129,6 +129,20 @@ Create a portable release on the current host:
 
 The shell script creates `dist/Sniplet.app` on macOS or a portable Linux directory
 under `dist/`. Packages contain the executable, licenses, and documentation.
+The app icon is included in the macOS bundle and Windows executable. Linux
+packages include a desktop entry and icons under `share/icons/hicolor`; install
+the `bin` and `share` contents into the matching directories in `~/.local` to
+show Sniplet in your app launcher. The Windows system tray uses the same scissors
+symbol as the macOS menu bar and changes color with the taskbar theme.
+
+On macOS, the script uses a local signing certificate named `Sniplet Development`
+if it is in your Keychain. Keep this certificate and its private key for later
+builds so macOS can retain the app's capture permission. A local certificate does
+not need an Apple developer account. If the certificate is absent, the script
+uses ad hoc signing, which can require a new permission grant after a rebuild.
+Set `SNIPLET_SIGNING_IDENTITY` to select a certificate name or SHA-1 fingerprint;
+set it to `-` to use ad hoc signing. Keep private keys outside the repository.
+Local signing is for development; it does not notarize a public release.
 
 ## Testing on a Mac
 
@@ -150,7 +164,7 @@ open dist/Sniplet-debug.app
 ```
 
 Allow screen capture when macOS requests permission. Test area capture with
-Cmd+Shift+1, fullscreen capture with Cmd+Shift+2, and window capture with
+Cmd+Shift+2, fullscreen capture with Cmd+Shift+1, and window capture with
 Cmd+Shift+3. Escape should cancel either interactive capture and leave the
 editor hidden; Cmd+Shift+8 reopens it. Press A in the editor to test arrows.
 

@@ -565,6 +565,151 @@ The debug profile also optimizes the app and `xcap` pixel conversion code.
 
 
 
+## macOS area capture across displays, October 5, 2026
+
+Area capture now opens one selection window per display and shares one desktop
+rectangle. On macOS, that rectangle uses Quartz origins because GPUI reports
+display-local bounds. A capture that spans displays produces one image at the
+highest selected display scale. Repeat Capture retains the rectangle and checks
+the display layout before reuse.
+
+The native test used macOS 26.5 (25F71) on an M1 Max. The laptop display was
+2056 × 1329 points at `(0, 0)`. The external DELL U2720QM was 3008 × 1692 points
+at `(-356, -1692)`. Both displays used a 2× capture scale.
+
+| Check | Result |
+| --- | --- |
+| External display only | A 300 × 60 point selection exported a 600 × 120 pixel PNG |
+| Drag across displays | External-to-laptop and laptop-to-external drags both selected `(1094, -57, 250, 160)` points and produced 500 × 320 pixels |
+| Repeat Capture | Exported the same 500 × 320 pixel PNG, with an identical file hash |
+| Escape | Ended the native capture session; UI tests verify that both overlays close and the existing document remains |
+| Automated checks | 63 app tests, 26 platform tests, format, strict app/platform Clippy with UI tests, debug build, and strict bundle signature verification passed |
+| Bundle | `dist/Sniplet-debug.app`; executable SHA-256 `c0446eaa10fed0ddd366905df1111e301befb1f1c510f2ee433af9094edf0784` |
+| Evidence | `artifacts/multi-display-2026-10-05/results.json`, native logs, editor screenshots, and PNG exports |
+
+
+
+## macOS area capture cursor, October 5, 2026
+
+The crosshair could change back to an arrow after the capture panels opened.
+GPUI applies cursor changes to the key window, but the pointer could be on a
+different display. Each capture panel now has a native crosshair region. The
+panel under the pointer gets focus before selection; a mouse-down also sets
+focus, and the starting panel keeps it throughout the drag.
+
+The native check used the two displays listed above. Cursor traces confirmed
+the crosshair at 200 ms and 1.5 seconds after opening, and during drags in both
+directions across the display boundary. Both drags produced 500 × 220 pixel
+captures. Escape closed both panels. Closing the panels restored the arrow.
+Six focused capture tests, strict app Clippy, formatting, the debug build and
+bundle signature checks passed.
+
+Evidence is in `artifacts/capture-cursor-2026-10-05/results.json` and
+`verified-cursor.log`. The tested executable has SHA-256
+`d71c4d2c5a6d7182fb5025bdf690adf8bc4913fb5896d98d113ae459ac4f0a24`.
+The native checks used toolbar commands; the UI tool did not deliver the global
+capture shortcut, so this run does not verify shortcut delivery. The cursor
+probes require `SNIPLET_CAPTURE_TRACE`; they do not run in a normal launch.
+
+## macOS local development signing, October 5, 2026
+
+The macOS package script now selects the local `Sniplet Development` certificate
+when it is available. It does not select an unrelated developer identity. An
+explicit `SNIPLET_SIGNING_IDENTITY` overrides this choice; `-` uses ad hoc signing.
+
+The test used macOS 26.5 (25F71) on the M1 Max above. A new self-signed certificate
+and private key were installed in the login Keychain. The certificate has no
+Apple account or team. Its SHA-1 fingerprint is
+`25D338C34E12575EBFB10D6D9BD1838BCA7212A9`. Certificate trust settings were unchanged.
+The private key is in the Keychain; export files were removed after import.
+
+Two existing Sniplet builds, from October 4 and October 5, were packaged and
+signed with this certificate. Their executable hashes and CodeDirectory hashes
+differ. Both pass strict signature verification and satisfy the other build's
+designated requirement:
+
+```text
+identifier "io.github.m4tta.sniplet" and certificate leaf = H"25d338c34e12575ebfb10d6d9bd1838bca7212a9"
+```
+
+Shell syntax, whitespace, and explicit ad hoc signing checks passed. The signed
+current app opened the saved editor document. The initial capture returned only
+the desktop background. The macOS TCC log confirmed that the old permission
+still required an ad hoc CodeDirectory hash. Turning the permission off and on
+did not replace that requirement. Removing the old entry and adding the signed
+app from `dist/Sniplet-debug.app` fixed capture.
+
+The current signed build captured other app windows. The executable at that same
+path was then replaced with the signed October 4 build. It also captured other
+app windows without a new grant or a permission prompt. This verifies capture
+permission across the two different builds. Evidence is in
+`artifacts/local-signing-2026-10-05/results.json`, the signature reports,
+`current-capture.png`, and `previous-capture.png`.
+This local certificate is for development; it does not notarize public releases.
+
+## App and tray icons, October 5, 2026
+
+The app uses the selected capture icon with red scissors on a dark tile. macOS
+packages include an ICNS file and `CFBundleIconFile`. Windows builds embed icon
+resource 1, which GPUI loads for the window and taskbar. Linux packages include
+the matching desktop entry, SVG, and PNG sizes under `share/icons/hicolor`; X11
+windows also receive the 256-pixel icon directly.
+
+The Windows tray uses the same scissors mask as the macOS menu bar. Its ink
+changes with `SystemUsesLightTheme`, including after a theme change. The focused
+mask test passed for both ink colors. PNG size and transparency checks passed;
+the master PNG matches the selected option C. The ICO contains nine sizes from
+16 to 256 pixels. Apple `iconutil` decoded the ICNS file.
+
+The Mac debug build opened and passed strict signature verification. Its Mach-O
+UUID matches the built executable. `NSWorkspace.icon(forFile:)` returned the new
+app icon. Evidence is in `artifacts/app-icon/assets.json`, `results.json`, and
+`macos-bundle-icon.png`. Windows and Linux native icon checks remain open.
+
+## Capture Screen under the mouse pointer, October 5, 2026
+
+Capture Screen previously used the monitor index chosen when the editor started.
+That index was the primary display. Screen and delayed capture now read the
+desktop mouse position when capture begins and use native display hit testing.
+Delayed capture reads the position after its three-second wait. Manual scrolling
+keeps its selected monitor.
+
+The focused command-routing test failed with `Monitor(0)` before the fix and
+passed afterward. Strict app Clippy passed. The Mac debug bundle passed strict
+signature verification with the existing local Sniplet certificate.
+
+Native checks used the two displays listed above and the toolbar's Capture
+Screen command. At `(-58, -1644)`, the backend selected the external display,
+ID 2, and returned 6016 × 3384 pixels at 2× scale. At `(1238, 1171)`, it selected
+the laptop display, ID 1, and returned 4112 × 2658 pixels at 2× scale. Evidence
+is in `artifacts/screen-under-pointer-2026-10-05/native.log`, `layout.json`, and
+`results.json`. The UI tool did not deliver the global shortcut in this run.
+Native delayed capture, Windows, and Linux checks remain open.
+
+## Window capture across displays, October 5, 2026
+
+Capture Any Window previously opened one selection panel on the primary display.
+It now opens a panel on each display. The panels share the selected window and
+show its visible portion on each screen. A click closes every panel before
+capture starts. Escape and right-click cancel the whole selection session.
+
+The external-display test failed before the fix because only one panel opened.
+All five window-picker tests now pass. They cover external selection, a window
+that spans displays, shared highlighting, overlap order, and cancellation.
+Formatting, strict app Clippy with UI tests, and the locked Mac debug build passed.
+
+Native checks used the two Mac displays listed above. The external Arc window,
+ID 64831, produced 6014 × 3054 pixels. The laptop window, ID 63294, produced
+4112 × 2390 pixels. Both selection panels closed after each click. Escape also
+closed both panels without another capture. The signed build retained its
+existing Screen Recording permission.
+
+Evidence is in `artifacts/window-capture-displays-2026-10-05/results.json`, native
+logs, window bounds, and screenshots. The executable SHA-256 is
+`dee9ad12f3efb267c80e1e40efc1063e4410c009db914223c6731e7686bfa8d6`.
+These checks used toolbar commands. Global shortcut delivery, physical
+mixed-scale displays, Windows, and Linux remain untested in this run.
+
 ## OS-specific release gates
 
 ### macOS
