@@ -19,8 +19,8 @@ mod upload;
 
 pub use capture::{
     CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_active_window,
-    capture_monitor, capture_monitor_region, capture_window, list_monitors, list_windows,
-    window_at_point,
+    capture_monitor, capture_monitor_region, capture_monitor_under_pointer, capture_monitors,
+    capture_window, list_monitors, list_windows, window_at_point,
 };
 pub use clipboard::Clipboard;
 pub use error::{PlatformError, Result};

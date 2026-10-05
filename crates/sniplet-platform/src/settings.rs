@@ -70,8 +70,8 @@ pub struct HotkeySettings {
 impl Default for HotkeySettings {
     fn default() -> Self {
         Self {
-            capture_area: "CommandOrControl+Shift+1".to_owned(),
-            capture_screen: "CommandOrControl+Shift+2".to_owned(),
+            capture_area: "CommandOrControl+Shift+2".to_owned(),
+            capture_screen: "CommandOrControl+Shift+1".to_owned(),
             capture_window: "CommandOrControl+Shift+3".to_owned(),
             scrolling_capture: "CommandOrControl+Shift+4".to_owned(),
             repeat_area: "CommandOrControl+Shift+5".to_owned(),

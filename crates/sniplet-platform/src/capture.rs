@@ -154,6 +154,110 @@ pub fn capture_monitor(index: usize) -> Result<CapturedFrame> {
     capture_backend("capture a monitor", || capture_monitor_impl(index))
 }
 
+/// Capture the display under the current desktop pointer, without using an
+/// editor's cached display index. Native hit testing handles display placement.
+pub fn capture_monitor_under_pointer() -> Result<CapturedFrame> {
+    capture_backend("capture the monitor under the pointer", || {
+        let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
+            kind: "monitors",
+            source: Box::new(source),
+        })?;
+        let point = pointer_position()?;
+        // X11 returns physical pointer coordinates. xcap's Linux point lookup
+        // expects desktop units and applies its global display scale itself.
+        #[cfg(target_os = "linux")]
+        let point = {
+            let scale = monitors
+                .first()
+                .map_or(Ok(1.0), Monitor::scale_factor)
+                .map_err(|source| PlatformError::Capture(Box::new(source)))?
+                .max(1.0);
+            ScreenPoint {
+                x: (point.x as f32 / scale).floor() as i32,
+                y: (point.y as f32 / scale).floor() as i32,
+            }
+        };
+        let selected = Monitor::from_point(point.x, point.y)
+            .map_err(|source| PlatformError::Capture(Box::new(source)))?;
+        let id = property("monitor", "id", selected.id())?;
+        let index = monitors
+            .iter()
+            .position(|monitor| monitor.id().is_ok_and(|candidate| candidate == id))
+            .ok_or_else(|| {
+                PlatformError::Capture(Box::new(xcap::XCapError::new(
+                    "The display under the pointer was disconnected",
+                )))
+            })?;
+        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+            eprintln!("capture backend: pointer={point:?}; display id={id}; index={index}");
+        }
+        capture_monitor_frame(index, &selected)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn pointer_position() -> Result<ScreenPoint> {
+    use core_graphics::{
+        event::CGEvent,
+        event_source::{CGEventSource, CGEventSourceStateID},
+    };
+
+    let event = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .and_then(CGEvent::new)
+        .map_err(|()| {
+            PlatformError::PointerPositionUnavailable(
+                "macOS did not return the mouse position".into(),
+            )
+        })?;
+    let point = event.location();
+    Ok(ScreenPoint {
+        x: point.x.floor() as i32,
+        y: point.y.floor() as i32,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn pointer_position() -> Result<ScreenPoint> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let mut point = POINT::default();
+    // Reading the desktop cursor does not send input or move it.
+    unsafe { GetCursorPos(&mut point) }
+        .map_err(|error| PlatformError::PointerPositionUnavailable(error.to_string()))?;
+    Ok(ScreenPoint {
+        x: point.x,
+        y: point.y,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn pointer_position() -> Result<ScreenPoint> {
+    use enigo::Mouse;
+
+    let input = enigo::Enigo::new(&enigo::Settings::default())
+        .map_err(|error| PlatformError::PointerPositionUnavailable(error.to_string()))?;
+    let (x, y) = input
+        .location()
+        .map_err(|error| PlatformError::PointerPositionUnavailable(error.to_string()))?;
+    Ok(ScreenPoint { x, y })
+}
+
+/// Captures every display before selection windows are shown. Enumerating once
+/// keeps the frame indices and display identities consistent within a session.
+pub fn capture_monitors() -> Result<Vec<CapturedFrame>> {
+    capture_backend("capture all monitors", || {
+        let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
+            kind: "monitors",
+            source: Box::new(source),
+        })?;
+        monitors
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| capture_monitor_frame(index, monitor))
+            .collect()
+    })
+}
+
 fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
     let started = std::time::Instant::now();
     let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
@@ -169,7 +273,13 @@ fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
     if trace {
         eprintln!("capture backend: display lookup {:?}", started.elapsed());
     }
-    let info = monitor_info(index, &monitor)?;
+    capture_monitor_frame(index, &monitor)
+}
+
+fn capture_monitor_frame(index: usize, monitor: &Monitor) -> Result<CapturedFrame> {
+    let started = std::time::Instant::now();
+    let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
+    let info = monitor_info(index, monitor)?;
     if trace {
         eprintln!("capture backend: display metadata {:?}", started.elapsed());
     }

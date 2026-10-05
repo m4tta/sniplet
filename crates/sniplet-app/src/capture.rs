@@ -12,14 +12,22 @@ pub struct CaptureRequest {
     pub command: Command,
     pub monitor: usize,
     pub region: Option<ImageRect>,
-    pub last_capture: Option<(usize, u32, ImageRect)>,
+    pub last_capture: Option<crate::area_capture::Region>,
 }
 
-fn captured_monitor_id(source: &sniplet_platform::CaptureSource) -> u32 {
-    match source {
-        sniplet_platform::CaptureSource::Monitor { id, .. }
-        | sniplet_platform::CaptureSource::MonitorRegion { id, .. } => *id,
-        sniplet_platform::CaptureSource::Window { id } => *id,
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureTarget {
+    Monitor(usize),
+    UnderPointer,
+}
+
+impl CaptureTarget {
+    fn for_command(command: Command, monitor: usize) -> Self {
+        if matches!(command, Command::Screen | Command::Delayed) {
+            Self::UnderPointer
+        } else {
+            Self::Monitor(monitor)
+        }
     }
 }
 
@@ -29,23 +37,26 @@ pub fn start(
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> Result<(), String> {
+    if matches!(
+        request.command,
+        Command::Area | Command::AddCapture | Command::CaptureOcr | Command::Repeat
+    ) {
+        return crate::area_capture::start(
+            request.command,
+            request.last_capture,
+            editor,
+            window,
+            cx,
+        );
+    }
     let capture_started = Instant::now();
     let trace_capture = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
     let CaptureRequest {
         command,
-        mut monitor,
+        monitor,
         region,
-        last_capture,
+        ..
     } = request;
-    let repeat = if matches!(command, Command::Repeat) {
-        let Some(last_capture) = last_capture else {
-            return Err("Capture an area before using Repeat Capture".into());
-        };
-        monitor = last_capture.0;
-        Some(last_capture)
-    } else {
-        None
-    };
     let handle = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
     let manual_region = if matches!(command, Command::ManualScroll) {
@@ -53,6 +64,7 @@ pub fn start(
     } else {
         None
     };
+    let target = CaptureTarget::for_command(command, monitor);
     let hide_delay = crate::runtime::hide_for_capture(window);
     if trace_capture {
         eprintln!("capture: editor hidden in {:?}", capture_started.elapsed());
@@ -69,7 +81,10 @@ pub fn start(
         }
         let frame = cx.background_executor().spawn(async move {
             if trace_capture { eprintln!("capture: backend started in {:?}", capture_started.elapsed()); }
-            sniplet_platform::capture_monitor(monitor)
+            match target {
+                CaptureTarget::UnderPointer => sniplet_platform::capture_monitor_under_pointer(),
+                CaptureTarget::Monitor(index) => sniplet_platform::capture_monitor(index),
+            }
         }).await;
         if trace_capture { eprintln!("capture: pixels ready in {:?}", capture_started.elapsed()); }
         cx.update(|cx| {
@@ -79,29 +94,7 @@ pub fn start(
             }
             match frame {
             Ok(frame) => {
-                if let Some((_, expected_monitor_id, rect)) = repeat {
-                    let actual_monitor_id = captured_monitor_id(&frame.source);
-                    if actual_monitor_id != expected_monitor_id {
-                        editor.update(cx, |editor, cx| {
-                            editor.status = "Repeat Capture stopped because the selected display changed".into();
-                            cx.notify();
-                        });
-                    } else if !capture_rect_in_bounds(rect, frame.image.width(), frame.image.height()) {
-                        editor.update(cx, |editor, cx| {
-                            editor.status = "Repeat Capture stopped because the previous area is outside the display".into();
-                            cx.notify();
-                        });
-                    } else {
-                        let image = crop_image(&frame.image, rect);
-                        editor.update(cx, |editor, cx| {
-                            copy_capture_if_enabled(editor, &image);
-                            editor.load(Document::new(image), "Repeated area capture", cx);
-                            editor.set_measure_scale(frame.scale_factor);
-                        });
-                    }
-                    crate::runtime::end_escape_session(&escape, cx);
-                    restore(handle, cx);
-                } else if let Some(rect) = manual_region {
+                if let Some(rect) = manual_region {
                     let image = crop_image(&frame.image, rect);
                     editor.update(cx, |this, cx| {
                         this.scroll_frames.push(image);
@@ -118,6 +111,9 @@ pub fn start(
                     crate::runtime::end_escape_session(&escape, cx);
                     restore(handle, cx);
                 } else if matches!(command, Command::Screen | Command::Delayed) {
+                    if trace_capture {
+                        eprintln!("capture: screen source={:?}; image={:?}; origin={:?}; scale={}", frame.source, frame.image.dimensions(), frame.origin, frame.scale_factor);
+                    }
                     editor.update(cx, |this, cx| {
                         copy_capture_if_enabled(this, &frame.image);
                         this.load(Document::new(frame.image), "Screen captured", cx);
@@ -208,6 +204,13 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
             }
             editor.update(cx, |this, cx| match frame {
                 Ok(frame) => {
+                    if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                        eprintln!(
+                            "window capture: captured id={id}; image={:?}; origin={:?}",
+                            frame.image.dimensions(),
+                            frame.origin
+                        );
+                    }
                     copy_capture_if_enabled(this, &frame.image);
                     this.load(Document::new(frame.image), "Window captured", cx);
                     this.set_measure_scale(frame.scale_factor);
@@ -224,11 +227,11 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
     .detach();
 }
 
-fn restore(handle: AnyWindowHandle, cx: &mut App) {
+pub(crate) fn restore(handle: AnyWindowHandle, cx: &mut App) {
     let _ = handle.update(cx, |_, w, cx| crate::runtime::show_editor(w, cx));
 }
 
-fn copy_capture_if_enabled(editor: &Editor, image: &image::RgbaImage) {
+pub(crate) fn copy_capture_if_enabled(editor: &Editor, image: &image::RgbaImage) {
     if editor.settings.auto_copy
         && let Ok(mut clipboard) = sniplet_platform::Clipboard::new()
     {
@@ -245,20 +248,6 @@ fn crop_image(image: &image::RgbaImage, rect: ImageRect) -> image::RgbaImage {
     image::imageops::crop_imm(image, x, y, width, height).to_image()
 }
 
-fn capture_rect_in_bounds(rect: ImageRect, width: u32, height: u32) -> bool {
-    let rect = rect.normalized();
-    rect.x.is_finite()
-        && rect.y.is_finite()
-        && rect.width.is_finite()
-        && rect.height.is_finite()
-        && rect.x >= 0.0
-        && rect.y >= 0.0
-        && rect.width >= 1.0
-        && rect.height >= 1.0
-        && rect.x + rect.width <= width as f32
-        && rect.y + rect.height <= height as f32
-}
-
 fn physical_capture_rect(rect: ImageRect, width: u32, height: u32) -> Option<ImageRect> {
     let rect = rect.clipped(width, height);
     let left = rect.x.floor();
@@ -268,7 +257,7 @@ fn physical_capture_rect(rect: ImageRect, width: u32, height: u32) -> Option<Ima
     (right > left && bottom > top).then(|| ImageRect::new(left, top, right - left, bottom - top))
 }
 
-fn square_end(start: ImagePoint, end: ImagePoint) -> ImagePoint {
+pub(crate) fn square_end(start: ImagePoint, end: ImagePoint) -> ImagePoint {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let side = dx.abs().max(dy.abs());
@@ -282,7 +271,6 @@ struct Overlay {
     editor_window: AnyWindowHandle,
     command: Command,
     monitor: usize,
-    monitor_id: u32,
     scale_factor: f32,
     escape: crate::runtime::EscapeSession,
     start: Option<ImagePoint>,
@@ -301,9 +289,9 @@ impl Overlay {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (monitor, monitor_id) = match frame.source {
-            sniplet_platform::CaptureSource::Monitor { index, id }
-            | sniplet_platform::CaptureSource::MonitorRegion { index, id } => (index, id),
+        let monitor = match frame.source {
+            sniplet_platform::CaptureSource::Monitor { index, .. }
+            | sniplet_platform::CaptureSource::MonitorRegion { index, .. } => index,
             sniplet_platform::CaptureSource::Window { .. } => {
                 unreachable!("area overlays use monitor captures")
             }
@@ -323,7 +311,6 @@ impl Overlay {
             editor,
             editor_window,
             monitor,
-            monitor_id,
             scale_factor: frame.scale_factor,
             command,
             escape,
@@ -391,15 +378,10 @@ impl Overlay {
         let append = matches!(command, Command::AddCapture);
         let recognize = matches!(command, Command::CaptureOcr);
         let editor = self.editor.clone();
-        let monitor = self.monitor;
-        let monitor_id = self.monitor_id;
         let scale_factor = self.scale_factor;
         let updated = self.editor_window.update(cx, |_, editor_window, cx| {
             editor.update(cx, |editor, cx| {
                 copy_capture_if_enabled(editor, &image);
-                if matches!(command, Command::Area) {
-                    editor.last_capture = Some((monitor, monitor_id, rect));
-                }
                 if scroll {
                     editor.scroll_region = Some(rect);
                     editor.scroll_frames = vec![image.clone()];
@@ -765,6 +747,20 @@ mod tests {
     #[cfg(feature = "ui-tests")]
     use std::prelude::v1::test;
 
+    #[::core::prelude::v1::test]
+    fn screen_capture_uses_pointer_instead_of_cached_primary_display() {
+        for command in [Command::Screen, Command::Delayed] {
+            assert_eq!(
+                CaptureTarget::for_command(command, 0),
+                CaptureTarget::UnderPointer
+            );
+        }
+        assert_eq!(
+            CaptureTarget::for_command(Command::ManualScroll, 2),
+            CaptureTarget::Monitor(2)
+        );
+    }
+
     #[cfg(feature = "ui-tests")]
     fn monitor_frame(image: image::RgbaImage) -> sniplet_platform::CapturedFrame {
         sniplet_platform::CapturedFrame {
@@ -773,25 +769,6 @@ mod tests {
             scale_factor: 1.0,
             source: sniplet_platform::CaptureSource::Monitor { index: 0, id: 7 },
         }
-    }
-
-    #[::core::prelude::v1::test]
-    fn repeat_capture_requires_the_original_physical_pixel_bounds() {
-        assert!(capture_rect_in_bounds(
-            ImageRect::new(10.0, 20.0, 90.0, 80.0),
-            100,
-            100
-        ));
-        assert!(!capture_rect_in_bounds(
-            ImageRect::new(10.0, 20.0, 91.0, 80.0),
-            100,
-            100
-        ));
-        assert!(!capture_rect_in_bounds(
-            ImageRect::new(-1.0, 20.0, 50.0, 50.0),
-            100,
-            100
-        ));
     }
 
     #[::core::prelude::v1::test]

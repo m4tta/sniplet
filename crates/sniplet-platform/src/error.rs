@@ -28,6 +28,9 @@ pub enum PlatformError {
     #[error("monitor index {index} does not exist (found {available} monitors)")]
     MonitorNotFound { index: usize, available: usize },
 
+    #[error("could not read the mouse pointer position: {0}")]
+    PointerPositionUnavailable(String),
+
     #[error(
         "capture region ({x}, {y}, {width}, {height}) is outside the {monitor_width}x{monitor_height} monitor"
     )]

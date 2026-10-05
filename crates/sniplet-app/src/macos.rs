@@ -1,10 +1,10 @@
 use gpui_kit::{DisplayId, Window};
-use objc2::{MainThreadMarker, rc::Retained};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSScreen, NSView, NSWindow,
-    NSWindowAnimationBehavior, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSCursor, NSEvent,
+    NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowStyleMask,
 };
-use objc2_foundation::{NSNumber, ns_string};
+use objc2_foundation::{NSNumber, NSPoint, ns_string};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -26,6 +26,102 @@ pub fn trace_capture_geometry(window: &Window) {
             native.contentView().map(|view| view.frame()),
             native.styleMask()
         );
+    }
+}
+
+pub fn trace_capture_cursor(window: &Window) {
+    let current = NSCursor::currentCursor();
+    let crosshair = NSCursor::crosshairCursor();
+    eprintln!(
+        "capture: key={}; pointer={:?}; crosshair={}",
+        native_window(window).is_some_and(|native| native.isKeyWindow()),
+        window.mouse_position(),
+        current == crosshair,
+    );
+}
+
+/// Show all capture panels before assigning keyboard focus to one display.
+pub fn show_capture_overlay(window: &Window) {
+    if let Some(native) = native_window(window) {
+        native.orderFront(None);
+    }
+}
+
+/// Cursor regions follow the key window. Keep the starting panel key during a drag.
+pub fn focus_capture(window: &Window) {
+    if let Some(native) = native_window(window) {
+        native.makeKeyWindow();
+        NSCursor::crosshairCursor().set();
+    }
+}
+
+pub fn focus_capture_under_pointer(window: &Window) {
+    let Some(native) = native_window(window) else {
+        return;
+    };
+    let pointer = NSEvent::mouseLocation();
+    let frame = native.frame();
+    if pointer.x >= frame.origin.x
+        && pointer.x < frame.origin.x + frame.size.width
+        && pointer.y >= frame.origin.y
+        && pointer.y < frame.origin.y + frame.size.height
+        && !native.isKeyWindow()
+    {
+        focus_capture(window);
+    }
+}
+
+define_class!(
+    // This view supplies cursor rectangles while GPUI handles drawing and input.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    struct CaptureCursorView;
+
+    impl CaptureCursorView {
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            self.addCursorRect_cursor(self.bounds(), &NSCursor::crosshairCursor());
+        }
+
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<&NSView> {
+            None
+        }
+    }
+);
+
+/// Give every display a native cursor region, including inactive capture panels.
+pub struct CaptureCursor(Retained<CaptureCursorView>);
+
+impl CaptureCursor {
+    pub fn new(window: &Window) -> Option<Self> {
+        let native = native_window(window)?;
+        let content = native.contentView()?;
+        let main_thread = MainThreadMarker::new()?;
+        // NSView's initializer is inherited with the same signature.
+        let view: Retained<CaptureCursorView> = unsafe {
+            msg_send![CaptureCursorView::alloc(main_thread), initWithFrame: content.bounds()]
+        };
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        content.addSubview(&view);
+        native.invalidateCursorRectsForView(&view);
+        Some(Self(view))
+    }
+}
+
+impl Drop for CaptureCursor {
+    fn drop(&mut self) {
+        self.0.removeFromSuperview();
+        NSCursor::arrowCursor().set();
+        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+            eprintln!(
+                "capture: cursor restored on overlay release; arrow={}",
+                NSCursor::currentCursor() == NSCursor::arrowCursor()
+            );
+        }
     }
 }
 

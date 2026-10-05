@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod area_capture;
 mod arrow_palette;
 mod capture;
 mod capture_overlay;

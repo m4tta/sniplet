@@ -173,7 +173,7 @@ pub struct Editor {
     last_saved: Option<PathBuf>,
     pub scroll_frames: Vec<image::RgbaImage>,
     pub scroll_region: Option<ImageRect>,
-    pub last_capture: Option<(usize, u32, ImageRect)>,
+    pub last_capture: Option<crate::area_capture::Region>,
 }
 
 impl Editor {
@@ -1345,9 +1345,7 @@ impl Editor {
             Command::Window => {
                 self.panel = None;
                 cx.notify();
-                if let Err(error) =
-                    crate::window_picker::open(self.monitor_index, cx.entity(), window, cx)
-                {
+                if let Err(error) = crate::window_picker::open(cx.entity(), window, cx) {
                     self.status = error;
                     cx.notify();
                 }
@@ -1366,7 +1364,7 @@ impl Editor {
                         command,
                         monitor: self.monitor_index,
                         region: self.scroll_region,
-                        last_capture: self.last_capture,
+                        last_capture: self.last_capture.clone(),
                     },
                     cx.entity(),
                     window,
@@ -2455,13 +2453,13 @@ impl Editor {
                     (
                         "capture-area",
                         "Capture area",
-                        "Ctrl/Cmd Shift 1",
+                        "Ctrl/Cmd Shift 2",
                         Command::Area,
                     ),
                     (
                         "capture-screen",
                         "Capture screen",
-                        "Ctrl/Cmd Shift 2",
+                        "Ctrl/Cmd Shift 1",
                         Command::Screen,
                     ),
                     (
@@ -3340,7 +3338,7 @@ impl Render for Editor {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Ctrl/Cmd + Shift + 1 · available anywhere"),
+                            .child("Ctrl/Cmd + Shift + 2 · available anywhere"),
                     ),
             );
         }

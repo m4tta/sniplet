@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use gpui_kit::{prelude::*, *};
 
 use crate::{
@@ -6,6 +8,53 @@ use crate::{
 };
 
 type CaptureWindow = fn(u32, Entity<Editor>, AnyWindowHandle, &mut App);
+
+struct Selection {
+    overlays: Vec<AnyWindowHandle>,
+    hovered: Option<u32>,
+    active_screen: Option<usize>,
+    completed: bool,
+    escape: crate::runtime::EscapeSession,
+    editor: Entity<Editor>,
+    owner: AnyWindowHandle,
+    capture: CaptureWindow,
+}
+
+impl Selection {
+    fn finish(&mut self, id: u32, cx: &mut Context<Self>) {
+        if self.completed || self.escape.is_cancelled() {
+            return;
+        }
+        self.completed = true;
+        crate::runtime::detach_escape_window(&self.escape, cx);
+        crate::runtime::end_escape_session(&self.escape, cx);
+        let overlays = std::mem::take(&mut self.overlays);
+        let capture = self.capture;
+        let editor = self.editor.clone();
+        let owner = self.owner;
+        // Remove every display panel after the current input event, then capture.
+        cx.defer(move |cx| {
+            for handle in overlays {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            capture(id, editor, owner, cx);
+        });
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        crate::runtime::cancel_escape_session(&self.escape, cx);
+        let overlays = std::mem::take(&mut self.overlays);
+        cx.defer(move |cx| {
+            for handle in overlays {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+        });
+    }
+}
 
 fn border_strips(bounds: Bounds<Pixels>, thickness: f32) -> Vec<Bounds<Pixels>> {
     let left = f32::from(bounds.origin.x);
@@ -45,51 +94,45 @@ fn non_empty(bounds: Bounds<Pixels>) -> bool {
 
 struct WindowCaptureOverlay {
     surface: CaptureSurface,
-    windows: Vec<sniplet_platform::WindowInfo>,
+    windows: Arc<Vec<sniplet_platform::WindowInfo>>,
     own_process_id: u32,
-    hovered: Option<u32>,
     pointer: Option<Point<Pixels>>,
-    editor: Entity<Editor>,
-    editor_window: AnyWindowHandle,
-    escape: crate::runtime::EscapeSession,
+    selection: Entity<Selection>,
+    screen_index: usize,
     focus: FocusHandle,
-    capture: CaptureWindow,
-    preserve_escape_on_release: bool,
+    #[cfg(target_os = "macos")]
+    _cursor: Option<crate::macos::CaptureCursor>,
 }
 
 impl WindowCaptureOverlay {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         frame: sniplet_platform::CapturedFrame,
-        windows: Vec<sniplet_platform::WindowInfo>,
+        windows: Arc<Vec<sniplet_platform::WindowInfo>>,
         own_process_id: u32,
-        editor: Entity<Editor>,
-        editor_window: AnyWindowHandle,
-        escape: crate::runtime::EscapeSession,
-        capture: CaptureWindow,
+        selection: Entity<Selection>,
+        screen_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        cx.observe(&selection, |_, _, cx| cx.notify()).detach();
         cx.on_release(|overlay, cx| {
-            if !overlay.preserve_escape_on_release {
-                crate::runtime::cancel_escape_session(&overlay.escape, cx);
-            }
+            overlay
+                .selection
+                .update(cx, |selection, cx| selection.cancel(cx));
         })
         .detach();
         Self {
             surface: CaptureSurface::new(frame),
             windows,
             own_process_id,
-            hovered: None,
             pointer: None,
-            editor,
-            editor_window,
-            escape,
+            selection,
+            screen_index,
             focus,
-            capture,
-            preserve_escape_on_release: false,
+            #[cfg(target_os = "macos")]
+            _cursor: crate::macos::CaptureCursor::new(window),
         }
     }
 
@@ -104,43 +147,54 @@ impl WindowCaptureOverlay {
 
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let hovered = self.window_at(position);
-        if self.hovered != hovered || self.pointer != Some(position) {
-            self.hovered = hovered;
-            self.pointer = Some(position);
+        self.pointer = Some(position);
+        self.selection.update(cx, |selection, cx| {
+            if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() && selection.hovered != hovered {
+                eprintln!(
+                    "window capture: screen={}; point={:?}; hovered={hovered:?}",
+                    self.screen_index,
+                    self.surface.desktop_point(position)
+                );
+            }
+            selection.hovered = hovered;
+            selection.active_screen = Some(self.screen_index);
             cx.notify();
-        }
+        });
+        cx.notify();
     }
 
-    fn select_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(id) = self.window_at(position) else {
             self.hover(position, cx);
             return;
         };
-        self.preserve_escape_on_release = true;
-        crate::runtime::detach_escape_window(&self.escape, cx);
-        crate::runtime::end_escape_session(&self.escape, cx);
-
-        let capture = self.capture;
-        let editor = self.editor.clone();
-        let editor_window = self.editor_window;
-        window.remove_window();
-        cx.defer(move |cx| capture(id, editor, editor_window, cx));
+        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+            eprintln!(
+                "window capture: selected window={id}; screen={}",
+                self.screen_index
+            );
+        }
+        self.selection
+            .update(cx, |selection, cx| selection.finish(id, cx));
     }
 
-    fn cancel(&self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::runtime::cancel_escape_session(&self.escape, cx);
-        window.remove_window();
+    fn cancel(&self, cx: &mut Context<Self>) {
+        self.selection
+            .update(cx, |selection, cx| selection.cancel(cx));
     }
 
     fn selected(
         &self,
         viewport: Size<Pixels>,
+        cx: &App,
     ) -> Option<(
         &sniplet_platform::WindowInfo,
         Bounds<Pixels>,
         Bounds<Pixels>,
     )> {
         let selected = self
+            .selection
+            .read(cx)
             .hovered
             .and_then(|id| self.windows.iter().find(|window| window.id == id))?;
         let viewport = Bounds::new(Point::default(), viewport);
@@ -158,7 +212,7 @@ impl Render for WindowCaptureOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
         let width = f32::from(viewport.width);
-        let selected = self.selected(viewport);
+        let selected = self.selected(viewport, cx);
         let mut overlay = div()
             .id("window-capture-overlay")
             .relative()
@@ -171,22 +225,24 @@ impl Render for WindowCaptureOverlay {
                     .inset_0()
                     .size_full(),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                #[cfg(target_os = "macos")]
+                crate::macos::focus_capture_under_pointer(_window);
                 this.hover(event.position, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.select_at(event.position, window, cx);
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.select_at(event.position, cx);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _, window, cx| this.cancel(window, cx)),
+                cx.listener(|this, _, _, cx| this.cancel(cx)),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
-                    this.cancel(window, cx);
+                    this.cancel(cx);
                 }
             }));
 
@@ -292,7 +348,9 @@ impl Render for WindowCaptureOverlay {
             overlay = overlay.child(div().absolute().inset_0().bg(rgba(0x00000058)));
         }
 
-        if let Some(pointer) = self.pointer {
+        if let Some(pointer) = self.pointer
+            && self.selection.read(cx).active_screen == Some(self.screen_index)
+        {
             let camera = div()
                 .id("window-capture-camera")
                 .absolute()
@@ -358,12 +416,7 @@ impl Render for WindowCaptureOverlay {
     }
 }
 
-pub(crate) fn open(
-    monitor: usize,
-    editor: Entity<Editor>,
-    window: &Window,
-    cx: &mut App,
-) -> Result<(), String> {
+pub(crate) fn open(editor: Entity<Editor>, window: &Window, cx: &mut App) -> Result<(), String> {
     let editor_window = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
     let hide_delay = crate::runtime::hide_for_capture(window);
@@ -378,9 +431,9 @@ pub(crate) fn open(
         let snapshot = cx
             .background_executor()
             .spawn(async move {
-                let frame = sniplet_platform::capture_monitor(monitor)?;
+                let frames = sniplet_platform::capture_monitors()?;
                 let windows = sniplet_platform::list_windows()?;
-                Ok::<_, sniplet_platform::PlatformError>((frame, windows))
+                Ok::<_, sniplet_platform::PlatformError>((frames, windows))
             })
             .await;
         cx.update(|cx| {
@@ -389,9 +442,9 @@ pub(crate) fn open(
                 return;
             }
             match snapshot {
-                Ok((frame, windows)) => {
+                Ok((frames, windows)) => {
                     if let Err(error) = open_snapshot(
-                        frame,
+                        frames,
                         windows,
                         std::process::id(),
                         editor.clone(),
@@ -415,7 +468,7 @@ pub(crate) fn open(
 
 #[allow(clippy::too_many_arguments)]
 fn open_snapshot(
-    frame: sniplet_platform::CapturedFrame,
+    frames: Vec<sniplet_platform::CapturedFrame>,
     windows: Vec<sniplet_platform::WindowInfo>,
     own_process_id: u32,
     editor: Entity<Editor>,
@@ -423,49 +476,87 @@ fn open_snapshot(
     escape: crate::runtime::EscapeSession,
     capture: CaptureWindow,
     cx: &mut App,
-) -> Result<AnyWindowHandle, String> {
-    let (bounds, display_id) = crate::capture_overlay::captured_frame_placement(&frame, cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id,
-        show: !cfg!(target_os = "macos"),
-        kind: if cfg!(target_os = "macos") {
-            WindowKind::PopUp
-        } else {
-            WindowKind::Normal
-        },
-        app_id: Some(sniplet_platform::APP_ID.into()),
-        window_decorations: Some(WindowDecorations::Client),
-        ..Default::default()
-    };
-    let overlay_escape = escape.clone();
-    let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-        #[cfg(target_os = "macos")]
-        crate::macos::prepare_capture_overlay(window, display_id);
-        window.set_window_title("Sniplet — Capture window");
-        cx.new(|cx| {
-            WindowCaptureOverlay::new(
-                frame,
-                windows,
-                own_process_id,
-                editor,
-                editor_window,
-                overlay_escape,
-                capture,
-                window,
-                cx,
-            )
-        })
-    })
-    .map_err(|error| error.to_string())?;
-    let handle = opened.0;
-    crate::runtime::attach_escape_window(&escape, handle, cx);
-    let _ = handle.update(cx, |_, window, _| window.activate_window());
-    Ok(handle)
+) -> Result<Vec<AnyWindowHandle>, String> {
+    if frames.is_empty() {
+        return Err("No displays are available".into());
+    }
+    let windows = Arc::new(windows);
+    let selection = cx.new(|_| Selection {
+        overlays: Vec::new(),
+        hovered: None,
+        active_screen: None,
+        completed: false,
+        escape: escape.clone(),
+        editor,
+        owner: editor_window,
+        capture,
+    });
+    for (screen_index, frame) in frames.into_iter().enumerate() {
+        let (bounds, display_id) = crate::capture_overlay::captured_frame_placement(&frame, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id,
+            show: !cfg!(target_os = "macos"),
+            kind: if cfg!(target_os = "macos") {
+                WindowKind::PopUp
+            } else {
+                WindowKind::Normal
+            },
+            app_id: Some(sniplet_platform::APP_ID.into()),
+            window_decorations: Some(WindowDecorations::Client),
+            ..Default::default()
+        };
+        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+            eprintln!(
+                "window capture: display={display_id:?}; origin={:?}; image={:?}",
+                frame.origin,
+                frame.image.dimensions()
+            );
+        }
+        let opened = gpui_kit::open_window(options, cx, |window, cx| {
+            #[cfg(target_os = "macos")]
+            crate::macos::prepare_capture_overlay(window, display_id);
+            window.set_window_title("Sniplet — Capture window");
+            cx.new(|cx| {
+                WindowCaptureOverlay::new(
+                    frame,
+                    windows.clone(),
+                    own_process_id,
+                    selection.clone(),
+                    screen_index,
+                    window,
+                    cx,
+                )
+            })
+        });
+        let handle = match opened {
+            Ok((handle, _)) => handle,
+            Err(error) => {
+                selection.update(cx, |selection, cx| selection.cancel(cx));
+                return Err(error.to_string());
+            }
+        };
+        crate::runtime::attach_escape_window(&escape, handle, cx);
+        selection.update(cx, |selection, _| selection.overlays.push(handle));
+        let _ = handle.update(cx, |_, window, _| {
+            #[cfg(target_os = "macos")]
+            crate::macos::show_capture_overlay(window);
+            #[cfg(not(target_os = "macos"))]
+            window.activate_window();
+        });
+    }
+    let overlays = selection.read(cx).overlays.clone();
+    #[cfg(target_os = "macos")]
+    for handle in &overlays {
+        let _ = handle.update(cx, |_, window, _| {
+            crate::macos::focus_capture_under_pointer(window)
+        });
+    }
+    Ok(overlays)
 }
 
 fn fail_open(
@@ -564,7 +655,7 @@ mod tests {
         cx: &mut App,
     ) -> AnyWindowHandle {
         open_snapshot(
-            frame(),
+            vec![frame()],
             windows,
             std::process::id(),
             editor,
@@ -573,7 +664,106 @@ mod tests {
             observe_selection,
             cx,
         )
-        .unwrap()
+        .unwrap()[0]
+    }
+
+    #[gpui_kit::test]
+    fn external_window_selection_closes_every_display_before_capture(cx: &mut TestAppContext) {
+        SELECTED.set(None);
+        let (owner, editor) = editor(cx);
+        let overlays = cx.update(|cx| {
+            let primary = frame();
+            let mut external = frame();
+            external.origin = sniplet_platform::ScreenPoint { x: -500, y: -350 };
+            external.scale_factor = 2.0;
+            external.source = sniplet_platform::CaptureSource::Monitor { index: 1, id: 8 };
+            open_snapshot(
+                vec![primary, external],
+                vec![fixture(42, -480, -330, 1)],
+                std::process::id(),
+                editor,
+                owner,
+                crate::runtime::EscapeSession::detached(),
+                observe_selection,
+                cx,
+            )
+            .unwrap()
+        });
+        assert_eq!(overlays.len(), 2);
+        cx.update_window(overlays[1], |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at("window-capture-overlay", point(px(50.0), px(50.0)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(SELECTED.get(), Some((42, 1)));
+        for overlay in overlays {
+            assert!(cx.update_window(overlay, |_, _, _| {}).is_err());
+        }
+    }
+
+    #[gpui_kit::test]
+    fn spanning_window_highlights_both_displays_and_escape_closes_both(cx: &mut TestAppContext) {
+        SELECTED.set(None);
+        let (owner, editor) = editor(cx);
+        let escape = cx.update(crate::runtime::begin_escape_session);
+        let observed_escape = escape.clone();
+        let overlays = cx.update(|cx| {
+            let mut external = frame();
+            external.origin.y = if cfg!(target_os = "windows") {
+                -600
+            } else {
+                -300
+            };
+            external.scale_factor = 2.0;
+            external.source = sniplet_platform::CaptureSource::Monitor { index: 1, id: 8 };
+            open_snapshot(
+                vec![frame(), external],
+                vec![fixture(70, 40, -100, 1)],
+                std::process::id(),
+                editor,
+                owner,
+                escape,
+                observe_selection,
+                cx,
+            )
+            .unwrap()
+        });
+        cx.update_window(overlays[1], |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_event(
+                MouseMoveEvent {
+                    pressed_button: None,
+                    position: point(px(150.0), px(290.0)),
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        for overlay in &overlays {
+            cx.update_window(*overlay, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.find(("window-capture-highlight", 70usize)).visible());
+            })
+            .unwrap();
+        }
+        cx.update_window(overlays[0], |_, window, _| {
+            assert!(window.try_find("window-capture-camera").is_none());
+        })
+        .unwrap();
+        cx.update_window(overlays[1], |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(observed_escape.is_cancelled());
+        assert_eq!(SELECTED.get(), None);
+        for overlay in overlays {
+            assert!(cx.update_window(overlay, |_, _, _| {}).is_err());
+        }
+        cx.update(|cx| assert_ne!(cx.active_window(), Some(owner)));
     }
 
     #[gpui_kit::test]

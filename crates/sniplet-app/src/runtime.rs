@@ -50,7 +50,7 @@ impl EscapeSession {
 struct EscapeRegistration {
     session: EscapeSession,
     key: Option<HotKey>,
-    overlay: Option<AnyWindowHandle>,
+    overlays: Vec<AnyWindowHandle>,
 }
 
 pub fn has_tray(cx: &App) -> bool {
@@ -345,7 +345,7 @@ pub fn begin_escape_session(cx: &mut App) -> EscapeSession {
     };
     if let Some(previous) = previous {
         previous.session.cancellation.cancel();
-        if let Some(overlay) = previous.overlay {
+        for overlay in previous.overlays {
             let _ = overlay.update(cx, |_, window, _| window.remove_window());
         }
     }
@@ -363,7 +363,7 @@ pub fn begin_escape_session(cx: &mut App) -> EscapeSession {
     services.escape = Some(EscapeRegistration {
         session: session.clone(),
         key,
-        overlay: None,
+        overlays: Vec::new(),
     });
     session
 }
@@ -373,7 +373,7 @@ pub fn attach_escape_window(session: &EscapeSession, overlay: AnyWindowHandle, c
         && let Some(registration) = &mut cx.global_mut::<Services>().escape
         && registration.session.id == session.id
     {
-        registration.overlay = Some(overlay);
+        registration.overlays.push(overlay);
     }
 }
 
@@ -382,7 +382,7 @@ pub fn detach_escape_window(session: &EscapeSession, cx: &mut App) {
         && let Some(registration) = &mut cx.global_mut::<Services>().escape
         && registration.session.id == session.id
     {
-        registration.overlay = None;
+        registration.overlays.clear();
     }
 }
 
@@ -420,7 +420,7 @@ pub(crate) fn cancel_active_escape(cx: &mut App) {
         return;
     };
     registration.session.cancellation.cancel();
-    if let Some(overlay) = registration.overlay {
+    for overlay in registration.overlays {
         let _ = overlay.update(cx, |_, window, _| window.remove_window());
     }
 }
@@ -586,7 +586,7 @@ mod tests {
         EscapeRegistration {
             session,
             key: None,
-            overlay: None,
+            overlays: Vec::new(),
         }
     }
 
@@ -614,8 +614,8 @@ mod tests {
 
     #[cfg(feature = "ui-tests")]
     #[gpui_kit::test]
-    fn active_escape_removes_overlay_without_activating_editor(cx: &mut TestAppContext) {
-        let (owner, overlay, background, session) = cx.update(|cx| {
+    fn active_escape_removes_all_overlays_without_activating_editor(cx: &mut TestAppContext) {
+        let (owner, overlay, second_overlay, background, session) = cx.update(|cx| {
             gpui_kit::init(cx);
             install_test_services(cx);
             let (owner, _) = gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
@@ -628,11 +628,17 @@ mod tests {
             })
             .unwrap();
             attach_escape_window(&session, overlay, cx);
+            let (second_overlay, _) =
+                gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                    cx.new(|_| EmptyWindow)
+                })
+                .unwrap();
+            attach_escape_window(&session, second_overlay, cx);
             let (background, _) = gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
                 cx.new(|_| EmptyWindow)
             })
             .unwrap();
-            (owner, overlay, background, session)
+            (owner, overlay, second_overlay, background, session)
         });
 
         cx.update_window(background, |_, window, _| window.activate_window())
@@ -646,6 +652,7 @@ mod tests {
             assert_eq!(cx.active_window(), Some(background));
         });
         assert!(!cx.windows().contains(&overlay));
+        assert!(!cx.windows().contains(&second_overlay));
         assert!(cx.windows().contains(&owner));
     }
 }
