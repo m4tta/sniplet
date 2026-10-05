@@ -61,6 +61,9 @@ pub struct Project {
     pub version: u32,
     pub source_image: PathBuf,
     pub source_size: ImageSize,
+    /// Physical pixels per point for captures. Older projects use the display scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scale_factor: Option<f32>,
     /// Editable canvas dimensions. Projects created before canvas expansion
     /// omit this field and open at the source image size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +118,7 @@ impl Project {
 pub struct Document {
     original: Arc<RgbaImage>,
     original_is_opaque: bool,
+    source_scale_factor: Option<f32>,
     canvas_size: ImageSize,
     annotations: Vec<Annotation>,
     selected: Option<AnnotationId>,
@@ -137,6 +141,18 @@ struct EditState {
 }
 
 impl Document {
+    /// Base pixels after raster edits, without pasted images, drawings, crop, or backdrop.
+    pub(crate) fn raster_copy(&self) -> Self {
+        let mut raster = Self::new(self.original().clone());
+        raster.annotations = self
+            .annotations
+            .iter()
+            .filter(|a| a.kind.composite_layer() == crate::annotation::CompositeLayer::Raster)
+            .cloned()
+            .collect();
+        raster
+    }
+
     pub fn new(original: RgbaImage) -> Self {
         let canvas_size = ImageSize {
             width: original.width(),
@@ -146,6 +162,7 @@ impl Document {
         Self {
             original: Arc::new(original),
             original_is_opaque,
+            source_scale_factor: None,
             canvas_size,
             annotations: Vec::new(),
             selected: None,
@@ -186,6 +203,9 @@ impl Document {
             .unwrap_or(0)
             .saturating_add(1);
         let mut document = Self::new(original);
+        if let Some(scale) = project.source_scale_factor {
+            document.set_source_scale_factor(scale);
+        }
         document.canvas_size = project
             .canvas_size
             .map(|size| ImageSize {
@@ -215,11 +235,21 @@ impl Document {
                 width: self.original.width(),
                 height: self.original.height(),
             },
+            source_scale_factor: self.source_scale_factor,
             canvas_size: Some(self.canvas_size),
             annotations: self.annotations.clone(),
             crop: self.crop,
             backdrop: self.backdrop,
         }
+    }
+
+    /// Capture scale, when recorded with the source image.
+    pub fn source_scale_factor(&self) -> Option<f32> {
+        self.source_scale_factor
+    }
+
+    pub fn set_source_scale_factor(&mut self, scale: f32) {
+        self.source_scale_factor = scale.is_finite().then(|| scale.clamp(1.0, 8.0));
     }
 
     /// The immutable, undecorated source pixels.
@@ -548,12 +578,16 @@ impl Document {
 
     /// Returns the topmost annotation under an image-space point.
     pub fn hit_test(&self, point: Point, tolerance: f32) -> Option<AnnotationId> {
-        self.annotations.iter().rev().find_map(|annotation| {
-            annotation
-                .kind
-                .hit_test(point, tolerance.max(0.0), annotation.style.stroke_width)
-                .then_some(annotation.id)
-        })
+        self.annotations
+            .iter()
+            .enumerate()
+            .filter(|(_, annotation)| {
+                annotation
+                    .kind
+                    .hit_test(point, tolerance.max(0.0), annotation.style.stroke_width)
+            })
+            .max_by_key(|(index, annotation)| (annotation.kind.composite_layer(), *index))
+            .map(|(_, annotation)| annotation.id)
     }
 
     pub fn select_at(&mut self, point: Point, tolerance: f32) -> Option<AnnotationId> {

@@ -146,7 +146,8 @@ impl Tool {
                 bend: None,
                 variant: Default::default(),
             },
-            Self::Line | Self::Ruler => AnnotationKind::Line { start, end },
+            Self::Ruler => return None,
+            Self::Line => AnnotationKind::Line { start, end },
             Self::Rectangle => AnnotationKind::Rectangle { rect },
             Self::Ellipse => AnnotationKind::Ellipse { rect },
             Self::Text => AnnotationKind::Text {
@@ -171,7 +172,21 @@ impl Tool {
             Self::Blur => AnnotationKind::Blur { rect, radius: 8.0 },
             Self::Redact => AnnotationKind::Redaction { rect },
             Self::Erase => AnnotationKind::RemoveFill { rect, sample: None },
-            Self::Zoom => AnnotationKind::Magnifier { rect, zoom: 2.0 },
+            Self::Zoom => {
+                let radius = rect.width.max(rect.height) * 0.5;
+                let source = Point::new(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
+                let lens = Point::new(source.x + radius * 4.25, source.y + radius * 2.75);
+                AnnotationKind::Magnifier {
+                    rect: ImageRect::new(
+                        lens.x - radius * 3.0,
+                        lens.y - radius * 3.0,
+                        radius * 6.0,
+                        radius * 6.0,
+                    ),
+                    zoom: 3.0,
+                    source: Some(source),
+                }
+            }
             Self::Select => return None,
         })
     }

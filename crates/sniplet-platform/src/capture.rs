@@ -6,6 +6,9 @@ use xcap::{Monitor, Window};
 
 use crate::{PlatformError, Result};
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenPoint {
     pub x: i32,
@@ -152,6 +155,8 @@ pub fn capture_monitor(index: usize) -> Result<CapturedFrame> {
 }
 
 fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
+    let started = std::time::Instant::now();
+    let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
     let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
         kind: "monitors",
         source: Box::new(source),
@@ -161,10 +166,19 @@ fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
         .into_iter()
         .nth(index)
         .ok_or(PlatformError::MonitorNotFound { index, available })?;
+    if trace {
+        eprintln!("capture backend: display lookup {:?}", started.elapsed());
+    }
     let info = monitor_info(index, &monitor)?;
+    if trace {
+        eprintln!("capture backend: display metadata {:?}", started.elapsed());
+    }
     let image = monitor
         .capture_image()
         .map_err(|source| PlatformError::Capture(Box::new(source)))?;
+    if trace {
+        eprintln!("capture backend: image {:?}", started.elapsed());
+    }
     Ok(CapturedFrame {
         image,
         origin: ScreenPoint {
@@ -307,6 +321,11 @@ fn list_windows_impl() -> Result<Vec<WindowInfo>> {
         let style = unsafe { GetWindowLongPtrW(handle, GWL_EXSTYLE) } as u32;
         style & WS_EX_TOOLWINDOW.0 == 0
     });
+    #[cfg(target_os = "macos")]
+    let windows = {
+        let ids = macos::application_window_ids()?;
+        windows.filter(move |window| ids.contains(&window.id))
+    };
     Ok(windows.collect())
 }
 
@@ -446,6 +465,43 @@ mod tests {
             is_maximized: false,
             is_focused: false,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_window_picker_excludes_full_display_dock_window() {
+        use core_foundation::{
+            array::CFArray, base::TCFType, dictionary::CFDictionary, number::CFNumber,
+            string::CFString,
+        };
+
+        let metadata = [(1, 20), (2, 0)].map(|(id, layer)| {
+            CFDictionary::from_CFType_pairs(&[
+                (
+                    CFString::new("kCGWindowNumber"),
+                    CFNumber::from(id).as_CFType(),
+                ),
+                (
+                    CFString::new("kCGWindowLayer"),
+                    CFNumber::from(layer).as_CFType(),
+                ),
+            ])
+        });
+        let ids =
+            macos::application_window_ids_from_info(&CFArray::from_CFTypes(&metadata).to_untyped());
+        let mut dock = window(1, 10, 0, 0, 20);
+        dock.app_name = "Dock".into();
+        dock.width = 2056;
+        dock.height = 1329;
+        let mut preview = window(2, 20, 4, 43, 11);
+        preview.app_name = "Preview".into();
+        let windows: Vec<_> = [dock, preview]
+            .into_iter()
+            .filter(|window| ids.contains(&window.id))
+            .collect();
+
+        let selected = window_at_point(&windows, ScreenPoint { x: 100, y: 100 }, 0).unwrap();
+        assert_eq!(selected.app_name, "Preview");
     }
 
     #[test]

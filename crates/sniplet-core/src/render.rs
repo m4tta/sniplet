@@ -1,4 +1,4 @@
-use ab_glyph::{FontRef, PxScale};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{Pixel, Rgba, RgbaImage};
 use imageproc::{
     drawing::{
@@ -11,7 +11,8 @@ use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform
 
 use crate::{
     Annotation, AnnotationKind, ArrowVariant, Backdrop, Background, Color, Document, ImageRect,
-    Point, Result, Shadow, SnipletError,
+    Measurement, Point, Result, Shadow, SnipletError,
+    annotation::CompositeLayer,
     geometry::{
         ArrowHeadGeometry, QuadraticCurve, arrow_geometry, distance_to_segment, quadratic_bounds,
     },
@@ -22,7 +23,7 @@ pub struct RenderOptions<'a> {
     pub font_bytes: Option<&'a [u8]>,
     pub apply_crop: bool,
     pub apply_backdrop: bool,
-    /// Transient annotations drawn after the document list, useful for live previews.
+    /// Transient annotations placed last within each layer, useful for live previews.
     pub extra_annotations: &'a [Annotation],
 }
 
@@ -37,7 +38,134 @@ impl Default for RenderOptions<'_> {
     }
 }
 
+impl Measurement {
+    /// Uses the same small overlay for the live ruler and the exported imprint.
+    pub fn overlay(self, font_bytes: &[u8]) -> Result<(ImageRect, RgbaImage)> {
+        let font = FontRef::try_from_slice(font_bytes).map_err(|_| SnipletError::InvalidFont)?;
+        self.overlay_with_font(&font)
+    }
+
+    fn overlay_with_font(self, font: &FontRef<'_>) -> Result<(ImageRect, RgbaImage)> {
+        if ![self.start.x, self.start.y, self.end.x, self.end.y]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(SnipletError::InvalidAnnotationBounds);
+        }
+        let scale = self.scale();
+        let text = self.label();
+        let font_size = 14.0 * scale;
+        let (tw, _) = text_size(PxScale::from(font_size), font, &text);
+        let scaled = font.as_scaled(font_size);
+        let (text_top, text_bottom) = text
+            .chars()
+            .filter_map(|character| {
+                font.outline_glyph(
+                    font.glyph_id(character)
+                        .with_scale_and_position(font_size, ab_glyph::point(0.0, scaled.ascent())),
+                )
+            })
+            .map(|glyph| glyph.px_bounds())
+            .fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(top, bottom), bounds| (top.min(bounds.min.y), bottom.max(bounds.max.y)),
+            );
+        let horizontal = (self.end.x - self.start.x).abs() >= (self.end.y - self.start.y).abs();
+        let middle = Point::new(
+            (self.start.x + self.end.x) * 0.5,
+            (self.start.y + self.end.y) * 0.5,
+        );
+        let (w, h) = (
+            tw as f32 + 8.0 * scale,
+            text_bottom - text_top + 4.0 * scale,
+        );
+        let label = if horizontal {
+            ImageRect::new(middle.x - w * 0.5, middle.y - h - 4.0 * scale, w, h)
+        } else {
+            ImageRect::new(middle.x + 4.0 * scale, middle.y - h * 0.5, w, h)
+        };
+        let bounds = union_rect(
+            ImageRect::from_corners(self.start, self.end).expanded(5.0 * scale),
+            label,
+        )
+        .expanded(1.0);
+        let origin = Point::new(bounds.x.floor(), bounds.y.floor());
+        let mut overlay = RgbaImage::new(
+            (bounds.x + bounds.width - origin.x).ceil() as u32,
+            (bounds.y + bounds.height - origin.y).ceil() as u32,
+        );
+        let local = |p: Point| Point::new(p.x - origin.x, p.y - origin.y);
+        let red = Rgba([255, 59, 48, 255]);
+        draw_thick_line(&mut overlay, local(self.start), local(self.end), scale, red);
+        for end in [self.start, self.end] {
+            let (a, b) = if horizontal {
+                (
+                    Point::new(end.x, end.y - 4.0 * scale),
+                    Point::new(end.x, end.y + 4.0 * scale),
+                )
+            } else {
+                (
+                    Point::new(end.x - 4.0 * scale, end.y),
+                    Point::new(end.x + 4.0 * scale, end.y),
+                )
+            };
+            draw_thick_line(&mut overlay, local(a), local(b), scale, red);
+        }
+        draw_rect_fill(
+            &mut overlay,
+            label.translated(Point::new(-origin.x, -origin.y)),
+            red,
+        );
+        draw_label(
+            &mut overlay,
+            local(Point::new(
+                label.x + 4.0 * scale,
+                label.y + 2.0 * scale - text_top,
+            )),
+            &text,
+            font_size,
+            Rgba([255, 255, 255, 255]),
+            font,
+        );
+        Ok((
+            ImageRect::new(
+                origin.x,
+                origin.y,
+                overlay.width() as f32,
+                overlay.height() as f32,
+            ),
+            overlay,
+        ))
+    }
+}
+
 impl Document {
+    /// Measurement reads visible base pixels and reports their origin in source coordinates.
+    pub fn render_measurement_source(
+        &self,
+        options: &RenderOptions<'_>,
+    ) -> Result<(RgbaImage, Point)> {
+        let source = self.render_raster(options)?;
+        let Some(crop) = self.crop() else {
+            return Ok((source, Point::default()));
+        };
+        Ok(match crop.pixel_bounds(source.width(), source.height()) {
+            Some((left, top, right, bottom)) => (
+                image::imageops::crop_imm(&source, left, top, right - left, bottom - top)
+                    .to_image(),
+                Point::new(left as f32, top as f32),
+            ),
+            None => (RgbaImage::new(0, 0), Point::default()),
+        })
+    }
+
+    pub fn render_raster(&self, options: &RenderOptions<'_>) -> Result<RgbaImage> {
+        self.raster_copy().render_source(&RenderOptions {
+            extra_annotations: &[],
+            ..*options
+        })
+    }
+
     pub fn render(&self, options: &RenderOptions<'_>) -> Result<RgbaImage> {
         let font = match options.font_bytes {
             Some(bytes) => {
@@ -58,14 +186,27 @@ impl Document {
             image::imageops::overlay(&mut canvas, self.original(), 0, 0);
             canvas
         };
-        let annotations: Vec<_> = self
+        let mut annotations: Vec<_> = self
             .annotations()
             .iter()
             .chain(options.extra_annotations.iter())
             .collect();
-        draw_spotlights(&mut canvas, &annotations);
+        annotations.sort_by_key(|annotation| annotation.kind.composite_layer());
+        let (base, drawings) = annotations.split_at(annotations.partition_point(|annotation| {
+            annotation.kind.composite_layer() < CompositeLayer::Spotlight
+        }));
         let mut annotation_layer = None;
-        for annotation in annotations {
+        for annotation in base {
+            draw_annotation(
+                &mut canvas,
+                self.original(),
+                annotation,
+                font.as_ref(),
+                &mut annotation_layer,
+            )?;
+        }
+        draw_spotlights(&mut canvas, &annotations);
+        for annotation in drawings {
             draw_annotation(
                 &mut canvas,
                 self.original(),
@@ -126,6 +267,11 @@ fn draw_annotation(
     annotation_layer: &mut Option<RgbaImage>,
 ) -> Result<()> {
     match &annotation.kind {
+        AnnotationKind::Measurement { measurement } => {
+            let (bounds, overlay) =
+                measurement.overlay_with_font(font.ok_or(SnipletError::MissingFont)?)?;
+            image::imageops::overlay(canvas, &overlay, bounds.x as i64, bounds.y as i64);
+        }
         AnnotationKind::Pixelate { rect, block_size } => {
             pixelate(canvas, *rect, (*block_size).max(2));
         }
@@ -180,10 +326,14 @@ fn draw_annotation(
             *variant,
             CompositeMode::Over,
         ),
-        AnnotationKind::Magnifier { rect, zoom } => {
+        AnnotationKind::Magnifier { rect, zoom, .. } => {
             let layer = annotation_layer
                 .get_or_insert_with(|| RgbaImage::new(canvas.width(), canvas.height()));
-            draw_magnifier(layer, source, *rect, *zoom, annotation);
+            if annotation.kind.magnifier_circles().is_some() {
+                draw_linked_magnifier(layer, source, annotation);
+            } else {
+                draw_magnifier(layer, source, *rect, *zoom, annotation);
+            }
             composite_annotation_layer(
                 canvas,
                 layer,
@@ -317,6 +467,7 @@ fn draw_layer_annotation(
             annotation.style.fill.unwrap_or(Color::BLACK).into(),
         ),
         AnnotationKind::Pixelate { .. }
+        | AnnotationKind::Measurement { .. }
         | AnnotationKind::Blur { .. }
         | AnnotationKind::Spotlight { .. }
         | AnnotationKind::RemoveFill { .. }
@@ -348,7 +499,7 @@ fn annotation_layer_bounds(
             }
             ImageRect::from_corners(*start, *end).expanded(stroke_padding)
         }
-        AnnotationKind::Arrow { .. } => return None,
+        AnnotationKind::Arrow { .. } | AnnotationKind::Measurement { .. } => return None,
         AnnotationKind::Rectangle { rect } | AnnotationKind::Ellipse { rect } => {
             if !finite(&[rect.x, rect.y, rect.width, rect.height]) {
                 return full();
@@ -406,9 +557,20 @@ fn annotation_layer_bounds(
             }
             bounds
         }
-        AnnotationKind::Highlight { rect }
-        | AnnotationKind::Redaction { rect }
-        | AnnotationKind::Magnifier { rect, .. } => {
+        AnnotationKind::Magnifier { .. } => {
+            let bounds = annotation.kind.bounds();
+            if !finite(&[
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                stroke_padding,
+            ]) {
+                return full();
+            }
+            bounds.expanded(stroke_padding)
+        }
+        AnnotationKind::Highlight { rect } | AnnotationKind::Redaction { rect } => {
             if !finite(&[rect.x, rect.y, rect.width, rect.height]) {
                 return full();
             }
@@ -488,6 +650,92 @@ fn draw_spotlights(canvas: &mut RgbaImage, annotations: &[&Annotation]) {
                 canvas.get_pixel_mut(x, y).blend(&dim);
             }
         }
+    }
+}
+
+fn draw_linked_magnifier(canvas: &mut RgbaImage, source: &RgbaImage, annotation: &Annotation) {
+    let Some([sample, lens]) = annotation.kind.magnifier_circles() else {
+        return;
+    };
+    let Some((left, top, right, bottom)) =
+        annotation_layer_bounds(annotation, None, canvas.width(), canvas.height())
+    else {
+        return;
+    };
+    let Some(mut mask) = Pixmap::new(right - left, bottom - top) else {
+        return;
+    };
+    let center =
+        |rect: ImageRect| Point::new(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
+    let lens_center = center(lens);
+    let sample_center = center(sample);
+    let zoom = lens.width / sample.width;
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    let mut path = PathBuilder::new();
+    path.push_circle(
+        lens_center.x - left as f32,
+        lens_center.y - top as f32,
+        lens.width * 0.5,
+    );
+    if let Some(path) = path.finish() {
+        mask.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+        for (index, pixel) in mask.pixels().iter().enumerate() {
+            if pixel.alpha() == 0 {
+                continue;
+            }
+            let x = left + index as u32 % mask.width();
+            let y = top + index as u32 / mask.width();
+            let sx = ((x as f32 + 0.5 - lens_center.x) / zoom + sample_center.x).floor();
+            let sy = ((y as f32 + 0.5 - lens_center.y) / zoom + sample_center.y).floor();
+            if sx < 0.0 || sy < 0.0 || sx >= source.width() as f32 || sy >= source.height() as f32 {
+                continue;
+            }
+            let mut color = *source.get_pixel(sx as u32, sy as u32);
+            color[3] = ((color[3] as u16 * pixel.alpha() as u16 + 127) / 255) as u8;
+            canvas.put_pixel(x, y, color);
+        }
+    }
+    mask.fill(tiny_skia::Color::TRANSPARENT);
+    let mut path = PathBuilder::new();
+    for circle in [sample, lens] {
+        let center = center(circle);
+        path.push_circle(
+            center.x - left as f32,
+            center.y - top as f32,
+            circle.width * 0.5,
+        );
+    }
+    if let Some([start, end]) = annotation.kind.magnifier_connector() {
+        path.move_to(start.x - left as f32, start.y - top as f32);
+        path.line_to(end.x - left as f32, end.y - top as f32);
+    }
+    if let Some(path) = path.finish() {
+        mask.stroke_path(
+            &path,
+            &paint,
+            &Stroke {
+                width: annotation.style.stroke_width.max(1.0),
+                ..Stroke::default()
+            },
+            Transform::identity(),
+            None,
+        );
+        composite_mask(
+            canvas,
+            &mask,
+            left,
+            top,
+            annotation.style.stroke.into(),
+            CompositeMode::Over,
+        );
     }
 }
 
@@ -1250,7 +1498,10 @@ mod tests {
 
     const TEST_FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
 
-    fn legacy_render(document: &Document, options: &RenderOptions<'_>) -> Result<RgbaImage> {
+    fn full_canvas_reference(
+        document: &Document,
+        options: &RenderOptions<'_>,
+    ) -> Result<RgbaImage> {
         let font = match options.font_bytes {
             Some(bytes) => {
                 Some(FontRef::try_from_slice(bytes).map_err(|_| SnipletError::InvalidFont)?)
@@ -1264,9 +1515,29 @@ mod tests {
             .iter()
             .chain(options.extra_annotations.iter())
             .collect();
-        legacy_draw_spotlights(&mut canvas, &annotations);
-        for annotation in annotations {
-            legacy_draw_annotation(&mut canvas, document.original(), annotation, font.as_ref())?;
+        // Keep the full-canvas allocation path independent of the optimized
+        // renderer, with the same required base/image/shade/drawing order.
+        for layer in [
+            CompositeLayer::Raster,
+            CompositeLayer::Image,
+            CompositeLayer::Spotlight,
+            CompositeLayer::Drawing,
+        ] {
+            if layer == CompositeLayer::Spotlight {
+                legacy_draw_spotlights(&mut canvas, &annotations);
+                continue;
+            }
+            for annotation in annotations
+                .iter()
+                .filter(|annotation| annotation.kind.composite_layer() == layer)
+            {
+                legacy_draw_annotation(
+                    &mut canvas,
+                    document.original(),
+                    annotation,
+                    font.as_ref(),
+                )?;
+            }
         }
         if options.apply_crop
             && let Some(crop) = document.crop()
@@ -1289,6 +1560,11 @@ mod tests {
         font: Option<&FontRef<'_>>,
     ) -> Result<()> {
         match &annotation.kind {
+            AnnotationKind::Measurement { measurement } => {
+                let (bounds, overlay) =
+                    measurement.overlay_with_font(font.ok_or(SnipletError::MissingFont)?)?;
+                image::imageops::overlay(canvas, &overlay, bounds.x as i64, bounds.y as i64);
+            }
             AnnotationKind::Pixelate { rect, block_size } => {
                 pixelate(canvas, *rect, (*block_size).max(2));
             }
@@ -1324,9 +1600,13 @@ mod tests {
                     origin.y.round() as i64,
                 );
             }
-            AnnotationKind::Magnifier { rect, zoom } => {
+            AnnotationKind::Magnifier { rect, zoom, .. } => {
                 let mut layer = RgbaImage::new(canvas.width(), canvas.height());
-                draw_magnifier(&mut layer, source, *rect, *zoom, annotation);
+                if annotation.kind.magnifier_circles().is_some() {
+                    draw_linked_magnifier(&mut layer, source, annotation);
+                } else {
+                    draw_magnifier(&mut layer, source, *rect, *zoom, annotation);
+                }
                 image::imageops::overlay(canvas, &layer, 0, 0);
             }
             AnnotationKind::Spotlight { .. } => {}
@@ -1470,6 +1750,14 @@ mod tests {
             stroke_width: 5.5,
         };
         let kinds = [
+            AnnotationKind::Measurement {
+                measurement: Measurement {
+                    start: Point::new(2.0, 2.0),
+                    end: Point::new(38.0, 2.0),
+                    pixels_per_unit: 2.0,
+                    scale_factor: 2.0,
+                },
+            },
             AnnotationKind::Line {
                 start: Point::new(2.25, 4.75),
                 end: Point::new(83.5, 62.25),
@@ -1546,6 +1834,12 @@ mod tests {
             AnnotationKind::Magnifier {
                 rect: ImageRect::new(39.2, 23.8, 25.7, 22.4),
                 zoom: 2.5,
+                source: None,
+            },
+            AnnotationKind::Magnifier {
+                rect: ImageRect::new(76.0, -4.0, 40.0, 40.0),
+                zoom: 3.0,
+                source: Some(Point::new(4.0, 5.0)),
             },
         ];
         for kind in kinds {
@@ -1599,7 +1893,7 @@ mod tests {
             extra_annotations: std::slice::from_ref(&preview),
         };
 
-        let expected = legacy_render(&document, &options).unwrap();
+        let expected = full_canvas_reference(&document, &options).unwrap();
         let actual = document.render(&options).unwrap();
         assert_eq!(actual.dimensions(), expected.dimensions());
         for (x, y, pixel) in actual.enumerate_pixels() {

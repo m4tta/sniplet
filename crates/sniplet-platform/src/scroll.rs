@@ -139,13 +139,13 @@ pub enum AutomaticScrollStop {
 
 #[derive(Debug, Clone)]
 pub struct AutomaticScrollOptions {
-    /// Number of wheel notches sent after each frame. Positive values scroll down.
+    /// Wheel notches sent after each frame. Positive scrolls down; negative scrolls up.
     pub scroll_clicks: i32,
     /// Time allowed for the target application to repaint after a scroll.
     pub settle_delay: Duration,
     /// Hard upper bound including the initial frame.
     pub max_frames: usize,
-    /// Identical captures required to decide that the bottom has been reached.
+    /// Identical captures required to decide that the end has been reached.
     pub identical_frames_to_stop: usize,
     pub stitch: sniplet_core::StitchOptions,
 }
@@ -247,6 +247,16 @@ pub fn capture_scrolling_region(
         .map_err(PlatformError::Input);
     let collected = collected?;
     restore?;
+    finish_capture(collected, &options)
+}
+
+fn finish_capture(
+    mut collected: CollectedFrames,
+    options: &AutomaticScrollOptions,
+) -> Result<AutomaticScrollCapture> {
+    if options.scroll_clicks < 0 {
+        collected.frames.reverse();
+    }
     let frame_count = collected.frames.len();
     let image = sniplet_core::stitch_vertical(&collected.frames, options.stitch)
         .map_err(PlatformError::Stitch)?;
@@ -258,9 +268,9 @@ pub fn capture_scrolling_region(
 }
 
 fn validate_automatic_options(options: &AutomaticScrollOptions) -> Result<()> {
-    if options.scroll_clicks <= 0 {
+    if options.scroll_clicks == 0 {
         return Err(PlatformError::InvalidScrollOptions(
-            "scroll_clicks must be positive",
+            "scroll_clicks must not be zero",
         ));
     }
     if options.max_frames == 0 {
@@ -379,6 +389,42 @@ mod tests {
             settle_delay: Duration::ZERO,
             ..AutomaticScrollOptions::default()
         }
+    }
+
+    #[test]
+    fn upward_capture_stitches_frames_in_document_order() {
+        let options = AutomaticScrollOptions {
+            scroll_clicks: -5,
+            stitch: sniplet_core::StitchOptions {
+                min_overlap: 2,
+                max_overlap: Some(2),
+                max_mean_error: 0.0,
+            },
+            ..AutomaticScrollOptions::default()
+        };
+        validate_automatic_options(&options).unwrap();
+        let bottom = RgbaImage::from_fn(2, 4, |_x, y| Rgba([(y + 2) as u8, 0, 0, 255]));
+        let top = RgbaImage::from_fn(2, 4, |_x, y| Rgba([y as u8, 0, 0, 255]));
+        let capture = finish_capture(
+            CollectedFrames {
+                frames: vec![bottom, top],
+                stop: AutomaticScrollStop::EndReached,
+            },
+            &options,
+        )
+        .unwrap();
+        assert_eq!(capture.frame_count, 2);
+        assert_eq!(
+            capture.image,
+            RgbaImage::from_fn(2, 6, |_x, y| Rgba([y as u8, 0, 0, 255]))
+        );
+        assert!(
+            validate_automatic_options(&AutomaticScrollOptions {
+                scroll_clicks: 0,
+                ..options
+            })
+            .is_err()
+        );
     }
 
     #[test]

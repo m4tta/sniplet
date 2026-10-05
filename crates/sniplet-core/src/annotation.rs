@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Measurement,
     color::Color,
     document::ImageSize,
     geometry::{
@@ -33,9 +34,19 @@ pub enum ArrowVariant {
     DoubleEnded,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MagnifierPart {
+    Source,
+    Lens,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnnotationKind {
+    /// An imprinted ruler is one raster edit, with its label and end caps intact.
+    Measurement {
+        measurement: Measurement,
+    },
     Line {
         start: Point,
         end: Point,
@@ -99,16 +110,65 @@ pub enum AnnotationKind {
         #[serde(default)]
         size: Option<ImageSize>,
     },
-    /// Enlarges source pixels inside a lens occupying `rect`.
+    /// Enlarges pixels at `source` in a linked circular callout. Old projects
+    /// without `source` retain their lens at `rect`.
     Magnifier {
         rect: ImageRect,
         zoom: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Point>,
     },
 }
 
+fn rect_center(rect: ImageRect) -> Point {
+    Point::new(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
+}
+
+fn circle_rect(center: Point, radius: f32) -> ImageRect {
+    ImageRect::new(
+        center.x - radius,
+        center.y - radius,
+        radius * 2.0,
+        radius * 2.0,
+    )
+}
+
+fn valid_magnifier_zoom(zoom: f32) -> f32 {
+    if zoom.is_finite() {
+        zoom.clamp(1.0, 16.0)
+    } else {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CompositeLayer {
+    Raster,
+    Image,
+    Spotlight,
+    Drawing,
+}
+
 impl AnnotationKind {
+    /// Raster edits affect the base. Image objects remain below drawings and shade.
+    pub(crate) fn composite_layer(&self) -> CompositeLayer {
+        match self {
+            Self::Pixelate { .. }
+            | Self::Blur { .. }
+            | Self::Redaction { .. }
+            | Self::Measurement { .. }
+            | Self::RemoveFill { .. } => CompositeLayer::Raster,
+            Self::Image { .. } => CompositeLayer::Image,
+            Self::Spotlight { .. } => CompositeLayer::Spotlight,
+            _ => CompositeLayer::Drawing,
+        }
+    }
+
     pub fn bounds(&self) -> ImageRect {
         match self {
+            Self::Measurement { measurement } => {
+                ImageRect::from_corners(measurement.start, measurement.end)
+            }
             Self::Line { start, end } => ImageRect::from_corners(*start, *end),
             Self::Arrow {
                 start, end, bend, ..
@@ -123,8 +183,20 @@ impl AnnotationKind {
             | Self::Highlight { rect }
             | Self::Spotlight { rect }
             | Self::Redaction { rect }
-            | Self::RemoveFill { rect, .. }
-            | Self::Magnifier { rect, .. } => rect.normalized(),
+            | Self::RemoveFill { rect, .. } => rect.normalized(),
+            Self::Magnifier { rect, .. } => {
+                self.magnifier_circles()
+                    .map_or(rect.normalized(), |[source, lens]| {
+                        let left = source.x.min(lens.x);
+                        let top = source.y.min(lens.y);
+                        ImageRect::new(
+                            left,
+                            top,
+                            (source.x + source.width).max(lens.x + lens.width) - left,
+                            (source.y + source.height).max(lens.y + lens.height) - top,
+                        )
+                    })
+            }
             Self::Text {
                 origin,
                 text,
@@ -168,6 +240,13 @@ impl AnnotationKind {
 
     pub(crate) fn normalize_and_clip(&mut self, width: u32, height: u32) {
         match self {
+            Self::Measurement { measurement } => {
+                for point in [&mut measurement.start, &mut measurement.end] {
+                    point.x = point.x.clamp(0.0, width as f32);
+                    point.y = point.y.clamp(0.0, height as f32);
+                }
+                measurement.scale_factor = measurement.scale();
+            }
             Self::Rectangle { rect }
             | Self::Ellipse { rect }
             | Self::Pixelate { rect, .. }
@@ -175,14 +254,28 @@ impl AnnotationKind {
             | Self::Highlight { rect }
             | Self::Spotlight { rect }
             | Self::Redaction { rect }
-            | Self::RemoveFill { rect, .. }
-            | Self::Magnifier { rect, .. } => *rect = rect.clipped(width, height),
+            | Self::RemoveFill { rect, .. } => *rect = rect.clipped(width, height),
+            Self::Magnifier { rect, source, zoom } => {
+                if let Some(source) = source {
+                    let normalized = rect.normalized();
+                    *rect = circle_rect(
+                        rect_center(normalized),
+                        normalized.width.min(normalized.height) * 0.5,
+                    );
+                    source.x = source.x.clamp(0.0, width as f32);
+                    source.y = source.y.clamp(0.0, height as f32);
+                    *zoom = valid_magnifier_zoom(*zoom);
+                } else {
+                    *rect = rect.clipped(width, height);
+                }
+            }
             _ => {}
         }
     }
 
     pub(crate) fn translate(&mut self, delta: Point) {
         match self {
+            Self::Measurement { .. } => {}
             Self::Line { start, end } => {
                 start.x += delta.x;
                 start.y += delta.y;
@@ -208,8 +301,14 @@ impl AnnotationKind {
             | Self::Highlight { rect }
             | Self::Spotlight { rect }
             | Self::Redaction { rect }
-            | Self::RemoveFill { rect, .. }
-            | Self::Magnifier { rect, .. } => *rect = rect.translated(delta),
+            | Self::RemoveFill { rect, .. } => *rect = rect.translated(delta),
+            Self::Magnifier { rect, source, .. } => {
+                *rect = rect.translated(delta);
+                if let Some(source) = source {
+                    source.x += delta.x;
+                    source.y += delta.y;
+                }
+            }
             Self::Text { origin, .. } => {
                 origin.x += delta.x;
                 origin.y += delta.y;
@@ -234,6 +333,7 @@ impl AnnotationKind {
     pub(crate) fn resize_to(&mut self, target: ImageRect) {
         let old = self.bounds();
         match self {
+            Self::Measurement { .. } => {}
             Self::Line { start, end } => {
                 *start = remap_point(*start, old, target);
                 *end = remap_point(*end, old, target);
@@ -254,8 +354,20 @@ impl AnnotationKind {
             | Self::Highlight { rect }
             | Self::Spotlight { rect }
             | Self::Redaction { rect }
-            | Self::RemoveFill { rect, .. }
-            | Self::Magnifier { rect, .. } => *rect = target,
+            | Self::RemoveFill { rect, .. } => *rect = target,
+            Self::Magnifier { rect, source, .. } => {
+                if let Some(source) = source {
+                    *source = remap_point(*source, old, target);
+                    let scale = (target.width / old.width.max(1.0))
+                        .min(target.height / old.height.max(1.0));
+                    *rect = circle_rect(
+                        remap_point(rect_center(*rect), old, target),
+                        rect.width * 0.5 * scale,
+                    );
+                } else {
+                    *rect = target;
+                }
+            }
             Self::Text {
                 origin,
                 text,
@@ -297,6 +409,16 @@ impl AnnotationKind {
 
     pub(crate) fn hit_test(&self, point: Point, tolerance: f32, stroke_width: f32) -> bool {
         match self {
+            Self::Measurement { .. } => false,
+            Self::Magnifier {
+                source: Some(_), ..
+            } => {
+                self.magnifier_part_at(point, tolerance.max(stroke_width * 0.5))
+                    .is_some()
+                    || self.magnifier_connector().is_some_and(|[start, end]| {
+                        distance_to_segment(point, start, end) <= tolerance.max(stroke_width * 0.5)
+                    })
+            }
             Self::Line { start, end } => {
                 distance_to_segment(point, *start, *end) <= tolerance.max(stroke_width * 0.5)
             }
@@ -349,6 +471,98 @@ impl AnnotationKind {
                 .bounds()
                 .expanded(tolerance.max(stroke_width * 0.5))
                 .contains(point),
+        }
+    }
+
+    /// Source and displayed lens bounds for a linked magnifier.
+    pub fn magnifier_circles(&self) -> Option<[ImageRect; 2]> {
+        let Self::Magnifier {
+            rect,
+            zoom,
+            source: Some(source),
+        } = self
+        else {
+            return None;
+        };
+        let rect = rect.normalized();
+        if ![rect.x, rect.y, rect.width, rect.height, source.x, source.y]
+            .into_iter()
+            .all(f32::is_finite)
+        {
+            return None;
+        }
+        let radius = rect.width.min(rect.height) * 0.5;
+        (radius > 0.0).then(|| {
+            [
+                circle_rect(*source, radius / valid_magnifier_zoom(*zoom)),
+                circle_rect(rect_center(rect), radius),
+            ]
+        })
+    }
+
+    pub fn magnifier_connector(&self) -> Option<[Point; 2]> {
+        let [source, lens] = self.magnifier_circles()?;
+        let start = rect_center(source);
+        let end = rect_center(lens);
+        let distance = start.distance_to(end);
+        let (r1, r2) = (source.width * 0.5, lens.width * 0.5);
+        if distance <= r1 + r2 {
+            return None;
+        }
+        let (dx, dy) = ((end.x - start.x) / distance, (end.y - start.y) / distance);
+        Some([
+            Point::new(start.x + dx * r1, start.y + dy * r1),
+            Point::new(end.x - dx * r2, end.y - dy * r2),
+        ])
+    }
+
+    pub fn magnifier_part_at(&self, point: Point, tolerance: f32) -> Option<MagnifierPart> {
+        self.magnifier_circles()?
+            .into_iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, circle)| {
+                (point.distance_to(rect_center(circle)) <= circle.width * 0.5 + tolerance.max(0.0))
+                    .then_some(if index == 0 {
+                        MagnifierPart::Source
+                    } else {
+                        MagnifierPart::Lens
+                    })
+            })
+    }
+
+    pub fn move_magnifier_circle(&mut self, part: MagnifierPart, delta: Point) {
+        if let Self::Magnifier {
+            rect,
+            source: Some(source),
+            ..
+        } = self
+        {
+            match part {
+                MagnifierPart::Source => {
+                    source.x += delta.x;
+                    source.y += delta.y;
+                }
+                MagnifierPart::Lens => *rect = rect.translated(delta),
+            }
+        }
+    }
+
+    pub fn resize_magnifier_circle(&mut self, part: MagnifierPart, radius: f32) {
+        if !radius.is_finite() || radius < 1.0 {
+            return;
+        }
+        if let Self::Magnifier {
+            rect,
+            zoom,
+            source: Some(_),
+            ..
+        } = self
+        {
+            match part {
+                MagnifierPart::Source => *zoom = (rect.width * 0.5 / radius).clamp(1.0, 16.0),
+                MagnifierPart::Lens => *rect = circle_rect(rect_center(*rect), radius),
+            }
         }
     }
 

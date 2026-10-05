@@ -12,15 +12,15 @@ use gpui_kit::{
 };
 use sniplet_core::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStyle, ArrowVariant, Backdrop, Background,
-    Color, ColorFormat, Document, ImageRect, Point as ImagePoint, RenderOptions, Shadow,
-    ViewportTransform,
+    Color, ColorFormat, Document, ImageRect, MagnifierPart, Measurement, MeasurementAxis,
+    Point as ImagePoint, RenderOptions, Shadow, ViewportTransform, measure_at,
 };
 use sniplet_platform::{Clipboard, Settings, SettingsStore, ThemePreference};
 
 use crate::{capture, tools::Tool};
 
 pub const FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
-const BAR: f32 = 54.0;
+pub(crate) const BAR: f32 = 54.0;
 const ARROW_WIDTH: f32 = 10.0;
 
 pub fn render_options() -> RenderOptions<'static> {
@@ -47,12 +47,14 @@ pub enum Panel {
     Cloud,
     Hotkeys,
     Help,
+    Ruler,
 }
 
 #[derive(Clone, Copy)]
 pub enum Command {
     Open,
     Paste,
+    LoadClipboard,
     Copy,
     Save,
     SaveProject,
@@ -69,14 +71,18 @@ pub enum Command {
     Window,
     Delayed,
     Scroll,
+    ScrollUp,
     ManualScroll,
     Repeat,
     ActiveWindow,
     CaptureOcr,
     ShowEditor,
+    Settings,
+    GitHub,
     Quit,
     Ocr,
     Qr,
+    #[expect(dead_code, reason = "The upload button is hidden for now.")]
     Upload,
     Fit,
     ActualSize,
@@ -89,6 +95,7 @@ pub enum Command {
 enum EditHandle {
     Bounds(usize, ImageRect),
     Arrow(usize),
+    Magnifier(MagnifierPart, bool),
 }
 
 struct Drag {
@@ -106,6 +113,15 @@ struct ArrowSizeEdit {
     style: AnnotationStyle,
     width: f32,
     grouped: bool,
+}
+
+struct MeasureSession {
+    key: String,
+    axis: MeasurementAxis,
+    source: image::RgbaImage,
+    origin: ImagePoint,
+    outer: bool,
+    measurement: Option<Measurement>,
 }
 
 pub struct Editor {
@@ -147,6 +163,13 @@ pub struct Editor {
     sampled: Color,
     space: bool,
     quick_zoom: bool,
+    measure: Option<MeasureSession>,
+    measure_painted: Option<Measurement>,
+    measure_overlay: Option<(ImageRect, Arc<RenderImage>)>,
+    measure_tolerance: u8,
+    measure_scale: f32,
+    default_measure_scale: f32,
+    physical_units: bool,
     last_saved: Option<PathBuf>,
     pub scroll_frames: Vec<image::RgbaImage>,
     pub scroll_region: Option<ImageRect>,
@@ -177,6 +200,15 @@ impl Editor {
             editor.arrow_size_event(event, cx);
         })
         .detach();
+        cx.observe_window_activation(window, |editor, window, cx| {
+            if !window.is_window_active() {
+                editor.measure = None;
+                editor.space = false;
+                editor.quick_zoom = false;
+                cx.notify();
+            }
+        })
+        .detach();
         let (upload_url, public_url) = match &settings.cloud_upload {
             Some(sniplet_platform::CloudUploadConfig::PresignedPut { url, public_url }) => {
                 (url.clone(), public_url.clone().unwrap_or_default())
@@ -205,6 +237,10 @@ impl Editor {
         ]
         .map(|value| cx.new(|cx| InputState::new(window, cx).default_value(value.clone())));
         let c = settings.annotation_color;
+        let measure_scale = document
+            .as_ref()
+            .and_then(|doc| doc.source_scale_factor())
+            .unwrap_or(window.scale_factor());
         let mut this = Self {
             document,
             tool: Tool::Select,
@@ -256,6 +292,13 @@ impl Editor {
             sampled: Color::WHITE,
             space: false,
             quick_zoom: false,
+            measure: None,
+            measure_painted: None,
+            measure_overlay: None,
+            measure_tolerance: 20,
+            measure_scale,
+            default_measure_scale: window.scale_factor(),
+            physical_units: false,
             last_saved: None,
             scroll_frames: vec![],
             scroll_region: None,
@@ -267,16 +310,29 @@ impl Editor {
 
     pub fn load(&mut self, document: Document, label: &str, cx: &mut Context<Self>) {
         self.finish_arrow_size_edit();
+        self.measure_scale = document
+            .source_scale_factor()
+            .unwrap_or(self.default_measure_scale);
         self.document = Some(document);
         self.selection = None;
         self.drag = None;
         self.draft = None;
+        self.measure = None;
         self.fit = true;
         self.panel = None;
         self.counter = 1;
         self.last_saved = None;
         self.status = label.to_owned();
         self.refresh(cx);
+    }
+
+    pub fn set_measure_scale(&mut self, scale: f32) {
+        if let Some(doc) = &mut self.document {
+            doc.set_source_scale_factor(scale);
+            self.measure_scale = doc
+                .source_scale_factor()
+                .unwrap_or(self.default_measure_scale);
+        }
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -293,6 +349,12 @@ impl Editor {
 
     pub fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.finish_arrow_size_edit();
+        self.measure = None;
+        if tool == Tool::Ruler {
+            self.panel = Some(Panel::Ruler);
+            cx.notify();
+            return;
+        }
         self.tool = tool;
         self.style.stroke_width = if tool == Tool::Arrow {
             self.arrow_width
@@ -329,6 +391,22 @@ impl Editor {
         self.focus.focus(window, cx);
         self.panel = None;
         let p = self.image_point(event.position);
+        if self.measure.is_some() {
+            if event.button == MouseButton::Left {
+                self.update_measure(p, event.modifiers.shift);
+                if let Some(measurement) = self.measure.as_ref().and_then(|m| m.measurement)
+                    && let Some(doc) = &mut self.document
+                {
+                    doc.add_annotation(
+                        AnnotationKind::Measurement { measurement },
+                        AnnotationStyle::default(),
+                    );
+                    self.status = format!("Measured {}", measurement.label());
+                    self.refresh(cx);
+                }
+            }
+            return;
+        }
         let screen = ImagePoint::new(event.position.x.into(), event.position.y.into());
         let Some(doc) = &mut self.document else {
             return;
@@ -348,6 +426,58 @@ impl Editor {
         let arrow_points = selected
             .and_then(|id| doc.annotation(id))
             .and_then(|annotation| annotation.kind.arrow_points());
+        let magnifier_circles = selected
+            .and_then(|id| doc.annotation(id))
+            .and_then(|annotation| annotation.kind.magnifier_circles());
+        if !pan
+            && !event.modifiers.alt
+            && matches!(self.tool, Tool::Select | Tool::Zoom)
+            && let Some(circles) = magnifier_circles
+        {
+            let tolerance = 7.0 / self.transform.zoom();
+            let edit = circles
+                .into_iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, circle)| {
+                    let center = ImagePoint::new(
+                        circle.x + circle.width * 0.5,
+                        circle.y + circle.height * 0.5,
+                    );
+                    let edge = ImagePoint::new(center.x + circle.width * 0.5, center.y);
+                    let resize =
+                        (p.x - edge.x).abs() <= tolerance && (p.y - edge.y).abs() <= tolerance;
+                    resize.then_some(EditHandle::Magnifier(
+                        if index == 0 {
+                            MagnifierPart::Source
+                        } else {
+                            MagnifierPart::Lens
+                        },
+                        true,
+                    ))
+                })
+                .or_else(|| {
+                    selected
+                        .and_then(|id| doc.annotation(id))
+                        .and_then(|annotation| annotation.kind.magnifier_part_at(p, tolerance))
+                        .map(|part| EditHandle::Magnifier(part, false))
+                });
+            if let Some(edit) = edit {
+                let _ = doc.begin_group();
+                self.drag = Some(Drag {
+                    start: p,
+                    end: p,
+                    points: vec![],
+                    moving: selected,
+                    last: p,
+                    pan: false,
+                    constrain: false,
+                    handle: Some(edit),
+                });
+                cx.notify();
+                return;
+            }
+        }
         if !pan
             && matches!(self.tool, Tool::Select | Tool::Arrow)
             && let Some(points) = arrow_points
@@ -373,6 +503,7 @@ impl Editor {
         if !pan
             && self.tool == Tool::Select
             && arrow_points.is_none()
+            && magnifier_circles.is_none()
             && let Some(rect) = bounds
             && let Some(handle) = handle_at(rect, p, 7.0 / self.transform.zoom())
         {
@@ -448,12 +579,18 @@ impl Editor {
             self.refresh(cx);
             return;
         }
-        let mut moving = if !pan && matches!(self.tool, Tool::Select | Tool::Arrow) {
+        let mut moving = if !pan && matches!(self.tool, Tool::Select | Tool::Arrow | Tool::Zoom) {
             let hit = doc.hit_test(p, 6.0 / self.transform.zoom()).filter(|id| {
                 self.tool == Tool::Select
-                    || doc.annotation(*id).is_some_and(|annotation| {
-                        matches!(annotation.kind, AnnotationKind::Arrow { .. })
-                    })
+                    || doc
+                        .annotation(*id)
+                        .is_some_and(|annotation| match self.tool {
+                            Tool::Arrow => matches!(annotation.kind, AnnotationKind::Arrow { .. }),
+                            Tool::Zoom => {
+                                matches!(annotation.kind, AnnotationKind::Magnifier { .. })
+                            }
+                            _ => false,
+                        })
             });
             let _ = doc.select(hit);
             hit
@@ -463,8 +600,13 @@ impl Editor {
         if moving.is_none() && self.tool == Tool::Arrow {
             self.style.stroke_width = self.arrow_width;
         }
+        let mut magnifier_edit = None;
         if let Some(annotation) = moving.and_then(|id| doc.annotation(id)).cloned() {
             self.style = annotation.style;
+            magnifier_edit = annotation
+                .kind
+                .magnifier_part_at(p, 6.0 / self.transform.zoom())
+                .map(|part| EditHandle::Magnifier(part, false));
             if event.click_count == 2
                 && let AnnotationKind::Text { origin, text, .. } = &annotation.kind
             {
@@ -483,6 +625,7 @@ impl Editor {
                 let id = doc.add_annotation(annotation.kind, annotation.style);
                 let _ = doc.select(Some(id));
                 moving = Some(id);
+                magnifier_edit = None;
             }
         }
         self.selection = None;
@@ -494,7 +637,7 @@ impl Editor {
             last: if pan { screen } else { p },
             pan,
             constrain: event.modifiers.shift,
-            handle: None,
+            handle: magnifier_edit,
         });
         cx.notify();
     }
@@ -502,6 +645,11 @@ impl Editor {
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let p = self.image_point(event.position);
         self.cursor = p;
+        if self.measure.is_some() {
+            self.update_measure(p, event.modifiers.shift);
+            cx.notify();
+            return;
+        }
         if let Some(color) = self.visible_color(p) {
             self.sampled = color;
         }
@@ -523,7 +671,33 @@ impl Editor {
         }
         drag.end = p;
         drag.constrain = event.modifiers.shift;
-        if let Some(EditHandle::Arrow(handle)) = drag.handle {
+        if let Some(EditHandle::Magnifier(part, resize)) = drag.handle {
+            if let Some(doc) = &mut self.document
+                && let Some(annotation) = drag.moving.and_then(|id| doc.annotation(id)).cloned()
+            {
+                let mut kind = annotation.kind;
+                if resize {
+                    if let Some(circles) = kind.magnifier_circles() {
+                        let circle = circles[if part == MagnifierPart::Source { 0 } else { 1 }];
+                        let center = ImagePoint::new(
+                            circle.x + circle.width * 0.5,
+                            circle.y + circle.height * 0.5,
+                        );
+                        let radius = (p.x - center.x)
+                            .hypot(p.y - center.y)
+                            .min(doc.width().max(doc.height()) as f32);
+                        kind.resize_magnifier_circle(part, radius);
+                    }
+                } else {
+                    kind.move_magnifier_circle(
+                        part,
+                        ImagePoint::new(p.x - drag.last.x, p.y - drag.last.y),
+                    );
+                }
+                let _ = doc.update_annotation(annotation.id, kind, annotation.style);
+            }
+            drag.last = p;
+        } else if let Some(EditHandle::Arrow(handle)) = drag.handle {
             if let Some(doc) = &mut self.document
                 && let Some(annotation) = drag.moving.and_then(|id| doc.annotation(id)).cloned()
             {
@@ -588,6 +762,24 @@ impl Editor {
                     if let AnnotationKind::Arrow { variant, .. } = &mut kind {
                         *variant = self.arrow_variant;
                     }
+                    if let AnnotationKind::Magnifier {
+                        rect,
+                        source: Some(_),
+                        ..
+                    } = &mut kind
+                        && let Some(doc) = &self.document
+                    {
+                        let radius = rect.width * 0.5;
+                        let fit = |center: f32, extent: u32| {
+                            if radius * 2.0 <= extent as f32 {
+                                center.clamp(radius, extent as f32 - radius)
+                            } else {
+                                extent as f32 * 0.5
+                            }
+                        };
+                        rect.x = fit(rect.x + radius, doc.width()) - radius;
+                        rect.y = fit(rect.y + radius, doc.height()) - radius;
+                    }
                     Annotation {
                         id: AnnotationId(0),
                         kind,
@@ -615,27 +807,8 @@ impl Editor {
                     .map(|r| r.clipped(doc.width(), doc.height()))
                     .filter(|r| r.width >= 1.0 && r.height >= 1.0);
             } else if let Some(annotation) = self.draft.take() {
-                if self.tool == Tool::Ruler {
-                    let _ = doc.begin_group();
-                }
                 let id = doc.add_annotation(annotation.kind, annotation.style);
                 let _ = doc.select(Some(id));
-                if self.tool == Tool::Ruler {
-                    let length = (drag.end.x - drag.start.x).hypot(drag.end.y - drag.start.y);
-                    doc.add_annotation(
-                        AnnotationKind::Text {
-                            origin: ImagePoint::new(
-                                (drag.start.x + drag.end.x) * 0.5,
-                                (drag.start.y + drag.end.y) * 0.5 - 28.0,
-                            ),
-                            text: format!("{length:.0} px"),
-                            font_size: 18.0,
-                        },
-                        self.style,
-                    );
-                    self.status = format!("Measured {length:.0} pixels");
-                    let _ = doc.end_group();
-                }
             }
         }
         self.refresh(cx);
@@ -646,6 +819,15 @@ impl Editor {
             ScrollDelta::Pixels(p) => ImagePoint::new(p.x.into(), p.y.into()),
             ScrollDelta::Lines(p) => ImagePoint::new(p.x * 30.0, p.y * 30.0),
         };
+        if self.measure.is_some() {
+            let step = if delta.y == 0.0 { delta.x } else { delta.y };
+            self.measure_tolerance = (i16::from(self.measure_tolerance)
+                + (step.signum() * 5.0) as i16)
+                .clamp(0, 254) as u8;
+            self.update_measure(self.image_point(event.position), event.modifiers.shift);
+            cx.notify();
+            return;
+        }
         self.fit = false;
         if event.modifiers.control || event.modifiers.platform || self.tool == Tool::Zoom {
             self.transform.zoom_by(
@@ -686,9 +868,58 @@ impl Editor {
             self.draft = None;
             self.space = false;
             self.quick_zoom = false;
+            self.measure = None;
             self.focus.focus(window, cx);
             self.refresh(cx);
             return;
+        }
+        if !command
+            && !modifiers.alt
+            && self.drag.is_none()
+            && !matches!(
+                self.panel,
+                Some(Panel::Text | Panel::Cloud | Panel::Hotkeys)
+            )
+        {
+            if key == "shift" && self.measure.is_some() {
+                self.update_measure(self.cursor, true);
+                cx.notify();
+                return;
+            }
+            let axis = match key {
+                "1" | "left" | "right" => Some(MeasurementAxis::Horizontal),
+                "2" | "up" | "down" => Some(MeasurementAxis::Vertical),
+                _ => None,
+            };
+            if let Some(axis) = axis
+                && self.selection.is_none()
+                && let Some(doc) = &self.document
+                && doc.selected().is_none()
+            {
+                if !event.is_held || self.measure.as_ref().is_none_or(|m| m.key != key) {
+                    match doc.render_measurement_source(&render_options()) {
+                        Ok((source, origin)) => {
+                            self.measure = Some(MeasureSession {
+                                key: key.to_owned(),
+                                axis,
+                                source,
+                                origin,
+                                outer: modifiers.shift,
+                                measurement: None,
+                            })
+                        }
+                        Err(error) => {
+                            self.status = error.to_string();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+                self.panel = None;
+                self.update_measure(self.cursor, modifiers.shift);
+                cx.notify();
+                return;
+            }
         }
         if matches!(
             self.panel,
@@ -808,6 +1039,57 @@ impl Editor {
         };
         if let Some(action) = action {
             self.command(action, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn update_measure(&mut self, point: ImagePoint, outer: bool) {
+        let Some(session) = &mut self.measure else {
+            return;
+        };
+        session.outer = outer;
+        let measurement = measure_at(
+            &session.source,
+            ImagePoint::new(point.x - session.origin.x, point.y - session.origin.y),
+            session.axis,
+            self.measure_tolerance,
+            outer,
+        )
+        .map(|mut measurement| {
+            measurement.start.x += session.origin.x;
+            measurement.start.y += session.origin.y;
+            measurement.end.x += session.origin.x;
+            measurement.end.y += session.origin.y;
+            measurement.pixels_per_unit = if self.physical_units {
+                1.0
+            } else {
+                self.measure_scale
+            };
+            measurement.scale_factor = self.measure_scale;
+            measurement
+        });
+        if measurement == session.measurement {
+            return;
+        }
+        session.measurement = measurement;
+    }
+
+    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if self
+            .measure
+            .as_ref()
+            .is_some_and(|session| session.key == key)
+        {
+            self.measure = None;
+        } else if key == "shift" {
+            self.update_measure(self.cursor, false);
+        }
+        if key == "space" {
+            self.space = false;
+        }
+        if key == "z" {
+            self.quick_zoom = false;
         }
         cx.notify();
     }
@@ -980,6 +1262,7 @@ impl Editor {
     pub fn command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_arrow_size_edit();
         self.panel = None;
+        self.measure = None;
         match command {
             Command::Open => self.open(window, cx),
             Command::Save => self.save(false, window, cx),
@@ -994,16 +1277,21 @@ impl Editor {
                     && crate::runtime::has_tray(cx);
                 self.result(result, "Image copied", cx);
                 if hide {
-                    window.minimize_window();
+                    crate::runtime::hide_editor(window, cx);
                 }
             }
-            Command::Paste => match Clipboard::new().and_then(|mut c| c.image()) {
-                Ok(image) => self.add_image(image, "Pasted image", false, cx),
-                Err(error) => {
-                    self.status = error.to_string();
-                    cx.notify();
+            Command::Paste | Command::LoadClipboard => {
+                match Clipboard::new().and_then(|mut c| c.image()) {
+                    Ok(image) if matches!(command, Command::LoadClipboard) => {
+                        self.load(Document::new(image), "Loaded image from clipboard", cx);
+                    }
+                    Ok(image) => self.add_image(image, "Pasted image", false, cx),
+                    Err(error) => {
+                        self.status = error.to_string();
+                        cx.notify();
+                    }
                 }
-            },
+            }
             Command::Undo | Command::Redo => {
                 if let Some(doc) = &mut self.document {
                     if matches!(command, Command::Undo) {
@@ -1057,13 +1345,9 @@ impl Editor {
             Command::Window => {
                 self.panel = None;
                 cx.notify();
-                window.minimize_window();
-                if let Err(error) = crate::window_picker::open(
-                    self.monitor_index,
-                    cx.entity(),
-                    window.window_handle(),
-                    cx,
-                ) {
+                if let Err(error) =
+                    crate::window_picker::open(self.monitor_index, cx.entity(), window, cx)
+                {
                     self.status = error;
                     cx.notify();
                 }
@@ -1073,6 +1357,7 @@ impl Editor {
             | Command::Screen
             | Command::Delayed
             | Command::Scroll
+            | Command::ScrollUp
             | Command::ManualScroll
             | Command::Repeat
             | Command::CaptureOcr => {
@@ -1098,7 +1383,13 @@ impl Editor {
                     cx.notify();
                 }
             }
-            Command::ShowEditor => window.activate_window(),
+            Command::ShowEditor => crate::runtime::show_editor(window, cx),
+            Command::Settings => {
+                crate::runtime::show_editor(window, cx);
+                self.panel = Some(Panel::Settings);
+                cx.notify();
+            }
+            Command::GitHub => cx.open_url("https://github.com/m4tta/sniplet"),
             Command::Quit => cx.quit(),
             Command::Upload => self.upload(window, cx),
             Command::Ocr => self.ocr(window, cx),
@@ -1182,6 +1473,19 @@ impl Editor {
         } else {
             Ok(doc.render(&render_options())?)
         }
+    }
+
+    /// Export on drag-out so the file contains the same pixels as Save and Copy.
+    pub(crate) fn export_drag_payload(&self) -> anyhow::Result<ExternalDragPayload> {
+        let image = self.export_pixels()?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("Sniplet-{timestamp}.png"));
+        image.save(&path)?;
+        Ok(ExternalDragPayload::Files(FileDragPaths::new([(
+            path, false,
+        )])))
     }
 
     fn copy_color(&mut self, cx: &mut Context<Self>) {
@@ -1310,7 +1614,7 @@ impl Editor {
                     this.result(result, &format!("Saved {}", path.display()), cx);
                 });
                 if saved && hide {
-                    let _ = cx.update(|window, _| window.minimize_window());
+                    let _ = cx.update(|window, cx| crate::runtime::hide_editor(window, cx));
                 }
             }
         })
@@ -1612,11 +1916,12 @@ impl Editor {
     fn adjust_magnifier_zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
         if let Some(doc) = &mut self.document
             && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
-            && let AnnotationKind::Magnifier { rect, zoom } = annotation.kind
+            && let AnnotationKind::Magnifier { rect, zoom, source } = annotation.kind
         {
             let kind = AnnotationKind::Magnifier {
                 rect,
                 zoom: (zoom + delta).clamp(1.0, 16.0),
+                source,
             };
             let _ = doc.update_annotation(annotation.id, kind, annotation.style);
         }
@@ -1957,7 +2262,7 @@ impl Editor {
                             cx.listener(|this, _, _, cx| this.adjust_magnifier_zoom(-1.0, cx)),
                         ),
                 )
-                .child(div().text_sm().child(format!("{zoom:.0}×")))
+                .child(div().text_sm().child(format!("{zoom:.1}×")))
                 .child(
                     Button::new("magnifier-zoom-up")
                         .ghost()
@@ -1987,6 +2292,109 @@ impl Editor {
         }
 
         properties
+    }
+
+    fn measure_units(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let units = if self.physical_units {
+            1.0
+        } else {
+            self.measure_scale
+        };
+        let label = format!(
+            "{:.0} × {:.0} {}",
+            self.image_size.0 as f32 / units,
+            self.image_size.1 as f32 / units,
+            if self.physical_units { "px" } else { "pt" }
+        );
+        let control = div()
+            .id("measure-units")
+            .flex()
+            .flex_col()
+            .px_3()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(label)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Image size"),
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.physical_units = !this.physical_units;
+                let outer = this.measure.as_ref().is_some_and(|m| m.outer);
+                this.update_measure(this.cursor, outer);
+                cx.notify();
+            }));
+        #[cfg(feature = "ui-tests")]
+        let control = {
+            use gpui_kit::test::TestSupportExt;
+            control.test_support()
+        };
+        control
+    }
+
+    fn render_image_drag(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let grip = || {
+            div().flex().gap(px(2.5)).children((0..2).map(|_| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.5))
+                    .children((0..3).map(|_| {
+                        div()
+                            .size(px(1.5))
+                            .rounded_full()
+                            .bg(cx.theme().muted_foreground)
+                    }))
+            }))
+        };
+        let control = div()
+            .id("drag-file")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .gap(px(3.0))
+            .w(px(44.0))
+            .h(px(26.0))
+            .rounded_full()
+            .bg(cx.theme().foreground.opacity(0.08))
+            .hover(|style| style.bg(cx.theme().foreground.opacity(0.12)))
+            .child(grip())
+            .child(tool_icon("file").size(px(17.0)))
+            .child(grip())
+            .tooltip(|window, cx| {
+                component::tooltip::Tooltip::new("Drag'n'Drop Image")
+                    .rounded_full()
+                    .px(px(14.0))
+                    .py(px(6.0))
+                    .text_size(px(14.0))
+                    .build(window, cx)
+            })
+            .when(self.document.is_none(), |control| control.opacity(0.4))
+            .when(self.document.is_some(), |control| {
+                control
+                    .cursor(CursorStyle::OpenHand)
+                    .on_drag(cx.entity(), |_, _, _, cx| cx.new(|_| Empty))
+                    .external_drag_payload(|editor: &Entity<Editor>, _, cx| {
+                        editor.update(cx, |editor, cx| match editor.export_drag_payload() {
+                            Ok(payload) => Some(payload),
+                            Err(error) => {
+                                editor.status = format!("Could not drag image: {error}");
+                                cx.notify();
+                                None
+                            }
+                        })
+                    })
+            });
+        #[cfg(feature = "ui-tests")]
+        let control = {
+            use gpui_kit::test::TestSupportExt;
+            control.test_support()
+        };
+        control
     }
 
     fn render_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2023,6 +2431,7 @@ impl Editor {
                     Panel::Cloud => "Cloud upload",
                     Panel::Hotkeys => "Capture shortcuts",
                     Panel::Help => "Keyboard shortcuts",
+                    Panel::Ruler => "Use the keyboard",
                 }))
                 .child(
                     Button::new("close-panel")
@@ -2036,6 +2445,11 @@ impl Editor {
                 ),
         );
         match panel {
+            Panel::Ruler => {
+                body = body.child("Hold 1 or Left/Right to measure the width. Hold 2 or Up/Down to measure the height. Move the pointer to the area or gap.")
+                    .child("Hold Shift to include the outer edges. Use the wheel to adjust sensitivity. Click to place the measurement on the image.")
+                    .child("Click the image size to switch between points and physical pixels.");
+            }
             Panel::Menu => {
                 for (id, label, key, command) in [
                     (
@@ -2507,6 +2921,19 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let measurement = self
+            .measure
+            .as_ref()
+            .and_then(|session| session.measurement);
+        if measurement != self.measure_painted {
+            self.measure_painted = measurement;
+            if let Some((_, previous)) = self.measure_overlay.take() {
+                let _ = window.drop_image(previous);
+            }
+            self.measure_overlay = measurement
+                .and_then(|m| m.overlay(FONT).ok())
+                .map(|(bounds, image)| (bounds, display_image(image)));
+        }
         if self.preview_dirty {
             self.preview_dirty = false;
             if let Some(doc) = &self.document {
@@ -2595,40 +3022,7 @@ impl Render for Editor {
                 cx,
             ))
             .child(self.toolbar_button("pin", "pin", "Pin image on screen", Command::Pin, cx))
-            .child(self.toolbar_button(
-                "upload",
-                "cloud-upload",
-                "Upload image and copy link",
-                Command::Upload,
-                cx,
-            ))
-            .child(
-                div()
-                    .id("drag-file")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(34.0))
-                    .h(px(36.0))
-                    .cursor_pointer()
-                    .child(tool_icon("file-image"))
-                    .on_drag(cx.entity(), |_, _, _, cx| cx.new(|_| Empty))
-                    .external_drag_payload(|editor: &Entity<Editor>, _, cx| {
-                        let image = editor.read(cx).export_pixels().ok()?;
-                        let name = format!(
-                            "Sniplet-{}.png",
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .ok()?
-                                .as_nanos()
-                        );
-                        let path = std::env::temp_dir().join(name);
-                        image.save(&path).ok()?;
-                        Some(ExternalDragPayload::Files(FileDragPaths::new([(
-                            path, false,
-                        )])))
-                    }),
-            )
+            .child(self.render_image_drag(cx))
             .child(div().w(px(1.0)).h(px(24.0)).mx_2().bg(cx.theme().border));
         let primary = [
             Tool::Select,
@@ -2719,21 +3113,7 @@ impl Render for Editor {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .px_3()
-                    .border_l_1()
-                    .border_color(cx.theme().border)
-                    .child(format!("{} × {}", self.image_size.0, self.image_size.1))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Image size"),
-                    ),
-            )
+            .child(self.measure_units(cx))
             .child(
                 Button::new("zoom-fit")
                     .ghost()
@@ -2769,11 +3149,30 @@ impl Render for Editor {
                     .w(px(self.image_size.0 as f32 * zoom))
                     .h(px(self.image_size.1 as f32 * zoom)),
             );
+            if let Some((bounds, image)) = &self.measure_overlay {
+                let origin = self.canvas_point(ImagePoint::new(bounds.x, bounds.y));
+                let preview = div()
+                    .id("measure-preview")
+                    .absolute()
+                    .left(px(origin.x))
+                    .top(px(origin.y))
+                    .w(px(bounds.width * zoom))
+                    .h(px(bounds.height * zoom))
+                    .child(img(image.clone()).size_full());
+                #[cfg(feature = "ui-tests")]
+                let preview = {
+                    use gpui_kit::test::TestSupportExt;
+                    preview.test_support()
+                };
+                canvas = canvas.child(preview);
+            }
             let selected = self
                 .document
                 .as_ref()
                 .and_then(|doc| doc.selected().and_then(|id| doc.annotation(id)));
             let arrow_points = selected.and_then(|annotation| annotation.kind.arrow_points());
+            let magnifier_circles =
+                selected.and_then(|annotation| annotation.kind.magnifier_circles());
             let selection = self.selection.or_else(|| selected.map(|a| a.kind.bounds()));
             if self.selection.is_none()
                 && let Some(points) = arrow_points
@@ -2797,6 +3196,40 @@ impl Render for Editor {
                         handle.test_support()
                     };
                     canvas = canvas.child(handle);
+                }
+            } else if self.selection.is_none()
+                && let Some(circles) = magnifier_circles
+            {
+                for (index, circle) in circles.into_iter().enumerate() {
+                    for (control, point) in [
+                        ImagePoint::new(
+                            circle.x + circle.width * 0.5,
+                            circle.y + circle.height * 0.5,
+                        ),
+                        ImagePoint::new(circle.x + circle.width, circle.y + circle.height * 0.5),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let point = self.canvas_point(point);
+                        let handle = div()
+                            .id(("magnifier-handle", index * 2 + control))
+                            .absolute()
+                            .left(px(point.x - 4.0))
+                            .top(px(point.y - 4.0))
+                            .size(px(8.0))
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0x777777))
+                            .rounded(px(2.0))
+                            .cursor_crosshair();
+                        #[cfg(feature = "ui-tests")]
+                        let handle = {
+                            use gpui_kit::test::TestSupportExt;
+                            handle.test_support()
+                        };
+                        canvas = canvas.child(handle);
+                    }
                 }
             } else if let Some(rect) = selection {
                 let p = self.canvas_point(ImagePoint::new(rect.x, rect.y));
@@ -2942,20 +3375,17 @@ impl Render for Editor {
             .track_focus(&self.focus)
             .key_context("SnipletEditor")
             .on_key_down(cx.listener(Self::key))
-            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, _| {
-                if event.keystroke.key == "space" {
-                    this.space = false;
-                }
-                if event.keystroke.key == "z" {
-                    this.quick_zoom = false;
-                }
+            .on_key_up(cx.listener(Self::key_up))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                this.update_measure(this.cursor, event.modifiers.shift);
+                cx.notify();
             }))
             .child(
                 TitleBar::new()
                     .h(px(BAR))
                     .on_close_window(|_, window, cx| {
                         if crate::runtime::has_tray(cx) {
-                            window.minimize_window();
+                            crate::runtime::hide_editor(window, cx);
                         } else {
                             cx.quit();
                         }

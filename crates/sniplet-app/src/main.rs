@@ -7,6 +7,9 @@ mod arrow_palette;
 mod capture;
 mod capture_overlay;
 mod editor;
+#[cfg(target_os = "macos")]
+mod macos;
+mod menu_bar;
 mod runtime;
 mod theme;
 mod tools;
@@ -61,62 +64,67 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let smoke = args.iter().any(|arg| arg == "--smoke");
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            if let Err(error) = cx
-                .text_system()
-                .add_fonts(vec![std::borrow::Cow::Borrowed(editor::FONT)])
-            {
-                eprintln!("Could not load the bundled font: {error}");
-            }
-            let mut options = TitleBar::window_options();
-            options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1280.0), px(850.0)),
-                cx,
-            )));
-            options.window_min_size = Some(size(px(900.0), px(560.0)));
-            options.app_id = Some(sniplet_platform::APP_ID.into());
-            if settings.always_on_top && !args.iter().any(|a| a == "--normal-window") {
-                options.kind = WindowKind::PopUp;
-            }
-            let hotkeys = settings.hotkeys.clone();
-            let (handle, editor) = gpui_kit::open_window(options, cx, |window, cx| {
-                window.set_window_title("Sniplet");
-                if !smoke {
-                    window.on_window_should_close(cx, |window, cx| {
-                        if runtime::has_tray(cx) {
-                            window.minimize_window();
-                        } else {
-                            cx.quit();
-                        }
-                        false
-                    });
-                }
-                cx.new(|cx| {
-                    let mut editor = editor::Editor::new(document, settings, window, cx);
-                    if !startup_messages.is_empty() {
-                        editor.status = startup_messages.join(" · ");
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    app.on_reopen(runtime::reopen);
+    app.run(move |cx| {
+        gpui_kit::init(cx);
+        if let Err(error) = cx
+            .text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(editor::FONT)])
+        {
+            eprintln!("Could not load the bundled font: {error}");
+        }
+        let mut options = TitleBar::window_options();
+        #[cfg(target_os = "macos")]
+        if let Some(titlebar) = options.titlebar.as_mut() {
+            // Native Mac buttons are 14 points high; center them on the toolbar.
+            titlebar.traffic_light_position = Some(point(px(9.0), px((editor::BAR - 14.0) / 2.0)));
+        }
+        options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1280.0), px(850.0)),
+            cx,
+        )));
+        options.window_min_size = Some(size(px(900.0), px(560.0)));
+        options.app_id = Some(sniplet_platform::APP_ID.into());
+        if settings.always_on_top && !args.iter().any(|a| a == "--normal-window") {
+            options.kind = WindowKind::PopUp;
+        }
+        let hotkeys = settings.hotkeys.clone();
+        let (handle, editor) = gpui_kit::open_window(options, cx, |window, cx| {
+            window.set_window_title("Sniplet");
+            if !smoke {
+                window.on_window_should_close(cx, |window, cx| {
+                    if runtime::has_tray(cx) {
+                        runtime::hide_editor(window, cx);
+                    } else {
+                        cx.quit();
                     }
-                    editor
-                })
-            })
-            .expect("Could not open Sniplet");
-            if smoke {
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(3))
-                        .await;
-                    cx.update(|cx| cx.quit());
-                })
-                .detach();
-            } else {
-                runtime::install(handle, editor, &hotkeys, cx);
+                    false
+                });
             }
-            cx.activate(true);
-        });
+            cx.new(|cx| {
+                let mut editor = editor::Editor::new(document, settings, window, cx);
+                if !startup_messages.is_empty() {
+                    editor.status = startup_messages.join(" · ");
+                }
+                editor
+            })
+        })
+        .expect("Could not open Sniplet");
+        if smoke {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        } else {
+            runtime::install(handle, editor, &hotkeys, cx);
+        }
+        cx.activate(true);
+    });
     Ok(())
 }
 

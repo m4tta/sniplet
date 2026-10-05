@@ -1044,55 +1044,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sniplet-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "sniplet-core",
- "sniplet-platform",
- "global-hotkey",
- "gpui-kit",
- "image",
- "serde_json",
- "tray-icon",
-]
-
-[[package]]
-name = "sniplet-core"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "image",
- "imageproc",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tiny-skia",
-]
-
-[[package]]
-name = "sniplet-platform"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "sniplet-core",
- "directories",
- "enigo",
- "image",
- "qrcode",
- "rqrr",
- "s3",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
- "url",
- "windows 0.62.2",
- "xcap",
-]
-
-[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5320,6 +5271,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-security"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-service-management"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b213642d6959cc6023ceb1217aa595eaaf09b8094ce95127c103cab611fe65e8"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-security",
+]
+
+[[package]]
 name = "objc2-user-notifications"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7253,6 +7227,63 @@ checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 dependencies = [
  "borsh",
  "serde_core",
+]
+
+[[package]]
+name = "sniplet-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "global-hotkey",
+ "gpui-kit",
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-service-management",
+ "raw-window-handle",
+ "resvg 0.45.1",
+ "serde_json",
+ "sniplet-core",
+ "sniplet-platform",
+ "tray-icon",
+]
+
+[[package]]
+name = "sniplet-core"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "image",
+ "imageproc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tiny-skia",
+]
+
+[[package]]
+name = "sniplet-platform"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "directories",
+ "enigo",
+ "image",
+ "qrcode",
+ "rqrr",
+ "s3",
+ "serde",
+ "serde_json",
+ "sniplet-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "url",
+ "windows 0.62.2",
+ "xcap",
 ]
 
 [[package]]

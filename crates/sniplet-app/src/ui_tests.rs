@@ -42,6 +42,302 @@ fn editor_at_size(
 }
 
 #[gpui_kit::test]
+fn held_measure_key_previews_without_editing_and_click_places_one_undo_step(
+    cx: &mut TestAppContext,
+) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            let mut image =
+                image::RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255]));
+            for y in 80..140 {
+                for x in 80..240 {
+                    image.put_pixel(x, y, image::Rgba([80, 150, 220, 255]));
+                }
+            }
+            editor.load(Document::new(image), "measure fixture", cx);
+            editor.set_measure_scale(1.0);
+        });
+        window.render_frame(cx);
+        let before = editor.read(cx).export_pixels().unwrap();
+        pointer_move(window, point(px(580.0), px(390.0)), cx);
+        window.dispatch_event(
+            gpui_kit::KeyDownEvent {
+                keystroke: gpui_kit::Keystroke::parse("right").unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(
+            window.find("measure-preview").visible(),
+            "holding an arrow must show a measurement"
+        );
+        assert_eq!(editor.read(cx).export_pixels().unwrap(), before);
+        assert!(
+            editor
+                .read(cx)
+                .document
+                .as_ref()
+                .unwrap()
+                .annotations()
+                .is_empty()
+        );
+        pointer_down(window, point(px(580.0), px(390.0)), cx);
+        pointer_up(window, point(px(580.0), px(390.0)), cx);
+        assert_eq!(
+            editor
+                .read(cx)
+                .document
+                .as_ref()
+                .unwrap()
+                .annotations()
+                .len(),
+            1
+        );
+        assert_ne!(editor.read(cx).export_pixels().unwrap(), before);
+        let sniplet_core::AnnotationKind::Measurement { measurement } =
+            editor.read(cx).document.as_ref().unwrap().annotations()[0].kind
+        else {
+            panic!("a placed ruler must remain one measurement");
+        };
+        assert_eq!(measurement.label(), "160px");
+        window.dispatch_event(
+            gpui_kit::KeyUpEvent {
+                keystroke: gpui_kit::Keystroke::parse("right").unwrap(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(window.try_find("measure-preview").is_none());
+        window.press("ctrl-z", cx);
+        assert_eq!(editor.read(cx).export_pixels().unwrap(), before);
+        window.press("ctrl-shift-z", cx);
+        assert_eq!(
+            editor
+                .read(cx)
+                .document
+                .as_ref()
+                .unwrap()
+                .annotations()
+                .len(),
+            1
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn measurement_keys_shift_wheel_and_units_apply_to_the_placed_ruler(cx: &mut TestAppContext) {
+    let (handle, entity) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |editor, cx| {
+            let image = image::RgbaImage::from_fn(400, 300, |x, y| {
+                if (78..242).contains(&x) && (78..142).contains(&y) {
+                    if (80..240).contains(&x) && (80..140).contains(&y) {
+                        image::Rgba([80, 150, 220, 255])
+                    } else {
+                        image::Rgba([150, 150, 150, 255])
+                    }
+                } else if (30..50).contains(&x) {
+                    image::Rgba([240, 240, 240, 255])
+                } else {
+                    image::Rgba([255, 255, 255, 255])
+                }
+            });
+            editor.load(Document::new(image), "Retina ruler fixture", cx);
+            editor.set_measure_scale(2.0);
+        });
+        window.render_frame(cx);
+        window.click(("tool", Tool::Ruler as usize), cx);
+        assert!(entity.read(cx).panel == Some(crate::editor::Panel::Ruler));
+        assert_eq!(entity.read(cx).tool, Tool::Select);
+        window.click("close-panel", cx);
+        let inside = point(px(580.0), px(390.0));
+        pointer_move(window, inside, cx);
+        measure_key_down(window, "2", cx);
+        place_ruler(window, inside, false, cx);
+        assert_eq!(placed_ruler(&entity, cx).label(), "30px");
+        measure_key_up(window, "2", cx);
+        window.press("ctrl-z", cx);
+
+        measure_key_down(window, "1", cx);
+        window.dispatch_event(
+            gpui_kit::ModifiersChangedEvent {
+                modifiers: gpui_kit::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                capslock: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        place_ruler(window, inside, true, cx);
+        assert_eq!(placed_ruler(&entity, cx).label(), "82px");
+        window.click("measure-units", cx);
+        place_ruler(window, inside, true, cx);
+        assert_eq!(placed_ruler(&entity, cx).label(), "164px");
+        measure_key_up(window, "1", cx);
+        window.press("ctrl-z", cx);
+        window.press("ctrl-z", cx);
+        window.click("measure-units", cx);
+
+        let gap = point(px(500.0), px(390.0));
+        pointer_move(window, gap, cx);
+        measure_key_down(window, "right", cx);
+        for _ in 0..2 {
+            window.dispatch_event(
+                gpui_kit::ScrollWheelEvent {
+                    position: gap,
+                    delta: gpui_kit::ScrollDelta::Lines(point(0.0, -1.0)),
+                    modifiers: Default::default(),
+                    touch_phase: gpui_kit::TouchPhase::Moved,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        }
+        place_ruler(window, gap, false, cx);
+        assert_eq!(placed_ruler(&entity, cx).label(), "14px");
+        measure_key_up(window, "right", cx);
+        measure_key_down(window, "left", cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("measure-preview").is_none());
+        assert_eq!(
+            entity
+                .read(cx)
+                .document
+                .as_ref()
+                .unwrap()
+                .annotations()
+                .len(),
+            1
+        );
+    })
+    .unwrap();
+}
+
+fn measure_key_down(window: &mut gpui_kit::Window, key: &str, cx: &mut gpui_kit::App) {
+    window.dispatch_event(
+        gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke::parse(key).unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        }
+        .to_platform_input(),
+        cx,
+    );
+    window.render_frame(cx);
+}
+
+#[gpui_kit::test]
+fn measurement_respects_crop_and_keeps_selection_arrow_keys(cx: &mut TestAppContext) {
+    let (handle, entity) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |editor, cx| {
+            let mut doc = Document::new(image::RgbaImage::from_pixel(
+                400,
+                300,
+                image::Rgba([80, 150, 220, 255]),
+            ));
+            doc.set_crop(sniplet_core::ImageRect::new(100.0, 80.0, 100.0, 60.0));
+            editor.load(doc, "cropped ruler fixture", cx);
+            editor.set_measure_scale(1.0);
+        });
+        window.render_frame(cx);
+        let inside = point(px(640.0), px(450.0));
+        pointer_move(window, inside, cx);
+        measure_key_down(window, "right", cx);
+        place_ruler(window, inside, false, cx);
+        let span = placed_ruler(&entity, cx);
+        assert_eq!(
+            (span.start.x, span.end.x, span.label()),
+            (100.0, 200.0, "100px".into())
+        );
+        pointer_move(window, point(px(580.0), px(450.0)), cx);
+        assert!(window.try_find("measure-preview").is_none());
+        measure_key_up(window, "right", cx);
+        entity.update(cx, |editor, cx| {
+            let mut doc = Document::new(sniplet_core::demo_image(400, 300));
+            let id = doc.add_annotation(
+                sniplet_core::AnnotationKind::Rectangle {
+                    rect: sniplet_core::ImageRect::new(20.0, 20.0, 40.0, 40.0),
+                },
+                Default::default(),
+            );
+            doc.select(Some(id)).unwrap();
+            editor.load(doc, "selected object", cx);
+        });
+        window.render_frame(cx);
+        window.press("shift-right", cx);
+        assert_eq!(
+            entity.read(cx).document.as_ref().unwrap().annotations()[0]
+                .kind
+                .bounds()
+                .x,
+            30.0
+        );
+        assert!(window.try_find("measure-preview").is_none());
+    })
+    .unwrap();
+}
+
+fn measure_key_up(window: &mut gpui_kit::Window, key: &str, cx: &mut gpui_kit::App) {
+    window.dispatch_event(
+        gpui_kit::KeyUpEvent {
+            keystroke: gpui_kit::Keystroke::parse(key).unwrap(),
+        }
+        .to_platform_input(),
+        cx,
+    );
+    window.render_frame(cx);
+}
+
+fn place_ruler(
+    window: &mut gpui_kit::Window,
+    position: gpui_kit::Point<gpui_kit::Pixels>,
+    shift: bool,
+    cx: &mut gpui_kit::App,
+) {
+    window.dispatch_event(
+        gpui_kit::MouseDownEvent {
+            position,
+            button: gpui_kit::MouseButton::Left,
+            modifiers: gpui_kit::Modifiers {
+                shift,
+                ..Default::default()
+            },
+            click_count: 1,
+            first_mouse: false,
+        }
+        .to_platform_input(),
+        cx,
+    );
+    pointer_up(window, position, cx);
+}
+
+fn placed_ruler(editor: &Entity<Editor>, cx: &gpui_kit::App) -> sniplet_core::Measurement {
+    let sniplet_core::AnnotationKind::Measurement { measurement } = editor
+        .read(cx)
+        .document
+        .as_ref()
+        .unwrap()
+        .annotations()
+        .last()
+        .unwrap()
+        .kind
+    else {
+        panic!("expected a measurement");
+    };
+    measurement
+}
+
+#[gpui_kit::test]
 fn appearance_choices_apply_immediately_and_preserve_capture(cx: &mut TestAppContext) {
     use gpui_kit::component::{ActiveTheme, ThemeMode};
     use sniplet_platform::{SettingsStore, ThemePreference};
@@ -91,7 +387,7 @@ fn narrow_toolbar_keeps_export_and_overflow_controls_visible(cx: &mut TestAppCon
     let (handle, _) = editor_at_size(cx, 900.0, 560.0);
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        for id in ["copy", "save", "pin", "upload", "more-tools", "zoom-fit"] {
+        for id in ["copy", "save", "pin", "more-tools", "zoom-fit"] {
             let button = window.find(id);
             assert!(button.visible(), "{id} should remain visible");
             assert!(
@@ -167,12 +463,14 @@ fn text_entry_survives_editor_shortcuts_and_exports(cx: &mut TestAppContext) {
         window.click(("tool", Tool::Text as usize), cx);
         window.drag(point(px(520.0), px(390.0)), point(px(520.0), px(390.0)), cx);
         window.click("annotation-text", cx);
-        window.input("A smooth arrow", cx);
+        window.input("A smooth arrow 12", cx);
+        window.press("right", cx);
+        assert!(window.try_find("measure-preview").is_none());
         window.click("add-text", cx);
         let doc = editor.read(cx).document.as_ref().unwrap();
         assert_eq!(doc.annotations().len(), 1);
         assert!(matches!(&doc.annotations()[0].kind,
-            sniplet_core::AnnotationKind::Text { text, .. } if text == "A smooth arrow"));
+            sniplet_core::AnnotationKind::Text { text, .. } if text == "A smooth arrow 12"));
         let image = editor.read(cx).export_pixels().unwrap();
         assert_eq!(image.dimensions(), (400, 300));
         assert_ne!(image, *doc.original());
@@ -830,6 +1128,77 @@ fn toolbar_menu_and_canvas_have_layout(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn image_drag_button_starts_a_drag(cx: &mut TestAppContext) {
+    let (handle, _) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let button = window.find("drag-file").bounds();
+        assert_eq!(button.size, size(px(44.0), px(26.0)));
+        pointer_down(window, button.center(), cx);
+        pointer_move(window, button.center() + point(px(10.0), px(0.0)), cx);
+        assert!(cx.has_active_drag());
+        cx.stop_active_drag(window);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn image_drag_without_a_document_is_disabled(cx: &mut TestAppContext) {
+    let (handle, entity) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |editor, cx| {
+            editor.document = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let button = window.find("drag-file").bounds();
+        pointer_down(window, button.center(), cx);
+        pointer_move(window, button.center() + point(px(10.0), px(0.0)), cx);
+        assert!(!cx.has_active_drag());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn image_drag_file_contains_the_current_export(cx: &mut TestAppContext) {
+    let (handle, entity) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |editor, cx| {
+            let mut doc = Document::new(sniplet_core::demo_image(400, 300));
+            doc.add_annotation(
+                sniplet_core::AnnotationKind::Rectangle {
+                    rect: sniplet_core::ImageRect::new(100.0, 80.0, 70.0, 50.0),
+                },
+                Default::default(),
+            );
+            doc.set_crop(sniplet_core::ImageRect::new(80.0, 60.0, 200.0, 150.0));
+            doc.set_backdrop(sniplet_core::Backdrop {
+                padding: 12,
+                ..Default::default()
+            });
+            editor.load(doc, "drag fixture", cx);
+        });
+        window.render_frame(cx);
+        for selection in [
+            None,
+            Some(sniplet_core::ImageRect::new(100.0, 80.0, 70.0, 50.0)),
+        ] {
+            entity.update(cx, |editor, _| editor.selection = selection);
+            let editor = entity.read(cx);
+            let expected = editor.export_pixels().unwrap();
+            let gpui_kit::ExternalDragPayload::Files(files) = editor.export_drag_payload().unwrap();
+            assert_eq!(files.entries().len(), 1);
+            let (path, is_directory) = &files.entries()[0];
+            assert!(!is_directory);
+            assert_eq!(path.extension().unwrap(), "png");
+            assert_eq!(image::open(path).unwrap().to_rgba8(), expected);
+            std::fs::remove_file(path).unwrap();
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn annotation_resize_is_one_undo_step(cx: &mut TestAppContext) {
     let (handle, editor) = editor(cx);
     cx.update_window(handle, |_, window, cx| {
@@ -1066,29 +1435,94 @@ fn counter_buttons_clamp_and_set_the_next_value(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn magnifier_circles_move_and_resize_independently_with_grouped_undo(cx: &mut TestAppContext) {
+    let (handle, entity) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        entity.update(cx, |editor, cx| {
+            let doc = editor.document.as_mut().unwrap();
+            let id = doc.add_annotation(
+                sniplet_core::AnnotationKind::Magnifier {
+                    rect: sniplet_core::ImageRect::new(200.0, 100.0, 90.0, 90.0),
+                    zoom: 3.0,
+                    source: Some(sniplet_core::Point::new(60.0, 60.0)),
+                },
+                Default::default(),
+            );
+            doc.select(Some(id)).unwrap();
+            editor.tool = Tool::Zoom;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let snapshot = |cx: &gpui_kit::App| {
+            entity.read(cx).document.as_ref().unwrap().annotations()[0].clone()
+        };
+        let original = snapshot(cx);
+        let lens = window.find(("magnifier-handle", 2usize)).bounds().center();
+        window.drag(lens, lens + point(px(35.0), px(20.0)), cx);
+        let moved = snapshot(cx);
+        let before = original.kind.magnifier_circles().unwrap();
+        let after = moved.kind.magnifier_circles().unwrap();
+        assert_eq!(before[0], after[0]);
+        assert_eq!(after[1].x, before[1].x + 35.0);
+        assert_eq!(after[1].y, before[1].y + 20.0);
+        window.press("ctrl-z", cx);
+        assert_eq!(snapshot(cx), original);
+        window.press("ctrl-shift-z", cx);
+        assert_eq!(snapshot(cx), moved);
+
+        let source = window.find(("magnifier-handle", 0usize)).bounds().center();
+        window.drag(source, source + point(px(20.0), px(15.0)), cx);
+        let resampled = snapshot(cx);
+        assert_eq!(resampled.kind.magnifier_circles().unwrap()[1], after[1]);
+        assert_ne!(resampled.kind.magnifier_circles().unwrap()[0], after[0]);
+        window.press("ctrl-z", cx);
+        assert_eq!(snapshot(cx), moved);
+
+        for index in [1usize, 3] {
+            let edge = window.find(("magnifier-handle", index)).bounds().center();
+            window.drag(edge, edge + point(px(8.0), px(0.0)), cx);
+            let resized = snapshot(cx);
+            assert_ne!(resized, moved);
+            let circles = resized.kind.magnifier_circles().unwrap();
+            for circle in circles {
+                assert_eq!(circle.width, circle.height);
+            }
+            window.press("ctrl-z", cx);
+            assert_eq!(snapshot(cx), moved);
+        }
+        let lens = window.find(("magnifier-handle", 2usize)).bounds().center();
+        pointer_down(window, lens, cx);
+        pointer_move(window, lens + point(px(18.0), px(0.0)), cx);
+        window.press("escape", cx);
+        assert_eq!(snapshot(cx), moved);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn magnifier_and_spotlight_property_buttons_change_rendering(cx: &mut TestAppContext) {
     let (handle, editor) = editor(cx);
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click(("tool", Tool::Zoom as usize), cx);
         window.drag(point(px(500.0), px(350.0)), point(px(620.0), px(450.0)), cx);
-        let magnified_twice = editor.read(cx).export_pixels().unwrap();
-        window.click("magnifier-zoom-up", cx);
         let magnified_thrice = editor.read(cx).export_pixels().unwrap();
-        assert_ne!(magnified_thrice, magnified_twice);
+        window.click("magnifier-zoom-up", cx);
+        let magnified_four_times = editor.read(cx).export_pixels().unwrap();
+        assert_ne!(magnified_four_times, magnified_thrice);
         let doc = editor.read(cx).document.as_ref().unwrap();
         let sniplet_core::AnnotationKind::Magnifier { zoom, .. } = &doc.annotations()[0].kind
         else {
             panic!("expected magnifier annotation")
         };
-        assert!((*zoom - 3.0).abs() < f32::EPSILON);
+        assert!((*zoom - 4.0).abs() < f32::EPSILON);
         window.click("magnifier-zoom-down", cx);
         let doc = editor.read(cx).document.as_ref().unwrap();
         let sniplet_core::AnnotationKind::Magnifier { zoom, .. } = &doc.annotations()[0].kind
         else {
             panic!("expected magnifier annotation")
         };
-        assert!((*zoom - 2.0).abs() < f32::EPSILON);
+        assert!((*zoom - 3.0).abs() < f32::EPSILON);
 
         window.press("s", cx);
         window.drag(point(px(540.0), px(380.0)), point(px(650.0), px(470.0)), cx);

@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui_kit::{prelude::*, *};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
@@ -26,6 +29,8 @@ pub fn start(
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> Result<(), String> {
+    let capture_started = Instant::now();
+    let trace_capture = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
     let CaptureRequest {
         command,
         mut monitor,
@@ -48,16 +53,25 @@ pub fn start(
     } else {
         None
     };
-    window.minimize_window();
+    let hide_delay = crate::runtime::hide_for_capture(window);
+    if trace_capture {
+        eprintln!("capture: editor hidden in {:?}", capture_started.elapsed());
+    }
     cx.spawn(async move |_, cx| {
-        cx.background_executor().timer(Duration::from_millis(if matches!(command, Command::Delayed) { 3000 } else { 220 })).await;
+        if trace_capture { eprintln!("capture: task started in {:?}", capture_started.elapsed()); }
+        let delay = if matches!(command, Command::Delayed) { Duration::from_secs(3) } else { hide_delay };
+        if !delay.is_zero() { cx.background_executor().timer(delay).await; }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);
             });
             return;
         }
-        let frame = cx.background_executor().spawn(async move { sniplet_platform::capture_monitor(monitor) }).await;
+        let frame = cx.background_executor().spawn(async move {
+            if trace_capture { eprintln!("capture: backend started in {:?}", capture_started.elapsed()); }
+            sniplet_platform::capture_monitor(monitor)
+        }).await;
+        if trace_capture { eprintln!("capture: pixels ready in {:?}", capture_started.elapsed()); }
         cx.update(|cx| {
             if escape.is_cancelled() {
                 crate::runtime::end_escape_session(&escape, cx);
@@ -82,6 +96,7 @@ pub fn start(
                         editor.update(cx, |editor, cx| {
                             copy_capture_if_enabled(editor, &image);
                             editor.load(Document::new(image), "Repeated area capture", cx);
+                            editor.set_measure_scale(frame.scale_factor);
                         });
                     }
                     crate::runtime::end_escape_session(&escape, cx);
@@ -95,6 +110,7 @@ pub fn start(
                                 let count = this.scroll_frames.len();
                                 copy_capture_if_enabled(this, &image);
                                 this.load(Document::new(image), &format!("Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"), cx);
+                                this.set_measure_scale(frame.scale_factor);
                             },
                             Err(error) => { this.scroll_frames.pop(); this.status = format!("Could not stitch frame: {error}. Scroll less so frames overlap."); cx.notify(); },
                         }
@@ -105,6 +121,7 @@ pub fn start(
                     editor.update(cx, |this, cx| {
                         copy_capture_if_enabled(this, &frame.image);
                         this.load(Document::new(frame.image), "Screen captured", cx);
+                        this.set_measure_scale(frame.scale_factor);
                     });
                     crate::runtime::end_escape_session(&escape, cx);
                     restore(handle, cx);
@@ -112,15 +129,25 @@ pub fn start(
                     let (bounds, display_id) =
                         crate::capture_overlay::captured_frame_placement(&frame, cx);
                     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: None, kind: WindowKind::PopUp,
-                        is_movable: false, is_resizable: false, is_minimizable: false, display_id, ..Default::default() };
+                        is_movable: false, is_resizable: false, is_minimizable: false, display_id, show: !cfg!(target_os = "macos"), ..Default::default() };
                     let overlay_escape = escape.clone();
                     match gpui_kit::open_window(options, cx, |window, cx| {
+                        #[cfg(target_os = "macos")]
+                        crate::macos::prepare_capture_overlay(window, display_id);
                         window.set_window_title("Sniplet — Capture area");
                         cx.new(|cx| Overlay::new(frame, editor, handle, command, overlay_escape, window, cx))
                     }) {
                         Ok((overlay, _)) => {
                             crate::runtime::attach_escape_window(&escape, overlay, cx);
                             let _ = overlay.update(cx, |_, window, _| window.activate_window());
+                            if trace_capture {
+                                let _ = overlay.update(cx, |_, window, _| {
+                                    eprintln!("capture: overlay created in {:?}; requested={bounds:?}; actual={:?}; viewport={:?}", capture_started.elapsed(), window.bounds(), window.viewport_size());
+                                    #[cfg(target_os = "macos")]
+                                    crate::macos::trace_capture_geometry(window);
+                                    window.on_next_frame(move |_, _| eprintln!("capture: next display frame in {:?}", capture_started.elapsed()));
+                                });
+                            }
                         }
                         Err(error) => {
                             eprintln!("Could not open capture overlay: {error}");
@@ -159,11 +186,11 @@ pub fn active_window(
 pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Editor>) {
     let handle = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
-    window.minimize_window();
+    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(220))
-            .await;
+        if !hide_delay.is_zero() {
+            cx.background_executor().timer(hide_delay).await;
+        }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);
@@ -183,6 +210,7 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
                 Ok(frame) => {
                     copy_capture_if_enabled(this, &frame.image);
                     this.load(Document::new(frame.image), "Window captured", cx);
+                    this.set_measure_scale(frame.scale_factor);
                 }
                 Err(error) => {
                     this.status = error.to_string();
@@ -197,7 +225,7 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
 }
 
 fn restore(handle: AnyWindowHandle, cx: &mut App) {
-    let _ = handle.update(cx, |_, w, _| w.activate_window());
+    let _ = handle.update(cx, |_, w, cx| crate::runtime::show_editor(w, cx));
 }
 
 fn copy_capture_if_enabled(editor: &Editor, image: &image::RgbaImage) {
@@ -255,6 +283,7 @@ struct Overlay {
     command: Command,
     monitor: usize,
     monitor_id: u32,
+    scale_factor: f32,
     escape: crate::runtime::EscapeSession,
     start: Option<ImagePoint>,
     end: ImagePoint,
@@ -295,6 +324,7 @@ impl Overlay {
             editor_window,
             monitor,
             monitor_id,
+            scale_factor: frame.scale_factor,
             command,
             escape,
             start: None,
@@ -321,7 +351,12 @@ impl Overlay {
             return;
         };
         let image = crop_image(&self.source, rect);
-        if matches!(self.command, Command::Scroll) {
+        if matches!(self.command, Command::Scroll | Command::ScrollUp) {
+            let mut options = sniplet_platform::AutomaticScrollOptions::default();
+            if matches!(self.command, Command::ScrollUp) {
+                options.scroll_clicks = -options.scroll_clicks;
+            }
+            let scale_factor = self.scale_factor;
             self.preserve_escape_on_release = true;
             crate::runtime::detach_escape_window(&self.escape, cx);
             let escape = self.escape.clone();
@@ -333,7 +368,7 @@ impl Overlay {
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(Duration::from_millis(220)).await;
                 let result = cx.background_executor().spawn(async move {
-                    sniplet_platform::capture_scrolling_region(monitor, rect.x as u32, rect.y as u32, rect.width as u32, rect.height as u32, Default::default(), &cancel)
+                    sniplet_platform::capture_scrolling_region(monitor, rect.x as u32, rect.y as u32, rect.width as u32, rect.height as u32, options, &cancel)
                 }).await;
                 cx.update(|cx| {
                     let cancelled = escape.is_cancelled();
@@ -343,7 +378,8 @@ impl Overlay {
                     }
                     editor.update(cx, |editor, cx| match result { Ok(capture) => {
                         copy_capture_if_enabled(editor, &capture.image);
-                        editor.load(Document::new(capture.image), &format!("Scrolling capture · {} frames · {:?}", capture.frame_count, capture.stop), cx)
+                        editor.load(Document::new(capture.image), &format!("Scrolling capture · {} frames · {:?}", capture.frame_count, capture.stop), cx);
+                        editor.set_measure_scale(scale_factor);
                     }, Err(error) => { editor.status = format!("Scrolling capture failed: {error}. Try manual scrolling from the Sniplet menu."); cx.notify(); } });
                     restore(handle, cx);
                 });
@@ -357,6 +393,7 @@ impl Overlay {
         let editor = self.editor.clone();
         let monitor = self.monitor;
         let monitor_id = self.monitor_id;
+        let scale_factor = self.scale_factor;
         let updated = self.editor_window.update(cx, |_, editor_window, cx| {
             editor.update(cx, |editor, cx| {
                 copy_capture_if_enabled(editor, &image);
@@ -382,12 +419,13 @@ impl Overlay {
                         },
                         cx,
                     );
+                    editor.set_measure_scale(scale_factor);
                     if recognize {
                         editor.command(Command::Ocr, editor_window, cx);
                     }
                 }
             });
-            editor_window.activate_window();
+            crate::runtime::show_editor(editor_window, cx);
         });
         if updated.is_err() {
             return;
@@ -589,7 +627,7 @@ impl Pinned {
                 editor.update(cx, |editor, cx| {
                     editor.load(Document::new(source), "Pinned image opened for editing", cx);
                 });
-                editor_window.activate_window();
+                crate::runtime::show_editor(editor_window, cx);
             })
             .is_ok()
         {

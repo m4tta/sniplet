@@ -1,18 +1,23 @@
-use crate::editor::{Command, Editor, render_options};
+use crate::{
+    editor::{Command, Editor, render_options},
+    menu_bar::NativeMenu,
+};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui_kit::*;
 use sniplet_core::{
     AnnotationKind, AnnotationStyle, Color, Document, ImageRect, Point as ImagePoint,
 };
-use std::{path::PathBuf, str::FromStr, time::Duration};
-use tray_icon::{
-    Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    time::{Duration, Instant},
 };
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, menu::MenuEvent};
 
 struct Services {
     manager: Option<GlobalHotKeyManager>,
     _tray: Option<TrayIcon>,
+    editor_window: Option<AnyWindowHandle>,
     escape: Option<EscapeRegistration>,
     next_escape_id: u64,
 }
@@ -57,6 +62,7 @@ pub(crate) fn install_test_services(cx: &mut App) {
     cx.set_global(Services {
         manager: None,
         _tray: None,
+        editor_window: None,
         escape: None,
         next_escape_id: 1,
     });
@@ -98,102 +104,116 @@ fn capture_bindings(settings: &sniplet_platform::HotkeySettings) -> [(&str, Comm
     ]
 }
 
+fn register_hotkeys(
+    manager: Option<&GlobalHotKeyManager>,
+    settings: &sniplet_platform::HotkeySettings,
+) -> (Vec<(HotKey, Command)>, Vec<String>) {
+    let Some(manager) = manager else {
+        return (
+            Vec::new(),
+            vec![
+                "Global shortcuts are unavailable in this desktop session; use the Sniplet menu"
+                    .into(),
+            ],
+        );
+    };
+    let mut bindings = Vec::new();
+    let mut errors = Vec::new();
+    for (text, command) in capture_bindings(settings)
+        .into_iter()
+        .filter(|(text, _)| !text.is_empty())
+    {
+        match parse_hotkey(text).and_then(|key| {
+            manager.register(key).map_err(|error| error.to_string())?;
+            Ok(key)
+        }) {
+            Ok(key) => bindings.push((key, command)),
+            Err(error) => errors.push(format!("Shortcut {text} could not be registered: {error}")),
+        }
+    }
+    (bindings, errors)
+}
+
+/// Hide the editor without dropping its document or sending it to the Dock.
+pub fn hide_editor(window: &Window, _cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    if crate::macos::hide_editor(window) {
+        return;
+    }
+    window.minimize_window();
+}
+
+pub fn show_editor(window: &Window, cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    crate::macos::show_dock_icon(window);
+    window.activate_window();
+    cx.activate(true);
+}
+
+/// Return the time needed for the editor to leave the captured screen.
+pub fn hide_for_capture(window: &Window) -> Duration {
+    #[cfg(target_os = "macos")]
+    if crate::macos::hide_for_capture(window) {
+        return Duration::ZERO;
+    }
+    window.minimize_window();
+    Duration::from_millis(220)
+}
+
+pub fn reopen(cx: &mut App) {
+    if cx.has_global::<Services>()
+        && let Some(handle) = cx.global::<Services>().editor_window
+    {
+        let _ = handle.update(cx, |_, window, cx| show_editor(window, cx));
+    }
+}
+
 pub fn install(
     handle: AnyWindowHandle,
     editor: Entity<Editor>,
     settings: &sniplet_platform::HotkeySettings,
     cx: &mut App,
 ) {
-    let mut registered = Vec::new();
     let manager = GlobalHotKeyManager::new().ok();
-    if let Some(manager) = &manager {
-        for (text, command) in capture_bindings(settings)
-            .into_iter()
-            .filter(|(text, _)| !text.is_empty())
-        {
-            match parse_hotkey(text).and_then(|key| {
-                manager.register(key).map_err(|e| e.to_string())?;
-                Ok(key)
-            }) {
-                Ok(key) => registered.push((key.id(), command)),
-                Err(error) => {
-                    editor.update(cx, |this, cx| {
-                        this.status = format!("Shortcut {text} could not be registered: {error}");
-                        cx.notify();
-                    });
-                }
-            }
-        }
-    } else {
+    let (mut registered, errors) = register_hotkeys(manager.as_ref(), settings);
+    for error in errors {
         editor.update(cx, |this, cx| {
-            this.status =
-                "Global shortcuts are unavailable in this desktop session; use the Sniplet menu"
-                    .into();
+            this.status = error;
             cx.notify();
         });
     }
-    let menu = Menu::new();
-    let items = [
-        MenuItem::new("Capture Area", true, None),
-        MenuItem::new("Capture Screen", true, None),
-        MenuItem::new("Capture Window", true, None),
-        MenuItem::new("Scrolling Capture", true, None),
-        MenuItem::new("Repeat Area", true, None),
-        MenuItem::new("Capture Active Window", true, None),
-        MenuItem::new("Capture Text / QR", true, None),
-        MenuItem::new("Open Editor", true, None),
-        MenuItem::new("Quit Sniplet", true, None),
-    ];
-    for item in &items[..7] {
-        let _ = menu.append(item);
-    }
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    for item in &items[7..] {
-        let _ = menu.append(item);
-    }
-    let commands: Vec<_> = items
-        .iter()
-        .take(7)
-        .zip([
-            Command::Area,
-            Command::Screen,
-            Command::Window,
-            Command::Scroll,
-            Command::Repeat,
-            Command::ActiveWindow,
-            Command::CaptureOcr,
-        ])
-        .map(|(item, command)| (item.id().clone(), command))
-        .collect();
-    let show_id = items[7].id().clone();
-    let quit_id = items[8].id().clone();
-    let mut rgba = vec![0_u8; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            if ((x as i32 - 16).pow(2) + (y as i32 - 16).pow(2)) < 210 {
-                let i = (y * 32 + x) * 4;
-                rgba[i..i + 4].copy_from_slice(&[40, 40, 40, 255]);
-            }
-        }
-    }
-    let tray = Icon::from_rgba(rgba, 32, 32).ok().and_then(|icon| {
-        TrayIconBuilder::new()
+    let native = NativeMenu::new(settings).and_then(|menu| {
+        let pixels = crate::menu_bar::icon_pixels("scissors")
+            .ok_or_else(|| anyhow::anyhow!("The menu bar icon could not be loaded"))?;
+        let icon = Icon::from_rgba(pixels, 32, 32)?;
+        let tray = TrayIconBuilder::new()
             .with_tooltip("Sniplet")
-            .with_icon(icon)
-            .with_menu(Box::new(menu))
-            .build()
-            .ok()
+            .with_menu(Box::new(menu.menu.clone()));
+        #[cfg(target_os = "macos")]
+        let tray = tray.with_icon_templated(icon);
+        #[cfg(not(target_os = "macos"))]
+        let tray = tray.with_icon(icon);
+        let tray = tray.build()?;
+        Ok((menu, tray))
     });
-    if tray.is_none() {
-        editor.update(cx, |this, cx| {
-            this.status =
-                "System tray unavailable; close the editor or use Ctrl/Cmd Q to quit".into();
-            cx.notify();
-        });
-    }
+    let (mut native_menu, tray) = match native {
+        Ok((menu, tray)) => (Some(menu), Some(tray)),
+        Err(error) => {
+            editor.update(cx, |this, cx| {
+                this.status = format!(
+                    "Menu bar unavailable: {error}. Close the editor or use Ctrl/Cmd Q to quit"
+                );
+                cx.notify();
+            });
+            (None, None)
+        }
+    };
+    let mut current_hotkeys = settings.clone();
+    let mut startup_checked_at = Instant::now();
     cx.set_global(Services {
         manager,
         _tray: tray,
+        editor_window: Some(handle),
         escape: None,
         next_escape_id: 1,
     });
@@ -203,6 +223,31 @@ pub fn install(
                 .timer(Duration::from_millis(60))
                 .await;
             cx.update(|cx| {
+                let hotkeys = &editor.read(cx).settings.hotkeys;
+                if *hotkeys != current_hotkeys {
+                    let hotkeys = hotkeys.clone();
+                    let manager = cx.global::<Services>().manager.as_ref();
+                    if let Some(manager) = manager {
+                        for (key, _) in &registered {
+                            let _ = manager.unregister(*key);
+                        }
+                    }
+                    let (bindings, mut errors) = register_hotkeys(manager, &hotkeys);
+                    registered = bindings;
+                    if let Some(menu) = &mut native_menu
+                        && let Err(error) = menu.update_hotkeys(&hotkeys)
+                    {
+                        errors.push(format!("Menu shortcuts could not be updated: {error}"));
+                    }
+                    current_hotkeys = hotkeys;
+                    for error in errors {
+                        editor.update(cx, |this, cx| {
+                            this.status = error;
+                            cx.notify();
+                        });
+                    }
+                }
+
                 while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
                     if event.state != HotKeyState::Pressed {
                         continue;
@@ -217,21 +262,42 @@ pub fn install(
                         cancel_active_escape(cx);
                         continue;
                     }
-                    if let Some((_, command)) = registered.iter().find(|(id, _)| *id == event.id) {
+                    if let Some((_, command)) = registered.iter().find(|(key, _)| key.id() == event.id) {
                         invoke(handle, &editor, *command, cx);
                     }
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if event.id == quit_id {
-                        cx.quit();
-                        return;
+                    let Some(menu) = &native_menu else { continue };
+                    if event.id == *menu.startup.id() {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let enabled = menu.startup.is_checked();
+                            let result = crate::macos::set_launch_at_startup(enabled);
+                            menu.startup.set_checked(crate::macos::launch_at_startup());
+                            editor.update(cx, |this, cx| {
+                                this.status = match result {
+                                    Ok(true) => "Sniplet will launch at startup".into(),
+                                    Ok(false) if !enabled => "Launch at startup is disabled".into(),
+                                    Ok(false) => "Check Sniplet's setting in System Settings → General → Login Items".into(),
+                                    Err(error) => format!("Could not change launch at startup: {error}"),
+                                };
+                                cx.notify();
+                            });
+                        }
+                    } else if let Some(command) = menu.command(&event.id) {
+                        if matches!(command, Command::Quit) {
+                            cx.quit();
+                            return;
+                        }
+                        invoke(handle, &editor, command, cx);
                     }
-                    if event.id == show_id {
-                        let _ = handle.update(cx, |_, w, _| w.activate_window());
+                }
+                if startup_checked_at.elapsed() >= Duration::from_secs(1) {
+                    #[cfg(target_os = "macos")]
+                    if let Some(menu) = &native_menu {
+                        menu.startup.set_checked(crate::macos::launch_at_startup());
                     }
-                    if let Some((_, command)) = commands.iter().find(|(id, _)| *id == event.id) {
-                        invoke(handle, &editor, *command, cx);
-                    }
+                    startup_checked_at = Instant::now();
                 }
             });
         }
@@ -241,6 +307,12 @@ pub fn install(
 
 fn invoke(handle: AnyWindowHandle, editor: &Entity<Editor>, command: Command, cx: &mut App) {
     let _ = handle.update(cx, |_, window, cx| {
+        if matches!(
+            command,
+            Command::Open | Command::LoadClipboard | Command::Settings
+        ) {
+            show_editor(window, cx);
+        }
         editor.update(cx, |this, cx| this.command(command, window, cx))
     });
 }
@@ -510,6 +582,7 @@ mod tests {
         let mut services = Services {
             manager: None,
             _tray: None,
+            editor_window: None,
             escape: Some(escape_registration(2)),
             next_escape_id: 3,
         };

@@ -130,6 +130,7 @@ fn rectangular_text_counter_and_freehand_geometry_resize_predictably() {
         AnnotationKind::Magnifier {
             rect: ImageRect::new(1.0, 1.0, 5.0, 5.0),
             zoom: 2.0,
+            source: None,
         },
     ];
     for kind in rectangular_kinds {

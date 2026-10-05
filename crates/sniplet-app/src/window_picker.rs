@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use gpui_kit::{prelude::*, *};
 
 use crate::{
@@ -363,14 +361,16 @@ impl Render for WindowCaptureOverlay {
 pub(crate) fn open(
     monitor: usize,
     editor: Entity<Editor>,
-    editor_window: AnyWindowHandle,
+    window: &Window,
     cx: &mut App,
 ) -> Result<(), String> {
+    let editor_window = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
+    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(220))
-            .await;
+        if !hide_delay.is_zero() {
+            cx.background_executor().timer(hide_delay).await;
+        }
         if escape.is_cancelled() {
             cx.update(|cx| crate::runtime::end_escape_session(&escape, cx));
             return;
@@ -432,12 +432,20 @@ fn open_snapshot(
         is_resizable: false,
         is_minimizable: false,
         display_id,
+        show: !cfg!(target_os = "macos"),
+        kind: if cfg!(target_os = "macos") {
+            WindowKind::PopUp
+        } else {
+            WindowKind::Normal
+        },
         app_id: Some(sniplet_platform::APP_ID.into()),
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
     let overlay_escape = escape.clone();
     let opened = gpui_kit::open_window(options, cx, move |window, cx| {
+        #[cfg(target_os = "macos")]
+        crate::macos::prepare_capture_overlay(window, display_id);
         window.set_window_title("Sniplet — Capture window");
         cx.new(|cx| {
             WindowCaptureOverlay::new(
@@ -472,7 +480,7 @@ fn fail_open(
         cx.notify();
     });
     crate::runtime::end_escape_session(escape, cx);
-    let _ = editor_window.update(cx, |_, window, _| window.activate_window());
+    let _ = editor_window.update(cx, |_, window, cx| crate::runtime::show_editor(window, cx));
 }
 
 fn start_capture(id: u32, editor: Entity<Editor>, editor_window: AnyWindowHandle, cx: &mut App) {

@@ -85,6 +85,7 @@ case "$(uname -s)" in
 </dict>
 </plist>
 PLIST
+        codesign --force --sign - "$bundle"
         printf 'Created macOS application bundle: %s\n' "$bundle"
         ;;
     Linux)

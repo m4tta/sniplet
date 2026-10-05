@@ -6,6 +6,13 @@ resolver = "3"
 [profile.dev]
 debug = 0
 
+# Full-display pixel conversion must stay responsive in the debug desktop app.
+[profile.dev.package.sniplet-app]
+opt-level = 2
+
+[profile.dev.package.xcap]
+opt-level = 2
+
 [profile.test]
 debug = 0
 
