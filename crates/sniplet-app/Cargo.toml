@@ -23,9 +23,15 @@ tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 serde_json = "1"
 resvg = { version = "0.45.1", default-features = false }
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.6.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSGraphics", "NSScreen", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSCursor", "NSEvent", "NSGraphics", "NSScreen", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSValue"] }
 objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
 raw-window-handle = "0.6"

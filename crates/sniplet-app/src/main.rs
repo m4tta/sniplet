@@ -87,6 +87,15 @@ fn main() -> anyhow::Result<()> {
         )));
         options.window_min_size = Some(size(px(900.0), px(560.0)));
         options.app_id = Some(sniplet_platform::APP_ID.into());
+        #[cfg(target_os = "linux")]
+        {
+            // X11 uses these pixels; Wayland uses the matching desktop entry.
+            options.icon = Some(std::sync::Arc::new(
+                image::load_from_memory(include_bytes!("../../../assets/icons/sniplet-256.png"))
+                    .expect("The bundled app icon must be a valid PNG")
+                    .to_rgba8(),
+            ));
+        }
         if settings.always_on_top && !args.iter().any(|a| a == "--normal-window") {
             options.kind = WindowKind::PopUp;
         }

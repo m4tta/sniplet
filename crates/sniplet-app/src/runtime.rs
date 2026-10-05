@@ -12,7 +12,7 @@ use std::{
     str::FromStr,
     time::{Duration, Instant},
 };
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder, menu::MenuEvent};
+use tray_icon::{TrayIcon, TrayIconBuilder, menu::MenuEvent};
 
 struct Services {
     manager: Option<GlobalHotKeyManager>,
@@ -182,10 +182,12 @@ pub fn install(
             cx.notify();
         });
     }
+    #[cfg(target_os = "windows")]
+    let mut tray_light_theme = crate::menu_bar::taskbar_uses_light_theme();
+    #[cfg(not(target_os = "windows"))]
+    let tray_light_theme = true;
     let native = NativeMenu::new(settings).and_then(|menu| {
-        let pixels = crate::menu_bar::icon_pixels("scissors")
-            .ok_or_else(|| anyhow::anyhow!("The menu bar icon could not be loaded"))?;
-        let icon = Icon::from_rgba(pixels, 32, 32)?;
+        let icon = crate::menu_bar::tray_icon(tray_light_theme)?;
         let tray = TrayIconBuilder::new()
             .with_tooltip("Sniplet")
             .with_menu(Box::new(menu.menu.clone()));
@@ -296,6 +298,17 @@ pub fn install(
                     #[cfg(target_os = "macos")]
                     if let Some(menu) = &native_menu {
                         menu.startup.set_checked(crate::macos::launch_at_startup());
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        let light_theme = crate::menu_bar::taskbar_uses_light_theme();
+                        if light_theme != tray_light_theme
+                            && let Some(tray) = &cx.global::<Services>()._tray
+                            && let Ok(icon) = crate::menu_bar::tray_icon(light_theme)
+                            && tray.set_icon(Some(icon)).is_ok()
+                        {
+                            tray_light_theme = light_theme;
+                        }
                     }
                     startup_checked_at = Instant::now();
                 }

@@ -1,0 +1,2 @@
+// GPUI loads resource 1 for the window and taskbar icon.
+1 ICON "../../assets/icons/sniplet.ico"

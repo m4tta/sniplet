@@ -70,6 +70,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "README.md") -Destination (Join-Path $Bundle "README.md")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "LICENSE") -Destination (Join-Path $Bundle "LICENSE")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "assets\fonts\OFL.txt") -Destination (Join-Path $Bundle "licenses\NotoSans-OFL.txt")
+    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "assets\icons\LICENSE-LUCIDE") -Destination (Join-Path $Bundle "licenses\Lucide-ISC.txt")
     Copy-Item -Path (Join-Path $WorkspaceRoot "docs\*.md") -Destination (Join-Path $Bundle "documentation")
 
     Write-Host "`nCreated portable Windows package: $Bundle" -ForegroundColor Green

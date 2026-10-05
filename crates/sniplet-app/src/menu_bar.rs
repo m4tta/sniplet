@@ -163,6 +163,33 @@ pub fn icon_pixels(name: &str) -> Option<Vec<u8>> {
     Some(pixmap.take())
 }
 
+/// Use the menu bar scissors in the tray, with ink suited to its background.
+pub fn tray_icon(light_background: bool) -> anyhow::Result<tray_icon::Icon> {
+    Ok(tray_icon::Icon::from_rgba(
+        tray_icon_pixels(light_background)?,
+        32,
+        32,
+    )?)
+}
+
+fn tray_icon_pixels(light_background: bool) -> anyhow::Result<Vec<u8>> {
+    let mut pixels = icon_pixels("scissors")
+        .ok_or_else(|| anyhow::anyhow!("The menu bar icon could not be loaded"))?;
+    let ink = if light_background { 0 } else { 255 };
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel[..3].fill(ink);
+    }
+    Ok(pixels)
+}
+
+#[cfg(target_os = "windows")]
+pub fn taskbar_uses_light_theme() -> bool {
+    windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|key| key.get_u32("SystemUsesLightTheme"))
+        .is_ok_and(|value| value != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +232,25 @@ mod tests {
                 pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn tray_uses_the_same_scissors_mask_in_both_themes() {
+        let light = tray_icon_pixels(true).unwrap();
+        let dark = tray_icon_pixels(false).unwrap();
+        let scissors = icon_pixels("scissors").unwrap();
+        for ((light, dark), source) in light
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dark.as_chunks::<4>().0)
+            .zip(scissors.as_chunks::<4>().0)
+        {
+            assert_eq!(&light[..3], &[0, 0, 0]);
+            assert_eq!(&dark[..3], &[255, 255, 255]);
+            assert_eq!(light[3], source[3]);
+            assert_eq!(dark[3], source[3]);
         }
     }
 }

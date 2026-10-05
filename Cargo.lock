@@ -7234,6 +7234,7 @@ name = "sniplet-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "global-hotkey",
  "gpui-kit",
  "image",
@@ -7247,6 +7248,7 @@ dependencies = [
  "sniplet-core",
  "sniplet-platform",
  "tray-icon",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]

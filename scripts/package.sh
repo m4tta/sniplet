@@ -60,12 +60,25 @@ case "$(uname -s)" in
         bundle="$output_root/Sniplet$bundle_suffix.app"
         [ -f "$binary" ] || { echo "$profile executable not found at $binary" >&2; exit 1; }
 
+        signing_identity="${SNIPLET_SIGNING_IDENTITY:-}"
+        if [ -z "$signing_identity" ]; then
+            # Reuse only the local Sniplet certificate, never another developer identity.
+            signing_identity=$(security find-certificate -c "Sniplet Development" -Z 2>/dev/null \
+                | sed -n 's/^SHA-1 hash: //p')
+            signing_identity="${signing_identity:--}"
+        fi
+        if [ "$signing_identity" = "-" ]; then
+            echo "Using ad hoc signing; macOS permissions may need a new grant after rebuilding."
+        fi
+
         rm -rf "$bundle"
         mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/licenses"
         install -m 0755 "$binary" "$bundle/Contents/MacOS/Sniplet"
         cp "$workspace_root/README.md" "$bundle/Contents/Resources/README.md"
         cp "$workspace_root/LICENSE" "$bundle/Contents/Resources/LICENSE"
         cp "$workspace_root/assets/fonts/OFL.txt" "$bundle/Contents/Resources/licenses/NotoSans-OFL.txt"
+        cp "$workspace_root/assets/icons/LICENSE-LUCIDE" "$bundle/Contents/Resources/licenses/Lucide-ISC.txt"
+        cp "$workspace_root/assets/icons/sniplet.icns" "$bundle/Contents/Resources/Sniplet.icns"
         copy_documentation "$bundle/Contents/Resources/documentation"
         cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -76,6 +89,7 @@ case "$(uname -s)" in
   <key>CFBundleExecutable</key><string>Sniplet</string>
   <key>CFBundleIdentifier</key><string>$app_id</string>
   <key>CFBundleName</key><string>Sniplet</string>
+  <key>CFBundleIconFile</key><string>Sniplet.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>0.1.0</string>
@@ -85,7 +99,7 @@ case "$(uname -s)" in
 </dict>
 </plist>
 PLIST
-        codesign --force --sign - "$bundle"
+        codesign --force --timestamp=none --sign "$signing_identity" "$bundle"
         printf 'Created macOS application bundle: %s\n' "$bundle"
         ;;
     Linux)
@@ -101,6 +115,15 @@ PLIST
         cp "$workspace_root/README.md" "$bundle/README.md"
         cp "$workspace_root/LICENSE" "$bundle/LICENSE"
         cp "$workspace_root/assets/fonts/OFL.txt" "$bundle/share/licenses/sniplet/NotoSans-OFL.txt"
+        cp "$workspace_root/assets/icons/LICENSE-LUCIDE" "$bundle/share/licenses/sniplet/Lucide-ISC.txt"
+        icon_root="$bundle/share/icons/hicolor"
+        mkdir -p "$icon_root/scalable/apps"
+        cp "$workspace_root/assets/icons/sniplet.svg" "$icon_root/scalable/apps/$app_id.svg"
+        for icon_size in 16 24 32 48 64 128 256 512; do
+            mkdir -p "$icon_root/${icon_size}x${icon_size}/apps"
+            cp "$workspace_root/assets/icons/sniplet-$icon_size.png" \
+                "$icon_root/${icon_size}x${icon_size}/apps/$app_id.png"
+        done
         copy_documentation "$bundle/share/doc/sniplet"
         cat > "$bundle/share/applications/$app_id.desktop" <<DESKTOP
 [Desktop Entry]
@@ -108,6 +131,7 @@ Type=Application
 Name=Sniplet
 Comment=Capture and annotate screenshots
 Exec=sniplet
+Icon=$app_id
 Terminal=false
 Categories=Graphics;Utility;
 MimeType=image/png;image/jpeg;image/webp;
