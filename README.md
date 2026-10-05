@@ -22,16 +22,27 @@ cargo run -p sniplet-app
 Capture from the tray menu or use Ctrl/Cmd + Shift + 1 (area), 2 (screen),
 3 (window), 4 (scrolling), 5 (repeat area), 6 (active window), or 7
 (capture text/QR). Ctrl/Cmd + Shift + 8 reopens the editor. Closing the editor
-keeps Sniplet in the tray when the desktop provides one; Ctrl/Cmd+Q exits.
+keeps Sniplet in the tray when the desktop provides one. On macOS, it hides the
+window and removes Sniplet from the Dock. Reopen Sniplet restores the same image.
+Quit Sniplet or Ctrl/Cmd+Q exits.
 
 The editor supports selection/crop, arrows, lines, text, rectangles, ovals,
 freehand, counters, rulers, blur, pixelation, highlight, spotlight, erase,
-magnifiers, backdrops, pasted images, and added captures. Press A for Arrow;
+magnifiers, backdrops, pasted images, and added captures. New magnifiers show a
+source circle and a larger lens joined by a line. Move either circle with its
+center handle; use its right-edge handle to change size. Press A for Arrow;
 arrows start with a bold, smooth solid style. The arrow palette offers Solid,
 Hand drawn, Thin, and Double ended styles, plus a tapered size slider (1–30).
 Size changes preview live; one drag is one undo step. Drag the middle handle to bend an
 arrow, or either endpoint to reposition it. Drag its shaft to move the whole
 arrow. Draw, then select with V to move or resize other annotations.
+
+Hold 1 or Left/Right to measure a width. Hold 2 or Up/Down to measure a height.
+Move the pointer over an area or gap, then click to place the red ruler and label.
+Hold Shift for outer edges. Use the wheel to adjust sensitivity. Click the image
+size to switch between points and physical pixels. Release the key or press
+Escape to clear the live preview. Selected objects keep their arrow-key controls.
+
 Double-click text to edit it; Alt-drag to
 duplicate. Enter crops a raster selection; Escape cancels. Copy/export uses
 the selection when present. Undo/redo preserves editing operations.
@@ -46,7 +57,9 @@ Save PNG/JPEG/WebP through the native save dialog. Ctrl/Cmd + Shift + S saves
 an editable `.sniplet` project and its `.source.png` companion; keep them together.
 Existing `.clippy` projects also open in Sniplet.
 The application ID and preferences namespace are `io.github.m4tta.sniplet`.
-The dotted file control drags a rendered PNG into other applications.
+Drag the dotted file button, labeled `Drag'n'Drop Image`, into Finder or another
+application to export a PNG. It includes the current edits, or the selected area
+when a raster selection is active. The button is disabled until an image is open.
 Pin creates a movable floating image; wheel resizes it, its hover controls change
 opacity or return it to the editor, and Escape/right-click closes it. Add Capture
 places a new capture to the right on an expanded canvas as an editable object.
@@ -69,7 +82,8 @@ places a new capture to the right on an expanded canvas as an editable object.
 
 Use the application menu → Settings for format, automatic clipboard copy,
 display selection, editor behavior, and capture shortcuts. Shortcut changes
-take effect after restarting. Upload is disabled until a destination is configured.
+apply immediately. The macOS menu bar also offers Launch at Startup and
+upward scrolling capture under More. Upload is disabled until a destination is configured.
 Sniplet follows the system's light or dark appearance by default. Settings →
 Appearance lets you choose System, Light, or Dark; changes apply immediately and
 remain selected after restarting.
@@ -191,8 +205,19 @@ lifecycle, cross-application clipboard behavior, and pin behavior still need
 full desktop records. WSLg can open the editor through Wayland and X11, but its
 capture backends are incompatible; physical Linux X11/Wayland desktops have not
 been qualified. GitHub Actions builds and tests the workspace on all three
-platforms; native macOS desktop testing remains outstanding. Exact
-visual parity still needs 1×/2× reference comparisons and golden-image review.
+platforms. On an Apple Silicon Mac at commit `3fffbcf`, all 124 tests passed,
+along with native screen/area capture, editor input, PNG export, clipboard paste
+into Preview, and project save/reload. Window capture selected the wrong target,
+and OCR was blocked by missing Tesseract. See the
+[Mac test record](docs/platform-testing.md#observed-macos-run-october-4-2026).
+The Mac window picker now excludes system layers. Its Dock/Preview test, 25
+platform tests, and 49 app tests pass. Final packaged Preview capture needs the
+Screen Recording grant for the new app ID. See the
+[window picker fix record](docs/platform-testing.md#macos-window-picker-fix-october-4-2026).
+The linked magnifier passed native Mac creation, circle movement, size changes,
+factor adjustment, undo and PNG export. All 52 core and 50 app tests passed;
+see the [magnifier test record](docs/platform-testing.md#macos-linked-magnifier-october-4-2026).
+Exact visual parity still needs 1×/2× reference comparisons and golden-image review.
 
 ## Research and scope
 

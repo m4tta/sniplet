@@ -257,7 +257,49 @@ The application ID is now `io.github.m4tta.sniplet`. The editor and window-captu
 
 Preferences use `ProjectDirs::from("io.github", "m4tta", "sniplet")`, preserving normal per-platform directory conventions. Settings migration is removed at the user's request; the current store reads only its current path and uses defaults when that file is missing. This supersedes the settings-migration behavior in the earlier rename record. Atomic saves, replacement of existing preferences, malformed-file errors, and legacy `.clippy` project support remain intact.
 
-Final Windows and Linux full verification passed format, locked workspace check/build, strict lint, 49 core tests, 24 platform tests, and 49 UI-feature app tests: 122 distinct tests per host. Windows also passed default-feature lint, bounded packaged startup smoke, and native capture/image diagnostics on the 2560×1440 XG270QG display. Linux passed default-feature build, packaging with `io.github.m4tta.sniplet.desktop` and matching startup class, shell syntax checking, and bounded WSLg startup smoke. Logs and the rerunnable Windows native probe are under `artifacts/app-namespace`; they are local development evidence. The initial repository commit `3fffbcf` also passed all four [GitHub Actions jobs](https://github.com/m4tta/sniplet/actions/runs/37230646089), including the macOS workspace. Native macOS desktop testing remains outstanding.
+Final Windows and Linux full verification passed format, locked workspace check/build, strict lint, 49 core tests, 24 platform tests, and 49 UI-feature app tests: 122 distinct tests per host. Windows also passed default-feature lint, bounded packaged startup smoke, and native capture/image diagnostics on the 2560×1440 XG270QG display. Linux passed default-feature build, packaging with `io.github.m4tta.sniplet.desktop` and matching startup class, shell syntax checking, and bounded WSLg startup smoke. Logs and the rerunnable Windows native probe are under `artifacts/app-namespace`; they are local development evidence. The initial repository commit `3fffbcf` also passed all four [GitHub Actions jobs](https://github.com/m4tta/sniplet/actions/runs/37230646089), including the macOS workspace. The native Mac desktop record below covers the initial commit; the namespace correction still needs a native Mac test.
+
+## Observed macOS run: October 4, 2026
+
+The tests started from clean commit `3fffbcf426a422b152b18daa6fb71bb4aa9b8b43`. This record covers an Apple Silicon debug build before the namespace correction above. Logs, screenshots, and image fixtures are in `artifacts/mac-testing`.
+
+| Check | Evidence |
+| --- | --- |
+| Host | macOS 26.5 build 25F71, Apple M1 Max, 32 GB RAM, built-in Retina display |
+| Build tools | Rust and Cargo 1.99.0, Xcode 26.6 build 17F113, Metal compiler 32023.883. The existing Rust 1.84.1 could not parse edition 2024. Stable Rust was updated, and the missing Xcode Metal component was installed. |
+| Automated suite | `bash scripts/verify.sh all` passed format, locked workspace check/build, 49 core tests, 26 platform tests, and 49 app tests with UI features. The 15 ordinary app tests are included in the UI count: 124 distinct tests, with no failures or ignored tests. Strict workspace Clippy passed with warnings denied. See `verify.log`. |
+| Startup and native diagnostic | `--demo --smoke --normal-window` and `--self-test artifacts/mac-testing/self-test` exited 0. The diagnostic reported a 4112×2658 display and passed annotation, undo/redo, crop, PNG reload, and font checks. These command-line results do not prove the packaged app's Screen Recording access. |
+| Debug package | `SNIPLET_PACKAGE_PROFILE=debug bash scripts/package.sh` created `dist/Sniplet-debug.app`. Its plist passed `plutil -lint`. Executable SHA-256: `796784e0d3872de1119dddc0858aaedfcdd637a912fb8c86873012c26075abd5`. See `package.log`. |
+| Native editor | The packaged app opened the demo PNG, selected Arrow with A, and drew an arrow with a pointer drag. Cmd+Z removed it; Cmd+Shift+Z restored it. `native-arrow.png` records the result. |
+| PNG export | The native Save dialog wrote `native-save.png` at 1000×660. Apple Preview opened and displayed it. See `preview-save.png`. |
+| Clipboard | Cmd+C reported Image copied. Preview's New from Clipboard displayed the image, then saved it as `native-clipboard.png`. Both images are 1000×660 with equal alpha. Preview's saved copy differs at 29 pixels by at most one RGB unit; exact pixel equality is not claimed. See `clipboard-comparison.json` and `preview-clipboard.png`. |
+| Project save/reload | The native Save Project dialog wrote `native-project.sniplet` and its source PNG. After the permission restart, the app reopened the project with its 400×300 source and solid arrow intact. See `project-reload.png`. |
+| Screen Recording | The user approved the grant and completed the administrator prompt. System Settings showed Sniplet-debug enabled. Quit & Reopen restarted the packaged app. |
+| Full-screen capture | After the grant, Capture screen loaded a 4112×2658 image with the desktop and app windows visible. See `screen-permission-granted.png`. |
+| Area capture | Capture area loaded a 720×460 region of the Preview image after a drag from physical pixel (3260,700) to (3980,1160). The image showed the fixture's text and arrows. See `area-permission-granted.png`. |
+| Window capture | Failed. With the picker open, selecting physical pixel (3500,900) inside the visible Preview fixture produced a 4112×2658 image of the Dock over a blank background. Status said Window captured. A second attempt produced the same wrong result. See `window-wrong-target.png`. |
+| Window cancellation | Escape sent to the picker removed it and left the existing image intact. See `window-cancel.png`. The background editor's minimized state was not confirmed by the per-app inspection tool. |
+| OCR | The native command reported that the `tesseract` executable was not found. OCR requires this optional dependency and its language data on this host. See `native-ocr.png`. |
+
+Before Screen Recording was enabled, area selection produced a 400×300 wallpaper image. Escape removed an area overlay and preserved the existing document. Window selection closed its picker but did not produce a new capture. The later permission grant resolved capture of app windows for screen and area capture. It did not resolve window selection.
+
+The window result needs a fix before macOS capture can pass as a whole. `WindowInfo::is_capture_candidate` accepts any non-minimized, titled window from another process. `window_at_point` then selects the largest z-order at that point. The macOS route has no filter for system helper windows. The initial run did not log the selected native window ID. The follow-up below confirms the cause.
+
+
+
+Tray lifecycle, pin behavior, scrolling capture, mixed displays, Spaces/fullscreen, Intel Macs, and signed release packaging still need separate evidence. The upstream namespace record above reports the initial commit's GitHub Actions results. No application source files changed during this test run.
+
+## macOS window picker fix: October 4, 2026
+
+The fix starts from commit `1884b67` on `codex/fix-macos-window-capture`. A native window probe confirmed that the Dock owns window 9393 on layer 20. Its 2056×1329 point bounds cover the display. Preview window 63546 uses layer 0. At desktop point (504,425), the old picker selected the Dock because its z-order was 20, above Preview's 11. See `artifacts/mac-window-fix/native-before.json`.
+
+Mac window enumeration now checks Core Graphics metadata and offers only normal application windows on layer 0. It preserves the existing z-order selection between those windows. The follow-up native probe offered no Dock windows and selected the front application window at the test point. That application was ChatGPT, which covered Preview during the probe. See `native-after.json`.
+
+The focused test uses Core Foundation window dictionaries for a display-sized Dock window on layer 20 and an overlapping Preview window on layer 0. It failed with Dock before the filter and passed with Preview after the filter. All 25 platform tests and 49 app tests with UI features passed. Strict workspace Clippy passed with all targets and features and warnings denied. The default app build and debug packaging passed. Logs are in `artifacts/mac-window-fix`.
+
+The rebuilt bundle uses `io.github.m4tta.sniplet`. Its plist passed validation. Executable SHA-256: `2d1de1a83dec3cd4f9a101c5c70cc19d1271eaa00161a9913e25af4c1ecf231c`. The Mac control tool needed a fresh test bundle path to clear its cached old app ID. The duplicate test instance was then closed; the final test uses `dist/Sniplet-debug.app`.
+
+Native Preview capture is pending the administrator prompt for Screen Recording. The new app ID did not inherit the earlier grant. Before the grant, the rebuilt picker showed wallpaper only. See `picker-before-permission.png`.
 
 ## Local packaging
 
@@ -398,6 +440,130 @@ Test a static page with repeated patterns, a fixed header, animation, and a know
 3. Copy pixel color, nearby text color, and average selection color; compare numeric values to the fixture.
 4. Change every implemented setting, restart, and verify persistence. Confirm that corrupt settings produce a recoverable error or safe migration.
 5. Verify that secrets, when upload support exists, are stored in the OS credential store rather than the ordinary settings JSON.
+
+## macOS linked magnifier, October 4, 2026
+
+The user supplied an image with a small source circle, a larger magnified circle and a connecting line. The old magnifier stored only lens bounds and a factor. The local change adds a source center and keeps the old rendering path for projects without that field.
+
+| Check | Observed result |
+| --- | --- |
+| Source state | Base commit `1884b67`, branch `codex/fix-macos-window-capture`, uncommitted window-filter, image-layer and magnifier fixes |
+| Automated checks | All 52 core tests and 50 app tests passed; strict workspace Clippy, format and diff checks passed |
+| Focused tests | `linked_magnifier_keeps_its_source_when_the_lens_moves` failed before the renderer change and passed after it. `magnifier_circles_move_and_resize_independently_with_grouped_undo` passed for both move and size handles, undo/redo and Escape |
+| Package | Locked debug build passed. `dist/Sniplet-debug.app/Contents/MacOS/Sniplet` SHA-256: `2c43d9a95a97f64a9e679e00fb6fc0f9d56183afd6e22a992e45804c831c1274` |
+| Native editor | The updated bundle opened a project in a normal Mac window. Lens movement kept the source fixed; source movement changed the enlarged pixels. Undo restored both moves. The factor control changed 3× to 4× and undo restored 3× |
+| Native creation and size | A drag on a clean fixture created both circles and their line at 3×. Source resize changed the factor; lens resize preserved the factor. Undo restored each size change |
+| Native export | `native-export.png` is byte-identical to `linked-magnifier.png`, at 1000×660 pixels. SHA-256: `f92d49af34b5277c8d3b01b433bf0b0146ba6d115cad48e5176a2e65574163e9` |
+| Preserved document | The previously open image and annotations were saved as `artifacts/magnifier-callout/open-before-magnifier-update.sniplet` with its source PNG before the app update |
+| Evidence | Logs, the user reference, project, core/native exports and native editor screenshots are under `artifacts/magnifier-callout/` |
+
+The native tests used focused editor commands and the toolbar. Both applications have overlapping global shortcuts, so this run does not verify global command delivery. Screen Recording was not needed to open the fixture. The pending grant and native Preview capture remain separate checks.
+
+
+
+## macOS measurement, October 4, 2026
+
+The user selected all three measurement mock states: live preview, placed gap and outer size. Ruler now opens keyboard help. Held measurement uses the visible source raster, including raster edits and excluding added image objects and drawings. Placement stores the line, caps and label as one raster operation. Capture scale persists in projects.
+
+| Check | Result |
+| --- | --- |
+| Failure reproduction | The held-key UI test failed because no preview existed. A later pixel test failed because Retina text extended beyond its label background. Both pass after the changes |
+| Core | 56 tests passed, including axes, gaps, borderless/outer size, sensitivity, alpha, raster layers, label bounds, export, project scale and undo/redo |
+| App | 53 tests passed, including held keys, pointer placement, modifier events, wheel input, pt/px switching, crop boundaries, Escape, text entry and selection arrow keys |
+| Build checks | Strict workspace Clippy, locked debug build, format and diff checks passed |
+| Updated bundle | `dist/Sniplet-debug.app`; executable SHA-256 `017ec6f54323df01c937ac33c0670a580d7fc727f681acfe492c6b6e7504121f` |
+| Native editor | Opened `outer-size.sniplet`, displayed `136px`, opened keyboard help and switched 400×220pt to 800×440px and back |
+| Native export | `native-export.png` equals `outer-size.png` byte for byte: 800×440, 9,811 bytes, SHA-256 `8ed9132da3acf6a3334eb4834259a03bc44767b08d4922772c1b4bb13b590840` |
+| Evidence | Source fixture, three PNG states, two projects, native help/unit screenshots, native export and logs are under `artifacts/measure-parity-2026-10-04/` |
+
+
+
+## macOS image drag button, October 4, 2026
+
+
+
+| Check | Result |
+| --- | --- |
+| App tests | All 56 passed, including three new image-drag tests |
+| Drag gesture | GPUI pointer input starts the drag from the button; no image disables the gesture |
+| Exported file | PNG reload matches Save/Copy pixels for annotations, crop, backdrop and an active raster selection |
+| Build | Strict app Clippy and locked Mac debug build passed |
+| Bundle | `dist/Sniplet-debug.app`; executable SHA-256 `da143db4f3a578be792c1e2477b927bf3c840c14887948e313f5d794033e9b62` |
+| Native test | The user confirmed the button works after unlocking the Mac. The agent restarted the updated bundle and inspected the button, then stopped the drop test at the user's request |
+| Evidence | `artifacts/drag-image-2026-10-04/results.json` and the supplied reference image |
+
+Automated tests verify the file payload. The user confirmed the native button works; the drop target was not specified. The agent did not complete an independent Finder drop. Temporary-file cleanup remains open. The updated bundle is running.
+
+## macOS window button alignment, October 4, 2026
+
+The Mac titlebar used a 9-point top offset for the native window buttons. The 54-point editor toolbar needs a 20-point offset to center the 14-point buttons. The Mac window options now calculate this offset from the editor toolbar height.
+
+Format, strict app Clippy and the locked debug build passed. The updated `dist/Sniplet-debug.app` executable has SHA-256 `84d65822b03f565d83fd539134975f7e960e0d6c20d77675ab1605da45a35b15`.
+
+The native alignment test passed on October 5, 2026, on macOS 26.5 (25F71). The app was restarted with this bundle. All three buttons have a vertical center within one pixel of the toolbar center in a 2× screenshot. The green button opened full screen. Control-Command-F and Escape did not exit full screen during the test; the native buttons were hidden. Quit and relaunch restored the normal window. Minimize and close-to-tray remain unverified: the test tool sent the button clicks but continued to report the window. No document was open during these checks.
+
+Sniplet is running in a normal window (`--normal-window`). The user reference, native screenshots and results are under `artifacts/window-controls-2026-10-04/`. This test confirms alignment; it does not complete the Spaces/fullscreen release gate.
+
+## macOS menu bar and editor lifecycle, October 5, 2026
+
+The user selected layout A from the menu mocks. The native scissors menu now
+contains capture commands, a More submenu, GitHub, Launch at Startup, Settings
+and Quit. It has no purchase or upload item. Shortcut labels and registrations
+follow the saved hotkey settings without a restart. Load From Clipboard opens
+the clipboard image as a document; editor Paste still adds an image layer.
+
+Closing the editor hides its native window and changes the app to menu bar mode.
+It keeps the document in memory. Reopen restores the Dock icon and editor.
+Successful whole-image Copy and Save use this path when hide-after-export is on.
+
+The signed debug bundle passed its native lifecycle check on macOS 26.5 (25F71).
+Its executable SHA-256 is
+`e295e74b654ad77e73bb2b57da4f336f17dce2a984edf6f3e569b8b229b876dd`.
+
+| Check | Result |
+| --- | --- |
+| Automated checks | Format, strict app/platform Clippy with UI tests enabled, all 58 app tests and five scroll tests passed |
+| Package | Locked debug build and `codesign --verify --strict` passed |
+| Close | The native red button changed process 74984 from Foreground to UIElement; the process kept running |
+| Reopen | Native reopen returned the same process to Foreground; the demo image, annotations and 100% zoom remained |
+| Quit | Command-Q stopped the process; the updated app was then relaunched |
+| Evidence | `artifacts/menu-bar-2026-10-05/results.json`, `native-before-close.png` and `native-reopened.png` |
+
+CUA opens the app when it inspects Sniplet. The close test therefore read the
+macOS application registry before the next Sniplet inspection. UIElement is
+the macOS mode that removes the app from the Dock.
+
+More → Scrolling (Up) sends upward wheel steps and reverses the collected frames
+before stitching. The exact image-order test passed. Native upward capture,
+native scissors-menu selection, exact icon placement and startup registration
+remain unverified. The test did not enable Launch at Startup.
+
+## macOS capture placement and delay, October 5, 2026
+
+The area selection window was 39 points below the display's top edge. GPUI
+kept the native titled-window style even with `titlebar: None`, so AppKit moved
+the window below the menu bar. The Mac area and window pickers now use a
+borderless panel with the captured display's full frame. The panel stays hidden
+until its style and frame are set.
+
+Capture now hides the Mac editor without animation. It no longer minimizes the
+editor or waits a fixed 220 ms. The explicit three-second capture delay remains.
+The debug profile also optimizes the app and `xcap` pixel conversion code.
+
+| Check | Result |
+| --- | --- |
+| Environment | macOS 26.5 (25F71), one Retina display, 2056 × 1329 points / 4112 × 2658 pixels |
+| Placement | Before: `(0, 39)` points. After: `(0, 0)`, with the full display size and one menu bar |
+| Command to selection frame | Baseline: 2003 and 1730 ms. Final build: 204 and 168 ms. These are local samples, not a latency guarantee |
+| Native selection | A drag from `(8, 8)` to `(608, 168)` physical pixels exported a 600 × 160 PNG with the expected menu bar and top window edge |
+| Native cancellation | Escape closes area and window selection. Reopen retains the editor image |
+| Automated checks | All 58 app tests, format, strict app/platform Clippy with UI tests enabled, locked debug build, and strict bundle signature verification passed |
+| Bundle | `dist/Sniplet-debug.app`; executable SHA-256 `3c996646193426a4a51ca19d5dfecc9f23f3a22ba2eb78a76a8c1a70a35d257e` |
+| Evidence | `artifacts/area-capture-2026-10-05/results.json`, timing logs, native screenshots, and `top-edge-export.png` |
+
+
+
+
 
 ## OS-specific release gates
 
