@@ -17,6 +17,9 @@ mod scroll;
 mod settings;
 mod upload;
 
+#[cfg(target_os = "macos")]
+pub use capture::capture_desktop_region;
+
 pub use capture::{
     CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_active_window,
     capture_monitor, capture_monitor_region, capture_monitor_under_pointer, capture_monitors,

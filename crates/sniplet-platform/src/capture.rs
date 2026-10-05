@@ -258,6 +258,17 @@ pub fn capture_monitors() -> Result<Vec<CapturedFrame>> {
     })
 }
 
+/// Capture a live rectangle in Quartz desktop points, excluding selector windows.
+#[cfg(target_os = "macos")]
+pub fn capture_desktop_region(
+    region: sniplet_core::ImageRect,
+    excluded_window_ids: &[u32],
+) -> Result<RgbaImage> {
+    capture_backend("capture a desktop region", || {
+        macos::capture_region(region, excluded_window_ids)
+    })
+}
+
 fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
     let started = std::time::Instant::now();
     let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();

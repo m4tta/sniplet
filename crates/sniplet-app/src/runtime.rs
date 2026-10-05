@@ -150,16 +150,6 @@ pub fn show_editor(window: &Window, cx: &mut App) {
     cx.activate(true);
 }
 
-/// Return the time needed for the editor to leave the captured screen.
-pub fn hide_for_capture(window: &Window) -> Duration {
-    #[cfg(target_os = "macos")]
-    if crate::macos::hide_for_capture(window) {
-        return Duration::ZERO;
-    }
-    window.minimize_window();
-    Duration::from_millis(220)
-}
-
 pub fn reopen(cx: &mut App) {
     if cx.has_global::<Services>()
         && let Some(handle) = cx.global::<Services>().editor_window

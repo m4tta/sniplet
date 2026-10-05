@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Instant};
 use gpui_kit::{prelude::*, *};
 use image::{Rgba, RgbaImage};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
+#[cfg(any(not(target_os = "macos"), test))]
 use sniplet_platform::{CaptureSource, CapturedFrame};
 
 use crate::{
@@ -25,14 +26,24 @@ pub(crate) struct Region {
     displays: Vec<DisplayLayout>,
 }
 
+#[derive(Clone)]
+struct PixelsInRegion {
+    image: RgbaImage,
+    bounds: Bounds<Pixels>,
+}
+
+#[derive(Clone)]
 struct Screen {
-    frame: CapturedFrame,
+    frame: Option<PixelsInRegion>,
     layout: DisplayLayout,
     window_bounds: Bounds<Pixels>,
     display_id: Option<DisplayId>,
+    #[cfg(target_os = "macos")]
+    overlay_id: Option<u32>,
 }
 
 impl Screen {
+    #[cfg(not(target_os = "macos"))]
     fn new(frame: CapturedFrame, cx: &App) -> Self {
         let (window_bounds, display_id) = capture_overlay::captured_frame_placement(&frame, cx);
         let bounds = desktop_bounds(&frame, window_bounds);
@@ -46,17 +57,63 @@ impl Screen {
                 bounds,
                 pixels: frame.image.dimensions(),
             },
-            frame,
+            frame: Some(PixelsInRegion {
+                image: frame.image,
+                bounds,
+            }),
             window_bounds,
             display_id,
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn live(info: sniplet_platform::MonitorInfo, cx: &App) -> Self {
+        let origin = sniplet_platform::ScreenPoint {
+            x: info.x,
+            y: info.y,
+        };
+        let displays = cx
+            .displays()
+            .into_iter()
+            .map(|display| capture_overlay::DisplayGeometry {
+                id: display.id(),
+                bounds: display.bounds(),
+            })
+            .collect::<Vec<_>>();
+        let (window_bounds, display_id) = capture_overlay::overlay_placement(
+            info.id,
+            origin,
+            (info.width, info.height),
+            info.scale_factor,
+            &displays,
+            true,
+            false,
+        );
+        Self {
+            frame: None,
+            layout: DisplayLayout {
+                id: info.id,
+                bounds: Bounds::new(
+                    point(px(info.x as f32), px(info.y as f32)),
+                    size(
+                        px(info.width as f32 / info.scale_factor),
+                        px(info.height as f32 / info.scale_factor),
+                    ),
+                ),
+                pixels: (info.width, info.height),
+            },
+            window_bounds,
+            display_id,
+            overlay_id: None,
+        }
+    }
+
     fn scale(&self) -> f32 {
-        self.frame.image.width() as f32 / f32::from(self.layout.bounds.size.width)
+        self.layout.pixels.0 as f32 / f32::from(self.layout.bounds.size.width)
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn desktop_bounds(frame: &CapturedFrame, placement: Bounds<Pixels>) -> Bounds<Pixels> {
     // GPUI's Mac display bounds are local to each screen. Quartz capture
     // origins use one desktop coordinate space, including negative positions.
@@ -121,7 +178,11 @@ fn compose(screens: &[Screen], bounds: Bounds<Pixels>) -> Option<(RgbaImage, f32
     }
     let mut image = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
     for screen in screens {
-        let display = screen.layout.bounds;
+        if !overlaps(screen.layout.bounds, bounds) {
+            continue;
+        }
+        let frame = screen.frame.as_ref()?;
+        let display = frame.bounds;
         let x0 = (f32::from(display.left()) * scale - left)
             .round()
             .clamp(0.0, width as f32) as u32;
@@ -134,23 +195,92 @@ fn compose(screens: &[Screen], bounds: Bounds<Pixels>) -> Option<(RgbaImage, f32
         let y1 = (f32::from(display.bottom()) * scale - top)
             .round()
             .clamp(0.0, height as f32) as u32;
-        let sx = screen.frame.image.width() as f32 / f32::from(display.size.width);
-        let sy = screen.frame.image.height() as f32 / f32::from(display.size.height);
+        let sx = frame.image.width() as f32 / f32::from(display.size.width);
+        let sy = frame.image.height() as f32 / f32::from(display.size.height);
         for y in y0..y1 {
             let source_y = (((top + y as f32 + 0.5) / scale - f32::from(display.top())) * sy)
                 .floor()
-                .clamp(0.0, (screen.frame.image.height() - 1) as f32)
-                as u32;
+                .clamp(0.0, (frame.image.height() - 1) as f32) as u32;
             for x in x0..x1 {
                 let source_x = (((left + x as f32 + 0.5) / scale - f32::from(display.left())) * sx)
                     .floor()
-                    .clamp(0.0, (screen.frame.image.width() - 1) as f32)
+                    .clamp(0.0, (frame.image.width() - 1) as f32)
                     as u32;
-                image.put_pixel(x, y, *screen.frame.image.get_pixel(source_x, source_y));
+                image.put_pixel(x, y, *frame.image.get_pixel(source_x, source_y));
             }
         }
     }
     Some((image, scale))
+}
+
+/// Round outward to each display's pixel grid. Keeping its desktop origin
+/// preserves Retina pixels and selections spanning displays with different scales.
+#[cfg(target_os = "macos")]
+fn capture_bounds(screen: &Screen, selection: Bounds<Pixels>) -> Bounds<Pixels> {
+    let bounds = selection.intersect(&screen.layout.bounds);
+    let scale = screen.scale();
+    let left = f32::from(screen.layout.bounds.left());
+    let top = f32::from(screen.layout.bounds.top());
+    let x0 = ((f32::from(bounds.left()) - left) * scale).floor() / scale + left;
+    let y0 = ((f32::from(bounds.top()) - top) * scale).floor() / scale + top;
+    let x1 = ((f32::from(bounds.right()) - left) * scale).ceil() / scale + left;
+    let y1 = ((f32::from(bounds.bottom()) - top) * scale).ceil() / scale + top;
+    Bounds::new(point(px(x0), px(y0)), size(px(x1 - x0), px(y1 - y0)))
+        .intersect(&screen.layout.bounds)
+}
+
+fn capture_selected(
+    screens: Vec<Screen>,
+    bounds: Bounds<Pixels>,
+    #[cfg(target_os = "macos")] monitors: &[sniplet_platform::MonitorInfo],
+) -> Result<(RgbaImage, f32), String> {
+    #[cfg(target_os = "macos")]
+    let mut screens = screens;
+    #[cfg(target_os = "macos")]
+    if screens.iter().any(|screen| screen.frame.is_none()) {
+        let excluded = screens
+            .iter()
+            .filter_map(|screen| screen.overlay_id)
+            .collect::<Vec<_>>();
+        for screen in &mut screens {
+            if screen.frame.is_some() || !overlaps(screen.layout.bounds, bounds) {
+                continue;
+            }
+            let layout = &screen.layout;
+            if !monitors.iter().any(|info| {
+                info.id == layout.id
+                    && (info.width, info.height) == layout.pixels
+                    && info.x as f32 == f32::from(layout.bounds.left())
+                    && info.y as f32 == f32::from(layout.bounds.top())
+                    && (info.scale_factor - screen.scale()).abs() < 0.001
+            }) {
+                return Err("Capture stopped because the display layout changed".into());
+            }
+            let region = capture_bounds(screen, bounds);
+            let image = sniplet_platform::capture_desktop_region(
+                ImageRect::new(
+                    f32::from(region.left()),
+                    f32::from(region.top()),
+                    f32::from(region.size.width),
+                    f32::from(region.size.height),
+                ),
+                &excluded,
+            )
+            .map_err(|error| error.to_string())?;
+            if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                eprintln!(
+                    "capture: live region display={}; bounds={region:?}; pixels={:?}",
+                    layout.id,
+                    image.dimensions()
+                );
+            }
+            screen.frame = Some(PixelsInRegion {
+                image,
+                bounds: region,
+            });
+        }
+    }
+    compose(&screens, bounds).ok_or_else(|| "The capture area is outside the displays".into())
 }
 
 pub(crate) fn start(
@@ -166,15 +296,14 @@ pub(crate) fn start(
     let started = Instant::now();
     let owner = window.window_handle();
     let escape = runtime::begin_escape_session(cx);
-    let delay = runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
-        if !delay.is_zero() {
-            cx.background_executor().timer(delay).await;
-        }
         if escape.is_cancelled() {
             return;
         }
-        let frames = cx
+        #[cfg(target_os = "macos")]
+        let available = cx.update(|_| sniplet_platform::list_monitors());
+        #[cfg(not(target_os = "macos"))]
+        let available = cx
             .background_executor()
             .spawn(async { sniplet_platform::capture_monitors() })
             .await;
@@ -183,10 +312,16 @@ pub(crate) fn start(
                 runtime::end_escape_session(&escape, cx);
                 return;
             }
-            let result = frames
+            let result = available
                 .map_err(|error| error.to_string())
-                .and_then(|frames| {
-                    let screens: Vec<_> = frames
+                .and_then(|available| {
+                    #[cfg(target_os = "macos")]
+                    let screens: Vec<_> = available
+                        .into_iter()
+                        .map(|info| Screen::live(info, cx))
+                        .collect();
+                    #[cfg(not(target_os = "macos"))]
+                    let screens: Vec<_> = available
                         .into_iter()
                         .map(|frame| Screen::new(frame, cx))
                         .collect();
@@ -200,17 +335,30 @@ pub(crate) fn start(
                                 "Repeat Capture stopped because the display layout changed".into(),
                             );
                         }
-                        let (image, scale) = compose(&screens, previous.bounds)
-                            .ok_or("The previous capture area is outside the displays")?;
-                        editor.update(cx, |editor, cx| {
-                            capture::copy_capture_if_enabled(editor, &image);
-                            editor.load(Document::new(image), "Repeated area capture", cx);
-                            editor.set_measure_scale(scale);
-                        });
-                        runtime::end_escape_session(&escape, cx);
-                        capture::restore(owner, cx);
+                        capture_and_load(
+                            screens,
+                            previous.bounds,
+                            editor.clone(),
+                            owner,
+                            command,
+                            escape.clone(),
+                            cx,
+                        );
                     } else {
-                        open(screens, editor.clone(), owner, command, escape.clone(), cx)?;
+                        let selection =
+                            open(screens, editor.clone(), owner, command, escape.clone(), cx)?;
+                        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                            for handle in &selection.read(cx).windows.clone() {
+                                let _ = handle.update(cx, |_, window, _| {
+                                    window.on_next_frame(move |_, _| {
+                                        eprintln!(
+                                            "capture: area first frame in {:?}",
+                                            started.elapsed()
+                                        )
+                                    });
+                                });
+                            }
+                        }
                     }
                     Ok(())
                 });
@@ -232,6 +380,73 @@ pub(crate) fn start(
     })
     .detach();
     Ok(())
+}
+
+fn capture_and_load(
+    screens: Vec<Screen>,
+    bounds: Bounds<Pixels>,
+    editor: Entity<Editor>,
+    owner: AnyWindowHandle,
+    command: Command,
+    escape: runtime::EscapeSession,
+    cx: &mut App,
+) {
+    let saved = region(&screens, bounds);
+    let started = Instant::now();
+    // xcap reads AppKit display names. Keep metadata access on the UI thread.
+    #[cfg(target_os = "macos")]
+    let monitors = sniplet_platform::list_monitors().map_err(|error| error.to_string());
+    cx.spawn(async move |cx| {
+        let cancelled = escape.clone();
+        let result = cx.background_executor().spawn(async move {
+            if cancelled.is_cancelled() { return Err("Capture cancelled".into()); }
+            capture_selected(
+                screens,
+                bounds,
+                #[cfg(target_os = "macos")]
+                &monitors?,
+            )
+        }).await;
+        cx.update(|cx| {
+            if escape.is_cancelled() {
+                runtime::end_escape_session(&escape, cx);
+                return;
+            }
+            let _ = owner.update(cx, |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    match result {
+                        Ok((image, scale)) => {
+                            if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                                eprintln!("capture: selected {bounds:?}; output={:?}; scale={scale}; pixels ready in {:?}", image.dimensions(), started.elapsed());
+                            }
+                            capture::copy_capture_if_enabled(editor, &image);
+                            editor.scroll_region = None;
+                            editor.scroll_frames.clear();
+                            if matches!(command, Command::Area) { editor.last_capture = Some(saved); }
+                            if matches!(command, Command::AddCapture) {
+                                editor.add_image(image, "Added capture", true, cx);
+                            } else {
+                                let status = if matches!(command, Command::Repeat) {
+                                    "Repeated area capture"
+                                } else { "Area captured" };
+                                editor.load(Document::new(image), status, cx);
+                                editor.set_measure_scale(scale);
+                                if matches!(command, Command::CaptureOcr) {
+                                    editor.command(Command::Ocr, window, cx);
+                                }
+                            }
+                        }
+                        Err(error) => { editor.status = error; cx.notify(); }
+                    }
+                });
+                runtime::show_editor(window, cx);
+                if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                    window.on_next_frame(move |_, _| eprintln!("capture: area editor first frame after release in {:?}", started.elapsed()));
+                }
+            });
+            runtime::end_escape_session(&escape, cx);
+        });
+    }).detach();
 }
 
 struct Selection {
@@ -298,39 +513,18 @@ impl Selection {
         if bounds.size.width < px(2.0) || bounds.size.height < px(2.0) {
             return;
         }
-        let Some((image, scale)) = compose(&self.screens, bounds) else {
-            return;
-        };
-        if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
-            eprintln!(
-                "capture: selected {bounds:?}; output={:?}; scale={scale}",
-                image.dimensions()
-            );
-        }
-        let updated = self.owner.update(cx, |_, window, cx| {
-            self.editor.update(cx, |editor, cx| {
-                capture::copy_capture_if_enabled(editor, &image);
-                editor.scroll_region = None;
-                editor.scroll_frames.clear();
-                if matches!(self.command, Command::Area) {
-                    editor.last_capture = Some(region(&self.screens, bounds));
-                }
-                if matches!(self.command, Command::AddCapture) {
-                    editor.add_image(image, "Added capture", true, cx);
-                } else {
-                    editor.load(Document::new(image), "Area captured", cx);
-                    editor.set_measure_scale(scale);
-                    if matches!(self.command, Command::CaptureOcr) {
-                        editor.command(Command::Ocr, window, cx);
-                    }
-                }
-            });
-            runtime::show_editor(window, cx);
-        });
-        if updated.is_ok() {
-            runtime::end_escape_session(&self.escape, cx);
-            self.close(cx);
-        }
+        // Mark completion before releasing panels so their release handlers do
+        // not cancel the capture. macOS excludes them from the pixel readback.
+        self.close(cx);
+        capture_and_load(
+            std::mem::take(&mut self.screens),
+            bounds,
+            self.editor.clone(),
+            self.owner,
+            self.command,
+            self.escape.clone(),
+            cx,
+        );
     }
 }
 
@@ -359,7 +553,11 @@ fn open(
         let bounds = screen.layout.bounds;
         let window_bounds = screen.window_bounds;
         let display_id = screen.display_id;
-        let image = display_image(screen.frame.image.clone());
+        let image = screen
+            .frame
+            .as_ref()
+            .map(|frame| display_image(frame.image.clone()));
+        let live = image.is_none();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(window_bounds)),
             titlebar: None,
@@ -368,6 +566,11 @@ fn open(
             is_resizable: false,
             is_minimizable: false,
             display_id,
+            window_background: if image.is_none() {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             show: !cfg!(target_os = "macos"),
             ..Default::default()
         };
@@ -398,9 +601,23 @@ fn open(
             Ok((handle, _)) => {
                 runtime::attach_escape_window(&escape, handle, cx);
                 selection.update(cx, |selection, _| selection.windows.push(handle));
-                let _ = handle.update(cx, |_, window, _| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if live {
+                        // Component roots have a theme background by default.
+                        // The selector must leave the desktop visible beneath it.
+                        gpui_kit::base::Root::update(window, cx, |root, _, cx| {
+                            root.style().background = Some(rgba(0x00000000).into());
+                            cx.notify();
+                        });
+                    }
                     #[cfg(target_os = "macos")]
-                    crate::macos::show_capture_overlay(window);
+                    {
+                        crate::macos::show_capture_overlay(window);
+                        selection.update(cx, |selection, _| {
+                            selection.screens[index].overlay_id =
+                                crate::macos::capture_window_id(window);
+                        });
+                    }
                     #[cfg(not(target_os = "macos"))]
                     window.activate_window();
                 });
@@ -436,7 +653,7 @@ fn open(
 }
 
 struct Overlay {
-    image: Arc<RenderImage>,
+    image: Option<Arc<RenderImage>>,
     selection: Entity<Selection>,
     bounds: Bounds<Pixels>,
     focus: FocusHandle,
@@ -468,7 +685,11 @@ impl Render for Overlay {
             .overflow_hidden()
             .track_focus(&self.focus)
             .cursor_crosshair()
-            .child(img(self.image.clone()).absolute().inset_0().size_full())
+            .children(
+                self.image
+                    .clone()
+                    .map(|image| img(image).absolute().inset_0().size_full()),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _window, cx| {
@@ -616,20 +837,12 @@ mod tests {
         let width = (f32::from(bounds.size.width) * scale) as u32;
         let height = (f32::from(bounds.size.height) * scale) as u32;
         Screen {
-            frame: CapturedFrame {
+            frame: Some(PixelsInRegion {
                 image: RgbaImage::from_fn(width, height, |x, y| {
                     Rgba([id as u8, x as u8, y as u8, 255])
                 }),
-                origin: sniplet_platform::ScreenPoint {
-                    x: f32::from(bounds.left()) as i32,
-                    y: f32::from(bounds.top()) as i32,
-                },
-                scale_factor: scale,
-                source: CaptureSource::Monitor {
-                    index: id as usize,
-                    id,
-                },
-            },
+                bounds,
+            }),
             layout: DisplayLayout {
                 id,
                 bounds,
@@ -637,6 +850,8 @@ mod tests {
             },
             display_id: None,
             window_bounds: bounds,
+            #[cfg(target_os = "macos")]
+            overlay_id: None,
         }
     }
 
@@ -645,10 +860,13 @@ mod tests {
     fn mac_desktop_origin_is_independent_of_gpui_display_local_bounds() {
         let external = screen(2, rect(-476.0, -1692.0, 3008.0, 1692.0), 1.0);
         let placement = rect(0.0, 0.0, 3008.0, 1692.0);
-        assert_eq!(
-            desktop_bounds(&external.frame, placement),
-            external.layout.bounds
-        );
+        let frame = CapturedFrame {
+            image: external.frame.unwrap().image,
+            origin: sniplet_platform::ScreenPoint { x: -476, y: -1692 },
+            scale_factor: 1.0,
+            source: CaptureSource::Monitor { index: 1, id: 2 },
+        };
+        assert_eq!(desktop_bounds(&frame, placement), external.layout.bounds);
     }
 
     #[::core::prelude::v1::test]
@@ -661,7 +879,8 @@ mod tests {
         assert_eq!(scale, 2.0);
         assert_eq!(
             image,
-            image::imageops::crop_imm(&screens[1].frame.image, 9, 19, 40, 30).to_image()
+            image::imageops::crop_imm(&screens[1].frame.as_ref().unwrap().image, 9, 19, 40, 30)
+                .to_image()
         );
     }
 
@@ -679,6 +898,35 @@ mod tests {
         assert_eq!(image.get_pixel(20, 20), &Rgba([1, 0, 0, 255]));
         assert_eq!(image.get_pixel(79, 59), &Rgba([1, 59, 39, 255]));
         assert_eq!(image.get_pixel(0, 20), &Rgba([0, 0, 0, 255]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[::core::prelude::v1::test]
+    fn selected_region_pixels_match_full_frames_across_different_display_scales() {
+        let mut screens = vec![
+            screen(1, rect(0.0, 0.0, 100.0, 100.0), 2.0),
+            screen(2, rect(-20.0, -80.0, 120.0, 80.0), 1.0),
+        ];
+        let bounds = rect(-10.25, -10.5, 40.5, 30.75);
+        let expected = compose(&screens, bounds).unwrap();
+        for screen in &mut screens {
+            let region = capture_bounds(screen, bounds);
+            let source = screen.frame.as_ref().unwrap();
+            let scale = screen.scale();
+            let image = image::imageops::crop_imm(
+                &source.image,
+                ((f32::from(region.left() - source.bounds.left())) * scale).round() as u32,
+                ((f32::from(region.top() - source.bounds.top())) * scale).round() as u32,
+                (f32::from(region.size.width) * scale).round() as u32,
+                (f32::from(region.size.height) * scale).round() as u32,
+            )
+            .to_image();
+            screen.frame = Some(PixelsInRegion {
+                image,
+                bounds: region,
+            });
+        }
+        assert_eq!(compose(&screens, bounds).unwrap(), expected);
     }
 
     #[::core::prelude::v1::test]

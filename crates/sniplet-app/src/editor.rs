@@ -31,8 +31,16 @@ pub fn render_options() -> RenderOptions<'static> {
 }
 
 pub fn display_image(mut image: image::RgbaImage) -> Arc<RenderImage> {
+    let started = std::time::Instant::now();
     for pixel in image.pixels_mut() {
         pixel.0.swap(0, 2);
+    }
+    if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+        eprintln!(
+            "capture: display image {:?} prepared in {:?}",
+            image.dimensions(),
+            started.elapsed()
+        );
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(image)]))
 }
@@ -2933,6 +2941,7 @@ impl Render for Editor {
                 .map(|(bounds, image)| (bounds, display_image(image)));
         }
         if self.preview_dirty {
+            let preview_started = std::time::Instant::now();
             self.preview_dirty = false;
             if let Some(doc) = &self.document {
                 let options = RenderOptions {
@@ -2955,6 +2964,12 @@ impl Render for Editor {
                         }
                     }
                     Err(error) => self.status = error.to_string(),
+                }
+                if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                    eprintln!(
+                        "capture: editor preview ready in {:?}",
+                        preview_started.elapsed()
+                    );
                 }
             }
         }

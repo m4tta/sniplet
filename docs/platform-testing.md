@@ -710,6 +710,40 @@ logs, window bounds, and screenshots. The executable SHA-256 is
 These checks used toolbar commands. Global shortcut delivery, physical
 mixed-scale displays, Windows, and Linux remain untested in this run.
 
+## Live area capture, October 5, 2026
+
+On macOS, area capture now opens transparent selection panels before it reads
+any screen pixels. Mouse release captures only the selected parts of each
+display and combines them in desktop coordinates. Repeat uses the same region.
+Pixels reflect the desktop at capture time, so content can change during a drag.
+Windows and Linux retain the existing screenshot-based area selector.
+
+Capture commands keep the editor visible. The Mac region backend excludes only
+the selector window IDs. Window capture can select Sniplet itself. Active-window
+capture uses the editor's native ID when Sniplet is active, because xcap marks
+every window of the active Mac process as focused, including a small system
+capture-status window.
+
+Native checks covered both displays, a 600 × 600 pixel capture across their
+boundary, Repeat, Escape, a visible Sniplet area, and Sniplet window capture.
+The final active-window check captured the 2560 × 1702 pixel editor instead of
+the 132 × 40 pixel status window. Screen capture under the external-display
+pointer returned 6016 × 3384 pixels. Rebuilds kept Screen Recording permission.
+
+Selector frame callbacks measured 54 to 126 ms in the final builds, compared
+with 434 to 490 ms before this change. These callbacks measure UI scheduling,
+not physical shortcut delivery or hardware presentation. Pixel readback now
+happens after selection. Release-to-editor callbacks ranged from 129 to 568 ms
+across the recorded captures. Debug optimization reduced the external-screen
+editor-load sample from 711 ms to 184 ms; these are local samples, not a benchmark.
+
+All 68 app UI tests and five platform capture tests passed. The final area tests,
+strict app/platform Clippy, formatting, locked build, and bundle signature check
+also passed. Evidence is in `artifacts/capture-speed-2026-10-05/results.json`
+and its native logs. The record identifies the base commit and final executable.
+Physical global shortcuts, native mixed-scale displays, Windows, and Linux
+remain untested in this run.
+
 ## OS-specific release gates
 
 ### macOS

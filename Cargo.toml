@@ -10,6 +10,12 @@ debug = 0
 [profile.dev.package.sniplet-app]
 opt-level = 2
 
+[profile.dev.package.sniplet-core]
+opt-level = 2
+
+[profile.dev.package.sniplet-platform]
+opt-level = 2
+
 [profile.dev.package.xcap]
 opt-level = 2
 

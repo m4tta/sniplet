@@ -65,14 +65,9 @@ pub fn start(
         None
     };
     let target = CaptureTarget::for_command(command, monitor);
-    let hide_delay = crate::runtime::hide_for_capture(window);
-    if trace_capture {
-        eprintln!("capture: editor hidden in {:?}", capture_started.elapsed());
-    }
     cx.spawn(async move |_, cx| {
         if trace_capture { eprintln!("capture: task started in {:?}", capture_started.elapsed()); }
-        let delay = if matches!(command, Command::Delayed) { Duration::from_secs(3) } else { hide_delay };
-        if !delay.is_zero() { cx.background_executor().timer(delay).await; }
+        if matches!(command, Command::Delayed) { cx.background_executor().timer(Duration::from_secs(3)).await; }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);
@@ -121,6 +116,12 @@ pub fn start(
                     });
                     crate::runtime::end_escape_session(&escape, cx);
                     restore(handle, cx);
+                    if trace_capture {
+                        eprintln!("capture: screen editor loaded in {:?}", capture_started.elapsed());
+                        let _ = handle.update(cx, |_, window, _| {
+                            window.on_next_frame(move |_, _| eprintln!("capture: screen first frame in {:?}", capture_started.elapsed()));
+                        });
+                    }
                 } else {
                     let (bounds, display_id) =
                         crate::capture_overlay::captured_frame_placement(&frame, cx);
@@ -170,23 +171,27 @@ pub fn active_window(
     cx: &mut Context<Editor>,
 ) -> Result<(), String> {
     let windows = sniplet_platform::list_windows().map_err(|error| error.to_string())?;
-    let process_id = std::process::id();
     let active = windows
         .into_iter()
-        .find(|candidate| candidate.is_focused && candidate.process_id != process_id)
-        .ok_or_else(|| "No focused non-Sniplet window is available for capture".to_owned())?;
-    self::window(active.id, editor, window, cx);
+        .find(|candidate| candidate.is_focused)
+        .ok_or_else(|| "No focused window is available for capture".to_owned())?;
+    let id = active.id;
+    #[cfg(target_os = "macos")]
+    let id = if active.process_id == std::process::id() {
+        // xcap marks every window of the active Mac app as focused. A system
+        // capture-status window can sit above the editor, so use its native ID.
+        crate::macos::capture_window_id(window).unwrap_or(id)
+    } else {
+        id
+    };
+    self::window(id, editor, window, cx);
     Ok(())
 }
 
 pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Editor>) {
     let handle = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
-    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
-        if !hide_delay.is_zero() {
-            cx.background_executor().timer(hide_delay).await;
-        }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);

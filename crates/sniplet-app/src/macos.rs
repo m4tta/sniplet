@@ -18,6 +18,11 @@ fn native_window(window: &Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
+/// Read the native window's Quartz ID for capture or selector filtering.
+pub fn capture_window_id(window: &Window) -> Option<u32> {
+    u32::try_from(native_window(window)?.windowNumber()).ok()
+}
+
 pub fn trace_capture_geometry(window: &Window) {
     if let Some(native) = native_window(window) {
         eprintln!(
@@ -163,18 +168,6 @@ pub fn hide_editor(window: &Window) -> bool {
     native.orderOut(None);
     NSApplication::sharedApplication(main_thread)
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    true
-}
-
-/// Remove the editor before capture without a minimize animation or Dock changes.
-pub fn hide_for_capture(window: &Window) -> bool {
-    let Some(native) = native_window(window) else {
-        return false;
-    };
-    let animation = native.animationBehavior();
-    native.setAnimationBehavior(NSWindowAnimationBehavior::None);
-    native.orderOut(None);
-    native.setAnimationBehavior(animation);
     true
 }
 

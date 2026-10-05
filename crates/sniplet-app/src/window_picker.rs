@@ -419,11 +419,7 @@ impl Render for WindowCaptureOverlay {
 pub(crate) fn open(editor: Entity<Editor>, window: &Window, cx: &mut App) -> Result<(), String> {
     let editor_window = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
-    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |cx| {
-        if !hide_delay.is_zero() {
-            cx.background_executor().timer(hide_delay).await;
-        }
         if escape.is_cancelled() {
             cx.update(|cx| crate::runtime::end_escape_session(&escape, cx));
             return;
@@ -446,7 +442,9 @@ pub(crate) fn open(editor: Entity<Editor>, window: &Window, cx: &mut App) -> Res
                     if let Err(error) = open_snapshot(
                         frames,
                         windows,
-                        std::process::id(),
+                        // The snapshot predates selector panels. Keep the
+                        // Sniplet editor eligible, like every other app window.
+                        0,
                         editor.clone(),
                         editor_window,
                         escape.clone(),
