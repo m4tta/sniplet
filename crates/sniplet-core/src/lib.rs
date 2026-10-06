@@ -26,5 +26,5 @@ pub use export::{ExportFormat, decode_image};
 pub use geometry::{ImageRect, Point};
 pub use measurement::{Measurement, MeasurementAxis, measure_at};
 pub use render::RenderOptions;
-pub use stitch::{StitchOptions, stitch_vertical};
+pub use stitch::{StitchOptions, stitch_vertical, stitch_vertical_refs};
 pub use transform::ViewportTransform;

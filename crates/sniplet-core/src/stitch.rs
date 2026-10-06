@@ -27,13 +27,18 @@ impl Default for StitchOptions {
 /// Candidate overlaps are scored by mean absolute RGB-channel error. The lowest
 /// error wins, with larger overlaps preferred on exact ties.
 pub fn stitch_vertical(frames: &[RgbaImage], options: StitchOptions) -> Result<RgbaImage> {
+    stitch_vertical_refs(&frames.iter().collect::<Vec<_>>(), options)
+}
+
+/// Stitch shared frames without making a second copy of each input image.
+pub fn stitch_vertical_refs(frames: &[&RgbaImage], options: StitchOptions) -> Result<RgbaImage> {
     let Some(first) = frames.first() else {
         return Err(SnipletError::NoStitchFrames);
     };
     let width = first.width();
-    let mut output = first.clone();
+    let mut output = (*first).clone();
 
-    for (index, frame) in frames.iter().enumerate().skip(1) {
+    for (index, frame) in frames.iter().copied().enumerate().skip(1) {
         if frame.width() != width {
             return Err(SnipletError::StitchWidthMismatch {
                 index,

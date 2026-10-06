@@ -409,7 +409,7 @@ fn capture_and_load(
                 bounds,
                 #[cfg(target_os = "macos")]
                 &monitors?,
-            )
+            ).map(|(image, scale)| (Document::new(image), scale))
         }).await;
         cx.update(|cx| {
             if escape.is_cancelled() {
@@ -419,21 +419,21 @@ fn capture_and_load(
             let _ = owner.update(cx, |_, window, cx| {
                 editor.update(cx, |editor, cx| {
                     match result {
-                        Ok((image, scale)) => {
+                        Ok((document, scale)) => {
                             if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
-                                eprintln!("capture: selected {bounds:?}; output={:?}; scale={scale}; pixels ready in {:?}", image.dimensions(), started.elapsed());
+                                eprintln!("capture: selected {bounds:?}; output={:?}; scale={scale}; pixels ready in {:?}", document.original().dimensions(), started.elapsed());
                             }
-                            capture::copy_capture_if_enabled(editor, &image);
+                            capture::copy_capture_if_enabled(editor, &document, cx);
                             editor.scroll_region = None;
                             editor.scroll_frames.clear();
                             if matches!(command, Command::Area) { editor.last_capture = Some(saved); }
                             if matches!(command, Command::AddCapture) {
-                                editor.add_image(image, "Added capture", true, cx);
+                                editor.add_image(document.original().clone(), "Added capture", true, cx);
                             } else {
                                 let status = if matches!(command, Command::Repeat) {
                                     "Repeated area capture"
                                 } else { "Area captured" };
-                                editor.load(Document::new(image), status, cx);
+                                editor.load(document, status, cx);
                                 editor.set_measure_scale(scale);
                                 if matches!(command, Command::CaptureOcr) {
                                     editor.command(Command::Ocr, window, cx);

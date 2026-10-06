@@ -380,12 +380,14 @@ fn appearance_choices_apply_immediately_and_preserve_capture(cx: &mut TestAppCon
                     window.click(id, cx);
                     assert_eq!(cx.theme().mode, mode);
                     assert_eq!(entity.read(cx).settings.theme, preference);
-                    assert_eq!(store.load().unwrap().theme, preference);
+
                     assert_eq!(entity.read(cx).export_pixels().unwrap(), before);
                 }
             })
             .unwrap();
     });
+    cx.run_until_parked();
+    assert_eq!(store.load().unwrap().theme, ThemePreference::System);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -703,6 +705,164 @@ fn draft_preview_updates_live_and_escape_discards_draft(cx: &mut TestAppContext)
             original.as_bytes(0)
         );
         assert!(!editor.read(cx).document.as_ref().unwrap().can_undo());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn save_finishes_in_background_without_changing_a_new_capture(cx: &mut TestAppContext) {
+    use crate::editor::Command;
+    let (handle, editor) = editor(cx);
+    let path = std::env::temp_dir().join(format!("sniplet-worker-save-{}.png", std::process::id()));
+    let expected = cx.read(|cx| editor.read(cx).export_pixels().unwrap());
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| editor.command(Command::Save, window, cx));
+    })
+    .unwrap();
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.update_window(handle, |_, _, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(
+                    20,
+                    20,
+                    image::Rgba([0, 255, 0, 255]),
+                )),
+                "New capture",
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(image::open(&path).unwrap().to_rgba8(), expected);
+    assert_eq!(cx.read(|cx| editor.read(cx).status.clone()), "New capture");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[gpui_kit::test]
+fn old_open_and_qr_results_cannot_replace_a_new_capture(cx: &mut TestAppContext) {
+    use crate::editor::Command;
+    let (handle, editor) = editor(cx);
+    let path = std::env::temp_dir().join(format!("sniplet-worker-open-{}.png", std::process::id()));
+    image::RgbaImage::from_pixel(1024, 768, image::Rgba([255, 0, 0, 255]))
+        .save(&path)
+        .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| editor.command(Command::Open, window, cx));
+    })
+    .unwrap();
+    cx.simulate_path_prompt_response(|_| Some(vec![path.clone()]));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| editor
+            .read(cx)
+            .document
+            .as_ref()
+            .unwrap()
+            .original()
+            .dimensions()),
+        (1024, 768)
+    );
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.command(Command::Qr, window, cx);
+            assert_eq!(editor.status, "Recognizing text…");
+            editor.command(Command::Open, window, cx);
+        });
+    })
+    .unwrap();
+    cx.simulate_path_prompt_response(|_| Some(vec![path.clone()]));
+    cx.update_window(handle, |_, _, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(
+                    20,
+                    20,
+                    image::Rgba([0, 255, 0, 255]),
+                )),
+                "New capture",
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| editor.read(cx).status.clone()), "New capture");
+    assert_eq!(
+        cx.read(|cx| editor.read(cx).document.as_ref().unwrap().width()),
+        20
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[gpui_kit::test]
+fn large_preview_runs_in_background_and_discards_an_old_document(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let frames = editor.read(cx).preview_frames;
+        editor.update(cx, |editor, cx| {
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(
+                    1024,
+                    768,
+                    image::Rgba([255, 0, 0, 255]),
+                )),
+                "First large image",
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            editor.read(cx).preview_frames,
+            frames,
+            "drawing must not rasterize a large image on the UI thread"
+        );
+        editor.update(cx, |editor, cx| {
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(
+                    1024,
+                    768,
+                    image::Rgba([0, 255, 0, 255]),
+                )),
+                "Latest large image",
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let image = editor.read(cx).preview_image().unwrap();
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0, 255, 0, 255]);
+        editor.update(cx, |editor, cx| {
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(
+                    1024,
+                    768,
+                    image::Rgba([0, 0, 255, 255]),
+                )),
+                "Image before cancelled Open",
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        editor.update(cx, |editor, cx| {
+            editor.command(crate::editor::Command::Open, window, cx)
+        });
+    })
+    .unwrap();
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let image = editor.read(cx).preview_image().unwrap();
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], &[255, 0, 0, 255]);
     })
     .unwrap();
 }

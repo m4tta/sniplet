@@ -182,13 +182,15 @@ pub fn show_dock_icon(window: &Window) {
 
 pub fn launch_at_startup() -> bool {
     // SMAppService manages the current app bundle, not an external executable.
-    unsafe { SMAppService::mainAppService().status() == SMAppServiceStatus::Enabled }
+    objc2::rc::autoreleasepool(|_| unsafe {
+        SMAppService::mainAppService().status() == SMAppServiceStatus::Enabled
+    })
 }
 
 /// Return true only when macOS allows the registered app to launch at login.
 pub fn set_launch_at_startup(enabled: bool) -> Result<bool, String> {
-    // All calls use the main app's ServiceManagement registration on the UI thread.
-    unsafe {
+    // ServiceManagement may wait on its daemon. Run this on a worker.
+    objc2::rc::autoreleasepool(|_| unsafe {
         let service = SMAppService::mainAppService();
         let status = service.status();
         if enabled {
@@ -207,5 +209,5 @@ pub fn set_launch_at_startup(enabled: bool) -> Result<bool, String> {
                 .map_err(|error| error.localizedDescription().to_string())?;
         }
         Ok(service.status() == SMAppServiceStatus::Enabled)
-    }
+    })
 }

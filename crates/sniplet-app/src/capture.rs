@@ -64,6 +64,10 @@ pub fn start(
     } else {
         None
     };
+    let manual = manual_region.map(|rect| {
+        let current = editor.read(cx);
+        (rect, current.scroll_frames.clone(), current.load_revision)
+    });
     let target = CaptureTarget::for_command(command, monitor);
     let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
@@ -78,10 +82,19 @@ pub fn start(
         }
         let frame = cx.background_executor().spawn(async move {
             if trace_capture { eprintln!("capture: backend started in {:?}", capture_started.elapsed()); }
-            match target {
+            let mut frame = match target {
                 CaptureTarget::UnderPointer => sniplet_platform::capture_monitor_under_pointer(),
                 CaptureTarget::Monitor(index) => sniplet_platform::capture_monitor(index),
-            }
+            }?;
+            let stitched = manual.map(|(rect, mut frames, revision)| {
+                frames.push(Arc::new(crop_image(&frame.image, rect)));
+                let refs = frames.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                let result = sniplet_core::stitch_vertical_refs(&refs, Default::default()).map(Document::new);
+                (frames, result, revision)
+            });
+            let document = matches!(command, Command::Screen | Command::Delayed)
+                .then(|| Document::new(std::mem::take(&mut frame.image)));
+            Ok::<_, sniplet_platform::PlatformError>((frame, stitched, document))
         }).await;
         if trace_capture { eprintln!("capture: pixels ready in {:?}", capture_started.elapsed()); }
         cx.update(|cx| {
@@ -90,30 +103,31 @@ pub fn start(
                 return;
             }
             match frame {
-            Ok(frame) => {
-                if let Some(rect) = manual_region {
-                    let image = crop_image(&frame.image, rect);
+            Ok((frame, stitched, document)) => {
+                if let Some((frames, result, revision)) = stitched {
                     editor.update(cx, |this, cx| {
-                        this.scroll_frames.push(image);
-                        match sniplet_core::stitch_vertical(&this.scroll_frames, Default::default()) {
-                            Ok(image) => {
-                                let count = this.scroll_frames.len();
-                                copy_capture_if_enabled(this, &image);
-                                this.load(Document::new(image), &format!("Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"), cx);
+                        if this.load_revision != revision { return; }
+                        match result {
+                            Ok(document) => {
+                                let count = frames.len();
+                                this.scroll_frames = frames;
+                                copy_capture_if_enabled(this, &document, cx);
+                                this.load(document, &format!("Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"), cx);
                                 this.set_measure_scale(frame.scale_factor);
                             },
-                            Err(error) => { this.scroll_frames.pop(); this.status = format!("Could not stitch frame: {error}. Scroll less so frames overlap."); cx.notify(); },
+                            Err(error) => { this.status = format!("Could not stitch frame: {error}. Scroll less so frames overlap."); cx.notify(); },
                         }
                     });
                     crate::runtime::end_escape_session(&escape, cx);
                     restore(handle, cx);
                 } else if matches!(command, Command::Screen | Command::Delayed) {
                     if trace_capture {
-                        eprintln!("capture: screen source={:?}; image={:?}; origin={:?}; scale={}", frame.source, frame.image.dimensions(), frame.origin, frame.scale_factor);
+                        eprintln!("capture: screen source={:?}; image={:?}; origin={:?}; scale={}", frame.source, document.as_ref().unwrap().original().dimensions(), frame.origin, frame.scale_factor);
                     }
                     editor.update(cx, |this, cx| {
-                        copy_capture_if_enabled(this, &frame.image);
-                        this.load(Document::new(frame.image), "Screen captured", cx);
+                        let document = document.unwrap();
+                        copy_capture_if_enabled(this, &document, cx);
+                        this.load(document, "Screen captured", cx);
                         this.set_measure_scale(frame.scale_factor);
                     });
                     crate::runtime::end_escape_session(&escape, cx);
@@ -211,7 +225,22 @@ pub fn window(id: u32, editor: &Editor, window: &mut Window, cx: &mut Context<Ed
         }
         let frame = cx
             .background_executor()
-            .spawn(async move { sniplet_platform::capture_window_with_background(id, &style) })
+            .spawn(async move {
+                let (frame, warning) =
+                    sniplet_platform::capture_window_with_background(id, &style)?;
+                if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
+                    eprintln!(
+                        "window capture: captured id={id}; image={:?}; origin={:?}",
+                        frame.image.dimensions(),
+                        frame.origin
+                    );
+                }
+                Ok::<_, sniplet_platform::PlatformError>((
+                    Document::new(frame.image),
+                    frame.scale_factor,
+                    warning,
+                ))
+            })
             .await;
         cx.update(|cx| {
             if escape.is_cancelled() {
@@ -219,21 +248,14 @@ pub fn window(id: u32, editor: &Editor, window: &mut Window, cx: &mut Context<Ed
                 return;
             }
             editor.update(cx, |this, cx| match frame {
-                Ok((frame, warning)) => {
-                    if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
-                        eprintln!(
-                            "window capture: captured id={id}; image={:?}; origin={:?}",
-                            frame.image.dimensions(),
-                            frame.origin
-                        );
-                    }
-                    copy_capture_if_enabled(this, &frame.image);
+                Ok((document, scale_factor, warning)) => {
+                    copy_capture_if_enabled(this, &document, cx);
                     this.load(
-                        Document::new(frame.image),
+                        document,
                         warning.as_deref().unwrap_or("Window captured"),
                         cx,
                     );
-                    this.set_measure_scale(frame.scale_factor);
+                    this.set_measure_scale(scale_factor);
                 }
                 Err(error) => {
                     this.status = error.to_string();
@@ -251,11 +273,13 @@ pub(crate) fn restore(handle: AnyWindowHandle, cx: &mut App) {
     let _ = handle.update(cx, |_, w, cx| crate::runtime::show_editor(w, cx));
 }
 
-pub(crate) fn copy_capture_if_enabled(editor: &Editor, image: &image::RgbaImage) {
-    if editor.settings.auto_copy
-        && let Ok(mut clipboard) = sniplet_platform::Clipboard::new()
-    {
-        let _ = clipboard.set_image(image);
+pub(crate) fn copy_capture_if_enabled(editor: &Editor, document: &Document, cx: &App) {
+    if editor.settings.auto_copy {
+        crate::clipboard_jobs::copy(
+            crate::clipboard_jobs::Source::Original(document.clone()),
+            cx,
+        )
+        .detach();
     }
 }
 
@@ -381,6 +405,7 @@ impl Overlay {
                 cx.background_executor().timer(Duration::from_millis(220)).await;
                 let result = cx.background_executor().spawn(async move {
                     sniplet_platform::capture_scrolling_region(monitor, rect.x as u32, rect.y as u32, rect.width as u32, rect.height as u32, options, &cancel)
+                        .map(|capture| (Document::new(capture.image), capture.frame_count, capture.stop))
                 }).await;
                 cx.update(|cx| {
                     let cancelled = escape.is_cancelled();
@@ -388,9 +413,9 @@ impl Overlay {
                     if cancelled {
                         return;
                     }
-                    editor.update(cx, |editor, cx| match result { Ok(capture) => {
-                        copy_capture_if_enabled(editor, &capture.image);
-                        editor.load(Document::new(capture.image), &format!("Scrolling capture · {} frames · {:?}", capture.frame_count, capture.stop), cx);
+                    editor.update(cx, |editor, cx| match result { Ok((document, frame_count, stop)) => {
+                        copy_capture_if_enabled(editor, &document, cx);
+                        editor.load(document, &format!("Scrolling capture · {} frames · {:?}", frame_count, stop), cx);
                         editor.set_measure_scale(scale_factor);
                     }, Err(error) => { editor.status = format!("Scrolling capture failed: {error}. Try manual scrolling from the Sniplet menu."); cx.notify(); } });
                     restore(handle, cx);
@@ -406,19 +431,20 @@ impl Overlay {
         let scale_factor = self.scale_factor;
         let updated = self.editor_window.update(cx, |_, editor_window, cx| {
             editor.update(cx, |editor, cx| {
-                copy_capture_if_enabled(editor, &image);
+                let document = Document::new(image);
+                copy_capture_if_enabled(editor, &document, cx);
                 if scroll {
                     editor.scroll_region = Some(rect);
-                    editor.scroll_frames = vec![image.clone()];
+                    editor.scroll_frames = vec![document.shared_original()];
                 } else {
                     editor.scroll_region = None;
                     editor.scroll_frames.clear();
                 }
                 if append {
-                    editor.add_image(image, "Added capture", true, cx);
+                    editor.add_image(document.original().clone(), "Added capture", true, cx);
                 } else {
                     editor.load(
-                        Document::new(image),
+                        document,
                         if scroll {
                             "Scrolling capture · scroll the source, then choose Append scrolling frame from the Sniplet menu"
                         } else {

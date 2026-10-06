@@ -7,6 +7,7 @@ mod area_capture;
 mod arrow_palette;
 mod capture;
 mod capture_overlay;
+mod clipboard_jobs;
 mod editor;
 #[cfg(target_os = "macos")]
 mod macos;

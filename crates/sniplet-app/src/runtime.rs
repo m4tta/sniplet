@@ -7,11 +7,9 @@ use gpui_kit::*;
 use sniplet_core::{
     AnnotationKind, AnnotationStyle, Color, Document, ImageRect, Point as ImagePoint,
 };
-use std::{
-    path::PathBuf,
-    str::FromStr,
-    time::{Duration, Instant},
-};
+#[cfg(target_os = "windows")]
+use std::time::Instant;
+use std::{path::PathBuf, str::FromStr, time::Duration};
 use tray_icon::{TrayIcon, TrayIconBuilder, menu::MenuEvent};
 
 struct Services {
@@ -22,6 +20,45 @@ struct Services {
     next_escape_id: u64,
 }
 impl Global for Services {}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct StartupState {
+    pub enabled: bool,
+    pub busy: bool,
+    generation: u64,
+}
+#[cfg(target_os = "macos")]
+impl Global for StartupState {}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn startup_state(cx: &App) -> (bool, bool) {
+    cx.try_global::<StartupState>()
+        .map_or((false, false), |state| (state.enabled, state.busy))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn change_startup(enabled: bool, cx: &mut App) -> Task<Result<bool, String>> {
+    if cx.try_global::<StartupState>().is_none() {
+        cx.set_global(StartupState::default());
+    }
+    cx.global_mut::<StartupState>().busy = true;
+    cx.global_mut::<StartupState>().generation += 1;
+    cx.spawn(async move |cx| {
+        let result = cx
+            .background_executor()
+            .spawn(async move { crate::macos::set_launch_at_startup(enabled) })
+            .await;
+        cx.update(|cx| {
+            let state = cx.global_mut::<StartupState>();
+            state.busy = false;
+            if let Ok(enabled) = &result {
+                state.enabled = *enabled;
+            }
+        });
+        result
+    })
+}
 
 #[derive(Clone)]
 pub struct EscapeSession {
@@ -233,7 +270,8 @@ pub fn install(
         }
     };
     let mut current_hotkeys = settings.clone();
-    let mut startup_checked_at = Instant::now();
+    #[cfg(target_os = "windows")]
+    let mut theme_checked_at = Instant::now();
     cx.set_global(Services {
         manager,
         _tray: tray,
@@ -241,6 +279,43 @@ pub fn install(
         escape: None,
         next_escape_id: 1,
     });
+    #[cfg(target_os = "macos")]
+    if let Some(menu) = &native_menu {
+        cx.set_global(StartupState::default());
+        let startup = menu.startup.clone();
+        let editor = editor.clone();
+        // ServiceManagement can wait on another process. Keep that wait off
+        // both the UI thread and the shortcut/menu event polling task.
+        cx.spawn(async move |cx| {
+            loop {
+                let (checking, generation) = cx.update(|cx| {
+                    let state = cx.global::<StartupState>();
+                    (!state.busy, state.generation)
+                });
+                if !checking {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    continue;
+                }
+                let enabled = cx
+                    .background_executor()
+                    .spawn(async { crate::macos::launch_at_startup() })
+                    .await;
+                cx.update(|cx| {
+                    let state = cx.global_mut::<StartupState>();
+                    if !state.busy && state.generation == generation {
+                        let changed = state.enabled != enabled;
+                        state.enabled = enabled;
+                        startup.set_checked(enabled);
+                        if changed {
+                            editor.update(cx, |_, cx| cx.notify());
+                        }
+                    }
+                });
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
+        })
+        .detach();
+    }
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
@@ -296,10 +371,18 @@ pub fn install(
                     if event.id == *menu.startup.id() {
                         #[cfg(target_os = "macos")]
                         {
+                            if startup_state(cx).1 { menu.startup.set_checked(startup_state(cx).0); continue; }
                             let enabled = menu.startup.is_checked();
-                            let result = crate::macos::set_launch_at_startup(enabled);
-                            menu.startup.set_checked(crate::macos::launch_at_startup());
-                            editor.update(cx, |this, cx| {
+                            let startup = menu.startup.clone();
+                            startup.set_enabled(false);
+                            let task = change_startup(enabled, cx);
+                            let editor = editor.clone();
+                            cx.spawn(async move |cx| {
+                                let result = task.await;
+                                cx.update(|cx| {
+                                    startup.set_checked(startup_state(cx).0);
+                                    startup.set_enabled(true);
+                                    editor.update(cx, |this, cx| {
                                 this.status = match result {
                                     Ok(true) => "Sniplet will launch at startup".into(),
                                     Ok(false) if !enabled => "Launch at startup is disabled".into(),
@@ -307,7 +390,9 @@ pub fn install(
                                     Err(error) => format!("Could not change launch at startup: {error}"),
                                 };
                                 cx.notify();
-                            });
+                                    });
+                                });
+                            }).detach();
                         }
                     } else if let Some(command) = menu.command(&event.id) {
                         if matches!(command, Command::Quit) {
@@ -317,23 +402,17 @@ pub fn install(
                         invoke(handle, &editor, command, cx);
                     }
                 }
-                if startup_checked_at.elapsed() >= Duration::from_secs(1) {
-                    #[cfg(target_os = "macos")]
-                    if let Some(menu) = &native_menu {
-                        menu.startup.set_checked(crate::macos::launch_at_startup());
-                    }
-                    #[cfg(target_os = "windows")]
+                #[cfg(target_os = "windows")]
+                if theme_checked_at.elapsed() >= Duration::from_secs(1) {
+                    let light_theme = crate::menu_bar::taskbar_uses_light_theme();
+                    if light_theme != tray_light_theme
+                        && let Some(tray) = &cx.global::<Services>()._tray
+                        && let Ok(icon) = crate::menu_bar::tray_icon(light_theme)
+                        && tray.set_icon(Some(icon)).is_ok()
                     {
-                        let light_theme = crate::menu_bar::taskbar_uses_light_theme();
-                        if light_theme != tray_light_theme
-                            && let Some(tray) = &cx.global::<Services>()._tray
-                            && let Ok(icon) = crate::menu_bar::tray_icon(light_theme)
-                            && tray.set_icon(Some(icon)).is_ok()
-                        {
-                            tray_light_theme = light_theme;
-                        }
+                        tray_light_theme = light_theme;
                     }
-                    startup_checked_at = Instant::now();
+                    theme_checked_at = Instant::now();
                 }
             });
         }

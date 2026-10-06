@@ -128,6 +128,15 @@ struct MeasureSession {
     measurement: Option<Measurement>,
 }
 
+struct ImageInsertion {
+    png: Vec<u8>,
+    dimensions: (u32, u32),
+    origin: ImagePoint,
+    size: Option<sniplet_core::ImageSize>,
+    label: String,
+    append: bool,
+}
+
 pub struct Editor {
     pub document: Option<Document>,
     pub tool: Tool,
@@ -159,6 +168,13 @@ pub struct Editor {
     draft: Option<Annotation>,
     image: Option<Arc<RenderImage>>,
     preview_dirty: bool,
+    preview_running: bool,
+    preview_revision: u64,
+    document_revision: u64,
+    pub(crate) load_revision: u64,
+    settings_revision: u64,
+    settings_save_running: bool,
+    pub(crate) settings_save_result: Option<(u64, Option<String>)>,
     #[cfg(all(test, feature = "ui-tests"))]
     pub(crate) preview_frames: usize,
     image_size: (u32, u32),
@@ -170,6 +186,7 @@ pub struct Editor {
     space: bool,
     quick_zoom: bool,
     measure: Option<MeasureSession>,
+    measure_pending: Option<(String, u64, bool)>,
     measure_painted: Option<Measurement>,
     measure_overlay: Option<(ImageRect, Arc<RenderImage>)>,
     measure_tolerance: u8,
@@ -177,7 +194,7 @@ pub struct Editor {
     default_measure_scale: f32,
     physical_units: bool,
     last_saved: Option<PathBuf>,
-    pub scroll_frames: Vec<image::RgbaImage>,
+    pub scroll_frames: Vec<Arc<image::RgbaImage>>,
     pub scroll_region: Option<ImageRect>,
     pub last_capture: Option<crate::area_capture::Region>,
 }
@@ -206,9 +223,23 @@ impl Editor {
             editor.arrow_size_event(event, cx);
         })
         .detach();
+        cx.on_app_quit(|_, cx| {
+            cx.spawn(async move |this, cx| {
+                while this
+                    .read_with(cx, |editor, _| editor.settings_save_running)
+                    .unwrap_or(false)
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(10))
+                        .await;
+                }
+            })
+        })
+        .detach();
         cx.observe_window_activation(window, |editor, window, cx| {
             if !window.is_window_active() {
                 editor.measure = None;
+                editor.measure_pending = None;
                 editor.space = false;
                 editor.quick_zoom = false;
                 cx.notify();
@@ -260,6 +291,13 @@ impl Editor {
             draft: None,
             image: None,
             preview_dirty: false,
+            preview_running: false,
+            preview_revision: 0,
+            document_revision: 0,
+            load_revision: 0,
+            settings_revision: 0,
+            settings_save_running: false,
+            settings_save_result: None,
             #[cfg(all(test, feature = "ui-tests"))]
             preview_frames: 0,
             image_size: (0, 0),
@@ -271,6 +309,7 @@ impl Editor {
             space: false,
             quick_zoom: false,
             measure: None,
+            measure_pending: None,
             measure_painted: None,
             measure_overlay: None,
             measure_tolerance: 20,
@@ -287,6 +326,8 @@ impl Editor {
     }
 
     pub fn load(&mut self, document: Document, label: &str, cx: &mut Context<Self>) {
+        self.load_revision += 1;
+        self.document_revision += 1;
         self.finish_arrow_size_edit();
         self.measure_scale = document
             .source_scale_factor()
@@ -296,6 +337,7 @@ impl Editor {
         self.drag = None;
         self.draft = None;
         self.measure = None;
+        self.measure_pending = None;
         self.fit = true;
         self.panel = None;
         self.counter = 1;
@@ -319,15 +361,88 @@ impl Editor {
         {
             self.style = annotation.style;
         }
-        // Pointer events can arrive faster than the display refreshes. Rasterize
-        // the latest document once when GPUI draws, rather than blocking input.
+        // Keep one render in progress. Input only marks the latest state dirty.
+        self.preview_revision += 1;
         self.preview_dirty = true;
         cx.notify();
+    }
+
+    fn prepare_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.preview_dirty || self.preview_running {
+            return;
+        }
+        self.preview_dirty = false;
+        let Some(doc) = self.document.clone() else {
+            return;
+        };
+        let draft = self.draft.clone();
+        let document_revision = self.document_revision;
+        let padding = doc.backdrop().padding;
+        let pixels = (doc.width() as u64 + 2 * padding as u64)
+            .saturating_mul(doc.height() as u64 + 2 * padding as u64);
+        let prepare = move || {
+            let options = RenderOptions {
+                extra_annotations: draft.as_slice(),
+                ..render_options()
+            };
+            let image = doc.render(&options)?;
+            Ok::<_, sniplet_core::SnipletError>((
+                image.dimensions(),
+                doc.render_content_origin(&options),
+                display_image(image),
+            ))
+        };
+        // A small preview fits within one frame. Large images use a worker so
+        // pointer input and window drawing can continue during rasterization.
+        if pixels <= 262_144 {
+            self.apply_preview(prepare(), window);
+        } else {
+            self.preview_running = true;
+            let task = cx.background_executor().spawn(async move { prepare() });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.preview_running = false;
+                    // Show completed work during a continuous drag, then render
+                    // the latest input. A different document must never use it.
+                    if this.document_revision == document_revision {
+                        this.apply_preview(result, window);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn apply_preview(
+        &mut self,
+        result: sniplet_core::Result<((u32, u32), ImagePoint, Arc<RenderImage>)>,
+        window: &mut Window,
+    ) {
+        match result {
+            Ok((size, origin, image)) => {
+                self.image_size = size;
+                self.content_origin = origin;
+                if let Some(previous) = self.image.replace(image) {
+                    let _ = window.drop_image(previous);
+                }
+                #[cfg(all(test, feature = "ui-tests"))]
+                {
+                    self.preview_frames += 1;
+                }
+                if let Some(color) = self.visible_color(self.cursor) {
+                    self.sampled = color;
+                }
+            }
+            Err(error) => self.status = error.to_string(),
+        }
     }
 
     pub fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.finish_arrow_size_edit();
         self.measure = None;
+        self.measure_pending = None;
         if tool == Tool::Ruler {
             self.panel = Some(Panel::Ruler);
             cx.notify();
@@ -847,6 +962,7 @@ impl Editor {
             self.space = false;
             self.quick_zoom = false;
             self.measure = None;
+            self.measure_pending = None;
             self.focus.focus(window, cx);
             self.refresh(cx);
             return;
@@ -856,6 +972,12 @@ impl Editor {
             && self.drag.is_none()
             && !matches!(self.panel, Some(Panel::Text))
         {
+            if key == "shift"
+                && let Some((_, _, outer)) = &mut self.measure_pending
+            {
+                *outer = true;
+                return;
+            }
             if key == "shift" && self.measure.is_some() {
                 self.update_measure(self.cursor, true);
                 cx.notify();
@@ -872,6 +994,59 @@ impl Editor {
                 && doc.selected().is_none()
             {
                 if !event.is_held || self.measure.as_ref().is_none_or(|m| m.key != key) {
+                    if u64::from(doc.width()) * u64::from(doc.height()) > 262_144 {
+                        if self
+                            .measure_pending
+                            .as_ref()
+                            .is_some_and(|(pending, _, _)| pending == key)
+                        {
+                            return;
+                        }
+                        let document = doc.clone();
+                        let key = key.to_owned();
+                        let revision = self.preview_revision;
+                        self.measure_pending = Some((key.clone(), revision, modifiers.shift));
+                        let task = cx.background_executor().spawn(async move {
+                            document.render_measurement_source(&render_options())
+                        });
+                        cx.spawn(async move |this, cx| {
+                            let result = task.await;
+                            let _ = this.update(cx, |this, cx| {
+                                if this.preview_revision != revision {
+                                    return;
+                                }
+                                let Some((pending, pending_revision, outer)) =
+                                    &this.measure_pending
+                                else {
+                                    return;
+                                };
+                                if *pending != key || *pending_revision != revision {
+                                    return;
+                                }
+                                let outer = *outer;
+                                this.measure_pending = None;
+                                match result {
+                                    Ok((source, origin)) => {
+                                        this.measure = Some(MeasureSession {
+                                            key,
+                                            axis,
+                                            source,
+                                            origin,
+                                            outer,
+                                            measurement: None,
+                                        });
+                                        this.update_measure(this.cursor, outer);
+                                    }
+                                    Err(error) => this.status = error.to_string(),
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                        self.panel = None;
+                        cx.notify();
+                        return;
+                    }
                     match doc.render_measurement_source(&render_options()) {
                         Ok((source, origin)) => {
                             self.measure = Some(MeasureSession {
@@ -1046,11 +1221,23 @@ impl Editor {
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         if self
+            .measure_pending
+            .as_ref()
+            .is_some_and(|(pending, _, _)| pending == key)
+        {
+            self.measure_pending = None;
+        } else if key == "shift"
+            && let Some((_, _, outer)) = &mut self.measure_pending
+        {
+            *outer = false;
+        }
+        if self
             .measure
             .as_ref()
             .is_some_and(|session| session.key == key)
         {
             self.measure = None;
+            self.measure_pending = None;
         } else if key == "shift" {
             self.update_measure(self.cursor, false);
         }
@@ -1150,15 +1337,58 @@ impl Editor {
                 height: rect.height.round().max(1.0) as u32,
             })
         };
-        let mut png = Vec::new();
-        use image::ImageEncoder;
-        match image::codecs::png::PngEncoder::new(&mut png).write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            image::ExtendedColorType::Rgba8,
-        ) {
-            Ok(()) => {
+        let dimensions = image.dimensions();
+        let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
+        let label = label.to_owned();
+        let encode = move || {
+            let mut png = Vec::new();
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut png).write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgba8,
+            )?;
+            Ok::<_, image::ImageError>(ImageInsertion {
+                png,
+                dimensions,
+                origin,
+                size: inserted_size,
+                label,
+                append,
+            })
+        };
+        if pixels <= 262_144 {
+            self.insert_image(encode(), cx);
+        } else {
+            let revision = self.load_revision;
+            let task = cx.background_executor().spawn(async move { encode() });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.load_revision == revision {
+                        this.insert_image(result, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn insert_image(
+        &mut self,
+        result: Result<ImageInsertion, image::ImageError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(ImageInsertion {
+                png,
+                dimensions,
+                origin,
+                size: inserted_size,
+                label,
+                append,
+            }) => {
                 let doc = self.document.as_mut().unwrap();
                 if let Err(error) = doc.begin_group() {
                     self.status = error.to_string();
@@ -1167,7 +1397,7 @@ impl Editor {
                 }
                 let (width, height) = inserted_size
                     .map(|size| (size.width, size.height))
-                    .unwrap_or(image.dimensions());
+                    .unwrap_or(dimensions);
                 doc.expand_canvas_to(
                     (origin.x.ceil() as u32).saturating_add(width),
                     (origin.y.ceil() as u32).saturating_add(height),
@@ -1187,7 +1417,7 @@ impl Editor {
                 let _ = doc.end_group();
                 self.selection = None;
                 self.tool = Tool::Select;
-                self.status = label.to_owned();
+                self.status = label;
                 self.fit = true;
                 self.refresh(cx);
             }
@@ -1232,34 +1462,47 @@ impl Editor {
         self.finish_arrow_size_edit();
         self.panel = None;
         self.measure = None;
+        self.measure_pending = None;
         match command {
             Command::Open => self.open(window, cx),
             Command::Save => self.save(false, window, cx),
             Command::SaveProject => self.save(true, window, cx),
-            Command::Copy => {
-                let result = self
-                    .export_pixels()
-                    .and_then(|image| Ok(Clipboard::new()?.set_image(&image)?));
-                let hide = result.is_ok()
-                    && self.selection.is_none()
-                    && self.settings.hide_after_export
-                    && crate::runtime::has_tray(cx);
-                self.result(result, "Image copied", cx);
-                if hide {
-                    crate::runtime::hide_editor(window, cx);
-                }
-            }
+            Command::Copy => self.copy_image(window, cx),
             Command::Paste | Command::LoadClipboard => {
-                match Clipboard::new().and_then(|mut c| c.image()) {
-                    Ok(image) if matches!(command, Command::LoadClipboard) => {
-                        self.load(Document::new(image), "Loaded image from clipboard", cx);
-                    }
-                    Ok(image) => self.add_image(image, "Pasted image", false, cx),
-                    Err(error) => {
-                        self.status = error.to_string();
-                        cx.notify();
-                    }
-                }
+                self.load_revision += 1;
+                let revision = self.load_revision;
+                let task = cx.background_executor().spawn(async move {
+                    Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.image())
+                        .map(Document::new)
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.load_revision != revision {
+                            return;
+                        }
+                        match result {
+                            Ok(document)
+                                if matches!(command, Command::LoadClipboard)
+                                    || this.document.is_none() =>
+                            {
+                                this.load(document, "Loaded image from clipboard", cx);
+                            }
+                            Ok(document) => this.add_image(
+                                document.original().clone(),
+                                "Pasted image",
+                                false,
+                                cx,
+                            ),
+                            Err(error) => {
+                                this.status = error.to_string();
+                                cx.notify();
+                            }
+                        }
+                    });
+                })
+                .detach();
             }
             Command::Undo | Command::Redo => {
                 if let Some(doc) = &mut self.document {
@@ -1307,8 +1550,17 @@ impl Editor {
                 self.refresh(cx);
             }
             Command::Pin => {
-                if let Ok(image) = self.export_pixels() {
-                    capture::pin(image, window, cx);
+                if let Ok(document) = self.export_document() {
+                    let task = cx
+                        .background_executor()
+                        .spawn(async move { document.render(&render_options()) });
+                    cx.spawn_in(window, async move |this, cx| {
+                        if let Ok(image) = task.await {
+                            let _ =
+                                this.update_in(cx, |_, window, cx| capture::pin(image, window, cx));
+                        }
+                    })
+                    .detach();
                 }
             }
             Command::Window => {
@@ -1357,23 +1609,8 @@ impl Editor {
             Command::GitHub => cx.open_url("https://github.com/m4tta/sniplet"),
             Command::Quit => cx.quit(),
             Command::Upload => self.upload(window, cx),
-            Command::Ocr => self.ocr(window, cx),
-            Command::Qr => {
-                let result = self.export_pixels().and_then(|image| {
-                    let codes = sniplet_platform::scan_qr_codes(&image)?;
-                    if codes.is_empty() {
-                        anyhow::bail!("No QR code found in the selected image");
-                    }
-                    let text = codes
-                        .iter()
-                        .map(|code| code.content.clone())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Clipboard::new()?.set_text(text)?;
-                    Ok(())
-                });
-                self.result(result, "QR contents copied", cx);
-            }
+            Command::Ocr => self.recognize(false, window, cx),
+            Command::Qr => self.recognize(true, window, cx),
             Command::Fit => {
                 self.fit = true;
                 cx.notify();
@@ -1425,19 +1662,50 @@ impl Editor {
         }
     }
 
-    pub fn export_pixels(&self) -> anyhow::Result<image::RgbaImage> {
-        let doc = self
+    fn export_document(&self) -> anyhow::Result<Document> {
+        let mut document = self
             .document
-            .as_ref()
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("Capture or open an image first"))?;
         if let Some(rect) = self.selection {
-            let mut selected = doc.clone();
-            selected.set_crop(rect);
-            selected.set_backdrop(Backdrop::default());
-            Ok(selected.render(&render_options())?)
-        } else {
-            Ok(doc.render(&render_options())?)
+            document.set_crop(rect);
+            document.set_backdrop(Backdrop::default());
         }
+        Ok(document)
+    }
+
+    pub fn export_pixels(&self) -> anyhow::Result<image::RgbaImage> {
+        Ok(self.export_document()?.render(&render_options())?)
+    }
+
+    fn copy_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let document = match self.export_document() {
+            Ok(document) => document,
+            Err(error) => {
+                self.result(Err(error), "Image copied", cx);
+                return;
+            }
+        };
+        let revision = self.preview_revision;
+        let hide = self.selection.is_none()
+            && self.settings.hide_after_export
+            && crate::runtime::has_tray(cx);
+        let task =
+            crate::clipboard_jobs::copy(crate::clipboard_jobs::Source::Rendered(document), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.preview_revision != revision || matches!(result, Ok(None)) {
+                    return;
+                }
+                let copied = result.is_ok();
+                this.result(result.map(|_| ()), "Image copied", cx);
+                if copied && hide {
+                    crate::runtime::hide_editor(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Export on drag-out so the file contains the same pixels as Save and Copy.
@@ -1455,12 +1723,19 @@ impl Editor {
 
     fn copy_color(&mut self, cx: &mut Context<Self>) {
         let text = self.sampled.format(ColorFormat::HexRgb);
-        let result = Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.clone()));
-        match result {
-            Ok(_) => self.status = format!("Copied {text}"),
-            Err(error) => self.status = error.to_string(),
-        }
-        cx.notify();
+        let task =
+            crate::clipboard_jobs::copy(crate::clipboard_jobs::Source::Text(text.clone()), cx);
+        let revision = self.preview_revision;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.preview_revision != revision || matches!(result, Ok(None)) {
+                    return;
+                }
+                this.result(result.map(|_| ()), &format!("Copied {text}"), cx);
+            });
+        })
+        .detach();
     }
 
     fn visible_color(&self, point: ImagePoint) -> Option<Color> {
@@ -1490,6 +1765,8 @@ impl Editor {
     }
 
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_revision += 1;
+        let revision = self.load_revision;
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1498,28 +1775,49 @@ impl Editor {
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await
-                && let Some(path) = paths.first()
+                && let Some(path) = paths.into_iter().next()
             {
-                let result = if sniplet_core::Project::is_project_path(path) {
-                    sniplet_core::Project::load(path).and_then(|p| p.open_document())
-                } else {
-                    image::open(path)
-                        .map(|image| Document::new(image.to_rgba8()))
-                        .map_err(sniplet_core::SnipletError::from)
-                };
-                let label = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                let _ = this.update(cx, |this, cx| match result {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.load_revision == revision {
+                        this.load_path(path, window, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn load_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_revision += 1;
+        let revision = self.load_revision;
+        let label = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let task = cx.background_executor().spawn(async move {
+            if sniplet_core::Project::is_project_path(&path) {
+                sniplet_core::Project::load(path).and_then(|project| project.open_document())
+            } else {
+                image::open(path)
+                    .map(|image| Document::new(image.to_rgba8()))
+                    .map_err(sniplet_core::SnipletError::from)
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.load_revision != revision {
+                    return;
+                }
+                match result {
                     Ok(doc) => this.load(doc, &label, cx),
                     Err(error) => {
                         this.status = error.to_string();
                         cx.notify();
                     }
-                });
-            }
+                }
+            });
         })
         .detach();
     }
@@ -1558,41 +1856,53 @@ impl Editor {
                 format.extension()
             }
         );
+        let revision = self.preview_revision;
         let path = cx.prompt_for_new_path(&directory, Some(&suggested));
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(path))) = path.await {
-                let result = (|| -> anyhow::Result<()> {
-                    if project {
-                        let source = path.with_extension("source.png");
-                        document.original().save(&source)?;
-                        document
-                            .to_project(PathBuf::from(source.file_name().unwrap()))
-                            .save(&path)?;
-                    } else {
-                        let image = sniplet_platform::image_at_1x(
-                            document.render(&render_options())?,
-                            scale,
-                        );
-                        let extension = path
-                            .extension()
-                            .map(|x| x.to_string_lossy().to_ascii_lowercase());
-                        let chosen = match extension.as_deref() {
-                            Some("jpg" | "jpeg") => sniplet_platform::ExportFormat::Jpeg,
-                            Some("webp") => sniplet_platform::ExportFormat::Webp,
-                            _ => sniplet_platform::ExportFormat::Png,
-                        };
-                        sniplet_platform::export_image(&image, &path, chosen)?;
-                    }
-                    Ok(())
-                })();
+                let destination = path.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let path = destination;
+                        if project {
+                            let source = path.with_extension("source.png");
+                            document.original().save(&source)?;
+                            document
+                                .to_project(PathBuf::from(source.file_name().unwrap()))
+                                .save(&path)?;
+                        } else {
+                            let image = sniplet_platform::image_at_1x(
+                                document.render(&render_options())?,
+                                scale,
+                            );
+                            let extension = path
+                                .extension()
+                                .map(|x| x.to_string_lossy().to_ascii_lowercase());
+                            let chosen = match extension.as_deref() {
+                                Some("jpg" | "jpeg") => sniplet_platform::ExportFormat::Jpeg,
+                                Some("webp") => sniplet_platform::ExportFormat::Webp,
+                                _ => sniplet_platform::ExportFormat::Png,
+                            };
+                            sniplet_platform::export_image(&image, &path, chosen)?;
+                        }
+                        Ok(())
+                    })
+                    .await;
                 let saved = result.is_ok();
-                let _ = this.update(cx, |this, cx| {
-                    if result.is_ok() {
-                        this.last_saved = Some(path.clone());
-                    }
-                    this.result(result, &format!("Saved {}", path.display()), cx);
-                });
-                if saved && hide {
+                let current = this
+                    .update(cx, |this, cx| {
+                        if this.preview_revision != revision {
+                            return false;
+                        }
+                        if result.is_ok() {
+                            this.last_saved = Some(path.clone());
+                        }
+                        this.result(result, &format!("Saved {}", path.display()), cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if current && saved && hide {
                     let _ = cx.update(|window, cx| crate::runtime::hide_editor(window, cx));
                 }
             }
@@ -1600,34 +1910,37 @@ impl Editor {
         .detach();
     }
 
-    fn ocr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(image) = self.export_pixels() else {
-            return;
+    fn recognize(&mut self, qr_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let document = match self.export_document() {
+            Ok(document) => document,
+            Err(error) => {
+                self.status = error.to_string();
+                cx.notify();
+                return;
+            }
         };
         self.status = "Recognizing text…".into();
         cx.notify();
-        let task = cx.background_executor().spawn(async move {
-            let codes = sniplet_platform::scan_qr_codes(&image)?;
-            if !codes.is_empty() {
-                return Ok(codes
-                    .into_iter()
-                    .map(|code| code.content)
-                    .collect::<Vec<_>>()
-                    .join("\n"));
-            }
-            sniplet_platform::recognize_text(&image, &sniplet_platform::OcrOptions::default())
-        });
+        let revision = self.preview_revision;
+        let task = crate::clipboard_jobs::copy(
+            crate::clipboard_jobs::Source::Recognize { document, qr_only },
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.preview_revision != revision {
+                    return;
+                }
                 match result {
-                    Ok(text) => match Clipboard::new().and_then(|mut c| c.set_text(text.clone())) {
-                        Ok(_) => {
-                            this.status =
-                                format!("Text copied · {} characters", text.chars().count())
+                    Ok(Some(count)) => {
+                        this.status = if qr_only {
+                            "QR contents copied".into()
+                        } else {
+                            format!("Text copied · {count} characters")
                         }
-                        Err(error) => this.status = error.to_string(),
-                    },
+                    }
+                    Ok(None) => return,
                     Err(error) => this.status = error.to_string(),
                 }
                 cx.notify();
@@ -1641,8 +1954,8 @@ impl Editor {
             self.open_settings(crate::settings_window::Page::Uploading, window, cx);
             return;
         };
-        let image = match self.export_pixels() {
-            Ok(image) => image,
+        let document = match self.export_document() {
+            Ok(document) => document,
             Err(error) => {
                 self.status = error.to_string();
                 cx.notify();
@@ -1658,9 +1971,10 @@ impl Editor {
                 .unwrap_or_default()
                 .as_millis()
         );
-        let task = cx
-            .background_executor()
-            .spawn(async move { sniplet_platform::upload_image(&image, &key, &config) });
+        let task = cx.background_executor().spawn(async move {
+            let image = document.render(&render_options())?;
+            Ok::<_, anyhow::Error>(sniplet_platform::upload_image(&image, &key, &config)?)
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -2734,21 +3048,45 @@ impl Editor {
         });
         cx.notify();
     }
-    pub(crate) fn persist_settings(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn persist_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_revision += 1;
+        self.save_settings(cx);
+    }
+
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_save_running {
+            return;
+        }
+        self.settings_save_running = true;
+        let revision = self.settings_revision;
+        let load_revision = self.load_revision;
+        let settings = self.settings.clone();
         let store = SettingsStore::for_app();
         #[cfg(test)]
         let store = self
             .settings_path
             .as_ref()
             .map_or(store, |path| Ok(SettingsStore::at(path)));
-        let result = store.and_then(|s| s.save(&self.settings));
-        let saved = result.is_ok();
-        match result {
-            Ok(_) => self.status = "Settings saved".into(),
-            Err(e) => self.status = e.to_string(),
-        }
-        cx.notify();
-        saved
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.and_then(|store| store.save(&settings)) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.settings_save_running = false;
+                if this.settings_revision != revision {
+                    this.save_settings(cx);
+                    return;
+                }
+                let error = result.err().map(|error| error.to_string());
+                if this.load_revision == load_revision {
+                    this.status = error.clone().unwrap_or_else(|| "Settings saved".into());
+                }
+                this.settings_save_result = Some((revision, error));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -2767,39 +3105,7 @@ impl Render for Editor {
                 .and_then(|m| m.overlay(FONT).ok())
                 .map(|(bounds, image)| (bounds, display_image(image)));
         }
-        if self.preview_dirty {
-            let preview_started = std::time::Instant::now();
-            self.preview_dirty = false;
-            if let Some(doc) = &self.document {
-                let options = RenderOptions {
-                    extra_annotations: self.draft.as_slice(),
-                    ..render_options()
-                };
-                match doc.render(&options) {
-                    Ok(image) => {
-                        self.image_size = image.dimensions();
-                        self.content_origin = doc.render_content_origin(&options);
-                        if let Some(previous) = self.image.replace(display_image(image)) {
-                            let _ = window.drop_image(previous);
-                        }
-                        #[cfg(all(test, feature = "ui-tests"))]
-                        {
-                            self.preview_frames += 1;
-                        }
-                        if let Some(color) = self.visible_color(self.cursor) {
-                            self.sampled = color;
-                        }
-                    }
-                    Err(error) => self.status = error.to_string(),
-                }
-                if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
-                    eprintln!(
-                        "capture: editor preview ready in {:?}",
-                        preview_started.elapsed()
-                    );
-                }
-            }
-        }
+        self.prepare_preview(window, cx);
         if let Some((width, _)) = self.arrow_properties()
             && self.arrow_size.read(cx).value().end() != width
         {
@@ -3233,17 +3539,9 @@ impl Render for Editor {
                     .child(bar),
             )
             .child(canvas)
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
-                    match image::open(path) {
-                        Ok(image) => {
-                            this.load(Document::new(image.to_rgba8()), "Opened dropped image", cx)
-                        }
-                        Err(error) => {
-                            this.status = error.to_string();
-                            cx.notify();
-                        }
-                    }
+                    this.load_path(path.clone(), window, cx);
                 }
             }))
     }

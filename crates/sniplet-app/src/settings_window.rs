@@ -72,6 +72,7 @@ pub(crate) struct SettingsWindow {
     background_color: Entity<InputState>,
     background_previews: [std::sync::Arc<RenderImage>; 4],
     message: String,
+    settings_save_revision: u64,
     error: bool,
     _theme: Subscription,
     _editor: Subscription,
@@ -204,7 +205,16 @@ impl SettingsWindow {
                 crate::theme::apply(preference, window, cx);
             }
         });
-        let editor_subscription = cx.observe(&editor, |_, _, cx| cx.notify());
+        let editor_subscription = cx.observe(&editor, |this: &mut Self, editor, cx| {
+            if let Some((revision, error)) = &editor.read(cx).settings_save_result
+                && *revision != this.settings_save_revision
+            {
+                this.settings_save_revision = *revision;
+                this.message = error.clone().unwrap_or_else(|| "Settings saved".into());
+                this.error = error.is_some();
+            }
+            cx.notify();
+        });
         Self {
             editor,
             page,
@@ -218,6 +228,7 @@ impl SettingsWindow {
             background_color,
             background_previews,
             message: String::new(),
+            settings_save_revision: 0,
             error: false,
             _theme: theme,
             _editor: editor_subscription,
@@ -232,13 +243,12 @@ impl SettingsWindow {
     }
 
     fn change(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Settings)) {
-        let (saved, message) = self.editor.update(cx, |editor, cx| {
+        self.editor.update(cx, |editor, cx| {
             change(&mut editor.settings);
-            let saved = editor.persist_settings(cx);
-            (saved, editor.status.clone())
+            editor.persist_settings(cx);
         });
-        self.message = message;
-        self.error = !saved;
+        self.message.clear();
+        self.error = false;
         self.background_previews =
             background_previews(self.editor.read(cx).settings.window_capture.color);
         cx.notify();
@@ -801,20 +811,23 @@ impl SettingsWindow {
                 "Launch at startup",
                 "Open Sniplet when you sign in.",
                 Switch::new("launch-at-startup")
-                    .checked(crate::macos::launch_at_startup())
+                    .checked(crate::runtime::startup_state(cx).0)
+                    .disabled(crate::runtime::startup_state(cx).1)
                     .on_click(cx.listener(|this, enabled: &bool, _, cx| {
-                        match crate::macos::set_launch_at_startup(*enabled) {
-                            Ok(true) => {
-                                this.message = "Startup preference saved".into();
-                                this.error = false;
-                                cx.notify();
-                            }
-                            Ok(false) => this.fail(
-                                "Enable Sniplet in System Settings → General → Login Items.",
-                                cx,
-                            ),
-                            Err(error) => this.fail(error, cx),
-                        }
+                        let task = crate::runtime::change_startup(*enabled, cx);
+                        let editor = this.editor.clone();
+                        cx.notify();
+                        cx.spawn(async move |this, cx| {
+                            let result = task.await;
+                            let _ = this.update(cx, |this, cx| {
+                                match result {
+                                    Ok(true) => { this.message = "Startup preference saved".into(); this.error = false; cx.notify(); }
+                                    Ok(false) => this.fail("Enable Sniplet in System Settings → General → Login Items.", cx),
+                                    Err(error) => this.fail(error, cx),
+                                }
+                                editor.update(cx, |_, cx| cx.notify());
+                            });
+                        }).detach();
                     })),
                 cx,
             )),
@@ -1298,6 +1311,49 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn settings_writes_coalesce_and_report_disk_errors(cx: &mut TestAppContext) {
+        let (handle, entity, editor, path) = fixture(cx, Page::General);
+        handle
+            .update(cx, |_, _, cx| {
+                entity.update(cx, |settings, cx| {
+                    settings.change(cx, |s| s.scroll_max_frames = 30);
+                    settings.change(cx, |s| s.scroll_max_frames = 80);
+                });
+                assert!(
+                    !path.exists(),
+                    "settings writes must not block the input handler"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            SettingsStore::at(&path).load().unwrap().scroll_max_frames,
+            80
+        );
+        assert_eq!(
+            cx.read(|cx| entity.read(cx).message.clone()),
+            "Settings saved"
+        );
+        handle
+            .update(cx, |_, _, cx| {
+                editor.update(cx, |editor, _| editor.settings_path = Some(path.clone()));
+            })
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        handle
+            .update(cx, |_, _, cx| {
+                entity.update(cx, |settings, cx| {
+                    settings.change(cx, |s| s.scroll_max_frames = 40)
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.read(|cx| entity.read(cx).error));
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn window_background_choices_padding_and_color_persist_without_changing_open_capture(
         cx: &mut TestAppContext,
     ) {
@@ -1320,7 +1376,7 @@ mod tests {
                 ] {
                     window.render_frame(cx);
                     window.click(id, cx);
-                    assert_eq!(store.load().unwrap().window_capture.background, mode);
+                    assert_eq!(editor.read(cx).settings.window_capture.background, mode);
                     assert!(window.find(id).bounds().right() <= window.viewport_size().width);
                 }
                 entity
@@ -1331,7 +1387,10 @@ mod tests {
                 window.render_frame(cx);
                 window.click("save-background-color", cx);
                 assert!(entity.read(cx).error);
-                assert_eq!(store.load().unwrap().window_capture.color, [242, 242, 247]);
+                assert_eq!(
+                    editor.read(cx).settings.window_capture.color,
+                    [242, 242, 247]
+                );
                 entity
                     .read(cx)
                     .background_color
@@ -1340,11 +1399,17 @@ mod tests {
                 window.render_frame(cx);
                 window.click("save-background-color", cx);
                 assert!(!entity.read(cx).error);
-                assert_eq!(store.load().unwrap().window_capture.color, [18, 52, 86]);
+                assert_eq!(editor.read(cx).settings.window_capture.color, [18, 52, 86]);
                 window.click_at("window-padding", point(px(140.0), px(12.0)), cx);
             })
             .unwrap();
+        cx.run_until_parked();
         assert!(store.load().unwrap().window_capture.padding > 32);
+        assert_eq!(store.load().unwrap().window_capture.color, [18, 52, 86]);
+        assert_eq!(
+            store.load().unwrap().window_capture.background,
+            WindowBackground::Solid
+        );
         assert_eq!(
             cx.read(|cx| editor.read(cx).export_pixels().unwrap()),
             original
@@ -1404,6 +1469,7 @@ mod tests {
                 window.click("desktop-wallpaper", cx);
             })
             .unwrap();
+        cx.run_until_parked();
         assert!(
             SettingsStore::at(&path)
                 .load()
@@ -1463,6 +1529,7 @@ mod tests {
                 window.click("downscale-on-save", cx);
             })
             .unwrap();
+        cx.run_until_parked();
         assert_eq!(store.load().unwrap().format, ExportFormat::Jpeg);
         assert!(store.load().unwrap().downscale_on_save);
         let parent = cx
@@ -1621,16 +1688,25 @@ mod tests {
                 scroll_bottom(window, Page::Hotkeys, cx);
                 window.click("save-hotkeys", cx);
                 assert!(!entity.read(cx).error);
-                assert_eq!(store.load().unwrap().hotkeys.capture_area, "Control+Alt+9");
-                assert!(store.load().unwrap().hotkeys.capture_screen.is_empty());
+                assert_eq!(
+                    editor.read(cx).settings.hotkeys.capture_area,
+                    "Control+Alt+9"
+                );
+                assert!(editor.read(cx).settings.hotkeys.capture_screen.is_empty());
                 window.click("reset-hotkeys", cx);
                 assert_eq!(
                     entity.read(cx).hotkeys[0].read(cx).value().as_str(),
                     HotkeySettings::default().capture_area
                 );
-                assert_eq!(store.load().unwrap().hotkeys.capture_area, "Control+Alt+9");
+                assert_eq!(
+                    editor.read(cx).settings.hotkeys.capture_area,
+                    "Control+Alt+9"
+                );
             })
             .unwrap();
+        cx.run_until_parked();
+        assert_eq!(store.load().unwrap().hotkeys.capture_area, "Control+Alt+9");
+        assert!(store.load().unwrap().hotkeys.capture_screen.is_empty());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1660,11 +1736,13 @@ mod tests {
             window.render_frame(cx);
             window.click("save-upload", cx);
             assert!(!entity.read(cx).error);
-            assert!(matches!(store.load().unwrap().cloud_upload, Some(CloudUploadConfig::S3 { bucket, key_prefix, .. }) if bucket == "screenshots" && key_prefix == "sniplet/"));
+            assert!(matches!(editor.read(cx).settings.cloud_upload.clone(), Some(CloudUploadConfig::S3 { bucket, key_prefix, .. }) if bucket == "screenshots" && key_prefix == "sniplet/"));
             window.scroll(("settings-content", Page::Uploading as usize), ScrollDelta::Pixels(point(px(0.0), px(1200.0))), cx);
             window.click("disable-upload", cx);
-            assert!(store.load().unwrap().cloud_upload.is_none());
+            assert!(editor.read(cx).settings.cloud_upload.clone().is_none());
         }).unwrap();
+        cx.run_until_parked();
+        assert!(store.load().unwrap().cloud_upload.is_none());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1672,7 +1750,7 @@ mod tests {
     fn settings_scrolling_preferences_validate_limits_and_faster_slider_reduces_delay(
         cx: &mut TestAppContext,
     ) {
-        let (handle, entity, _, path) = fixture(cx, Page::Advanced);
+        let (handle, entity, editor, path) = fixture(cx, Page::Advanced);
         let store = SettingsStore::at(&path);
         handle
             .update(cx, |_, window, cx| {
@@ -1694,10 +1772,12 @@ mod tests {
                     .update(cx, |input, cx| input.set_value("80", window, cx));
                 window.render_frame(cx);
                 window.click("save-scroll-limit", cx);
-                assert_eq!(store.load().unwrap().scroll_max_frames, 80);
+                assert_eq!(editor.read(cx).settings.scroll_max_frames, 80);
                 window.click_at("scroll-speed", point(px(200.0), px(12.0)), cx);
             })
             .unwrap();
+        cx.run_until_parked();
+        assert_eq!(store.load().unwrap().scroll_max_frames, 80);
         assert!(store.load().unwrap().scroll_settle_ms < 250);
         std::fs::remove_file(path).unwrap();
     }

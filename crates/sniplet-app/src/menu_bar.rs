@@ -57,9 +57,7 @@ impl NativeMenu {
         menu.append(&github)?;
         items.push((github, Command::GitHub));
         menu.append(&PredefinedMenuItem::separator())?;
-        #[cfg(target_os = "macos")]
-        let enabled = crate::macos::launch_at_startup();
-        #[cfg(not(target_os = "macos"))]
+        // The background startup check sets the checkbox after menu creation.
         let enabled = false;
         let startup = CheckMenuItem::new(
             "Launch at Startup",

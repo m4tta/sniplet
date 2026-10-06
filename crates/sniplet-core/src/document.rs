@@ -257,6 +257,11 @@ impl Document {
         &self.original
     }
 
+    /// Share immutable source pixels with background work without copying them.
+    pub fn shared_original(&self) -> Arc<RgbaImage> {
+        self.original.clone()
+    }
+
     pub(crate) fn original_is_opaque(&self) -> bool {
         self.original_is_opaque
     }
