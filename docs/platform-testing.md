@@ -2,7 +2,7 @@
 
 Sniplet needs two kinds of evidence. The repeatable suite proves the Rust workspace, image model, platform adapters, and headless GPUI tests build and pass. A real desktop session proves capture, global input, tray, clipboard, pinning, and mixed-DPI behavior. A CI runner cannot substitute for the second category.
 
-
+This protocol covers Sniplet's capture, editing, export, and pin flows. Build prerequisites come from [GPUI Kit's installation guide](https://gpui-kit.com/docs/installation/) and [xcap's Linux requirements](https://github.com/nashaofu/xcap#linux-system-requirements).
 
 ## Repeatable checks
 
@@ -122,7 +122,7 @@ The Linux commands emitted the already-observed WSL startup warning about failin
 
 ## October 3, 2026 arrow editing update
 
-
+The user supplied two screenshots for the solid arrow design: a bold shaft, filled pointed head, smooth edges, and three white controls. Sniplet now draws arrows at 10 source pixels by default, with a flat tail and an antialiased quadratic curve. Its middle control lies on the curve and changes its bend; the endpoints reposition it while preserving bend displacement. Shaft dragging moves all three points. Arrow and Select both edit the same three controls, without rectangular resize handles. Width changes remain separate from other tools. Plain `A` selects Arrow; Auto Adjust remains in the application menu and modified `Command/Ctrl+A` remains Add Capture.
 
 The curve and its tangent-oriented head use the same raster renderer for preview, clipboard, and file export. Old straight-arrow projects load without a bend field; newly curved arrows preserve their bend in editable project JSON. Undo groups a whole control/shaft drag, and Escape restores an unfinished edit.
 
@@ -141,7 +141,7 @@ The repeatable visual fixture is generated with `cargo run -p sniplet-core --exa
 | Final capture snapshot | Immediately before the final restart, `current-capture.clippy` and its source PNG were saved through the native dialog. Its eight annotations equal the original capture JSON exactly, and its source PNG has the original SHA-256. This is the project reopened by the final release. |
 | Installed release input | The standard portable executable reopened the preserved capture as PID 42836. Native input verified A selection, readable 6/10/14 width choices with 10 selected, a freshly drawn bold arrow with three controls, midpoint bending, and two separate undo steps restoring the original capture. It remains running with Arrow selected. |
 
-
+This is evidence for the solid-arrow interaction and rendering. Alternate arrow styles remained open at this stage. No macOS desktop was available for native input verification.
 
 ## October 3, 2026 appearance update
 
@@ -201,7 +201,7 @@ This update replaces the October 3 list picker with desktop hover selection. The
 | Packaged diagnostics | `artifacts/arrow-variants-update/verify-release.ps1` reruns bounded startup smoke (20 seconds) and native self-test (60 seconds). Both exited 0. Self-test passed native capture on the 2560×1440 XG270QG display, annotation, undo/redo, crop, PNG export/reload, and font rendering. Logs and diagnostic PNGs are under the same artifact directory. |
 | Installed release | The standard portable executable reopened the preserved Spotify project as PID 33468. Native inspection confirmed the 1600×900 capture and curved Solid arrow. A selected Arrow and exposed the size slider with all four variants. `Ctrl+Shift+3` from Spotify opened only the desktop overlay; Chrome and Spotify hover highlights followed the pointer correctly. Escape removed the overlay, and the native window probe confirmed Sniplet remained minimized with the original document retained. All seven portable directories and six Windows ZIPs contain the verified executable; the archives contain only the seven distribution files. |
 
-
+These observations come from an uncommitted development tree and native Windows 11 input. WSL testing does not qualify capture on a physical Linux desktop. macOS native capture, other Linux compositors, and mixed-DPI hardware remain separate qualification gates. The supplied images show the arrow variants and hover interaction; the tests verify Sniplet's slider and stroke behavior.
 
 ## October 4, 2026 interactive preview performance
 
@@ -285,7 +285,7 @@ Before Screen Recording was enabled, area selection produced a 400×300 wallpape
 
 The window result needs a fix before macOS capture can pass as a whole. `WindowInfo::is_capture_candidate` accepts any non-minimized, titled window from another process. `window_at_point` then selects the largest z-order at that point. The macOS route has no filter for system helper windows. The initial run did not log the selected native window ID. The follow-up below confirms the cause.
 
-
+Another screenshot app was running during these tests and used some of the same capture shortcuts. Global shortcut delivery remains unverified because of this conflict and the inspection tool's background input route. The window capture failure used Sniplet's menu, so it does not depend on shortcut delivery.
 
 Tray lifecycle, pin behavior, scrolling capture, mixed displays, Spaces/fullscreen, Intel Macs, and signed release packaging still need separate evidence. The upstream namespace record above reports the initial commit's GitHub Actions results. No application source files changed during this test run.
 
@@ -365,7 +365,7 @@ Use a clean settings directory for first-launch tests, then repeat persistence c
 4. Close the editor. Confirm the documented background behavior, then reopen it from the tray and configured reopen shortcut.
 5. Quit from the tray and verify that the process and registered hotkeys are gone.
 
-
+Sniplet stays in the menu bar after the editor closes. Native menu names and permission text must follow each platform.
 
 ### 2. Global hotkeys and conflicts
 
@@ -375,7 +375,7 @@ Use a clean settings directory for first-launch tests, then repeat persistence c
 4. Change a shortcut, restart Sniplet, and verify that only the new binding fires once.
 5. Exercise non-US keyboard layout and modifier-only edge cases.
 
-
+The test record must list the actual configured shortcut combinations on each platform.
 
 ### 3. Area overlay and mixed DPI
 
@@ -403,7 +403,14 @@ This is the release gate for coordinate conversion. A single-scale virtual displ
 
 Use a fixture with fine one-pixel lines, flat-color regions, text, transparency, and a color chart.
 
-
+1. Verify the main toolbar order, overflow behavior, pixel color, image dimensions, and zoom readouts against the [feature checklist](parity.md).
+2. Create every annotation object. For selectable objects, move, resize, recolor, restyle, duplicate, reorder, undo, and redo it.
+3. Exercise context-sensitive editor shortcuts. In particular, `V` selects/crops, `A` selects Arrow (the user's requested override), `B` selects the Blur/Erase family, `C` chooses Counter without a raster selection and copies average color with one, and `Command/Ctrl+A` invokes Add Capture. Auto Adjust is available from the application menu. Draw an arrow, drag all three handles and the shaft, then verify grouped undo/redo and PNG export.
+4. Crop a selection with Enter; remove a uniform object with Delete; pan with right-drag and Space-drag; test keyboard nudge and resize increments.
+5. Copy the full image, copy a selected raster region, and save as PNG and JPEG.
+6. Open each export in an independent viewer. Compare dimensions, alpha, edge pixels, annotation placement, colors, and JPEG quality to the editor preview.
+7. Drag the editor's file representation into another application. Verify that the file remains readable after the drop and is eventually cleaned up.
+8. Hide and reopen the editor after copy/save. Confirm that the current document and undo state follow the product's specified retention behavior.
 
 ### 6. Clipboard and file import
 
@@ -459,7 +466,7 @@ The user supplied an image with a small source circle, a larger magnified circle
 
 The native tests used focused editor commands and the toolbar. Both applications have overlapping global shortcuts, so this run does not verify global command delivery. Screen Recording was not needed to open the fixture. The pending grant and native Preview capture remain separate checks.
 
-
+The example uses the circle sizes and positions from the user's image. The 3× creation default and initial offset follow that example. Factor limits, handle behavior and edited-pixel sampling need further checks. Sniplet still samples the original screenshot, including pixels that later receive blur or erase.
 
 ## macOS measurement, October 4, 2026
 
@@ -467,6 +474,7 @@ The user selected all three measurement mock states: live preview, placed gap an
 
 | Check | Result |
 | --- | --- |
+| Approved design | Ruler opens keyboard help. The measurement uses a red line with caps and a white pixel label. Held keys, Shift, wheel sensitivity and Retina units are covered by the checks below |
 | Failure reproduction | The held-key UI test failed because no preview existed. A later pixel test failed because Retina text extended beyond its label background. Both pass after the changes |
 | Core | 56 tests passed, including axes, gaps, borderless/outer size, sensitivity, alpha, raster layers, label bounds, export, project scale and undo/redo |
 | App | 53 tests passed, including held keys, pointer placement, modifier events, wheel input, pt/px switching, crop boundaries, Escape, text entry and selection arrow keys |
@@ -476,11 +484,11 @@ The user selected all three measurement mock states: live preview, placed gap an
 | Native export | `native-export.png` equals `outer-size.png` byte for byte: 800×440, 9,811 bytes, SHA-256 `8ed9132da3acf6a3334eb4834259a03bc44767b08d4922772c1b4bb13b590840` |
 | Evidence | Source fixture, three PNG states, two projects, native help/unit screenshots, native export and logs are under `artifacts/measure-parity-2026-10-04/` |
 
-
+Native checks for thresholds, wheel direction/step, numeric-key axis mapping, label placement and imprint edit rules remain open. The control tool cannot hold an ordinary key while moving the pointer. GPUI tests cover that sequence in Sniplet. The detector uses color-edge and thin-border rules; these tests do not cover every screenshot. Existing canvas zoom scaling and mixed-display qualification remain open. No native capture permission was used for these editor tests.
 
 ## macOS image drag button, October 4, 2026
 
-
+The user supplied an image for the `Drag'n'Drop Image` button design. Sniplet's existing PNG drag path now has a rounded page button with dot grips and that tooltip. It is disabled without an open image. A failed export reports the error in the editor status.
 
 | Check | Result |
 | --- | --- |
@@ -561,9 +569,17 @@ The debug profile also optimizes the app and `xcap` pixel conversion code.
 | Bundle | `dist/Sniplet-debug.app`; executable SHA-256 `3c996646193426a4a51ca19d5dfecc9f23f3a22ba2eb78a76a8c1a70a35d257e` |
 | Evidence | `artifacts/area-capture-2026-10-05/results.json`, timing logs, native screenshots, and `top-edge-export.png` |
 
+The test used toolbar commands to avoid conflicts with another app's global hotkeys.
+Timing starts in the capture command handler and ends at the next overlay frame;
+it excludes hotkey dispatch. `SNIPLET_CAPTURE_TRACE=1` enables these timings and
+native frame diagnostics. The UI test tool can reopen Sniplet during capture.
+The final clean sample therefore read logs before inspecting the completed
+overlay; `final-clean-overlay.png` confirms that the editor was absent.
 
-
-
+This fixes the duplicate menu bar and reduces the measured delay. Capture still
+uses a frozen screen image. Latency across other displays and fullscreen
+Spaces remain unverified. The source was tested with uncommitted changes on
+base commit `1884b67ecd5696a717351d84e1f6739b2e004a61`.
 
 ## macOS area capture across displays, October 5, 2026
 
@@ -587,7 +603,12 @@ at `(-356, -1692)`. Both displays used a 2× capture scale.
 | Bundle | `dist/Sniplet-debug.app`; executable SHA-256 `c0446eaa10fed0ddd366905df1111e301befb1f1c510f2ee433af9094edf0784` |
 | Evidence | `artifacts/multi-display-2026-10-05/results.json`, native logs, editor screenshots, and PNG exports |
 
-
+Toolbar commands avoided conflicts with another app's global hotkeys. Mixed 1×/2× scales,
+negative origins, gaps between displays, and changed layouts have automated
+coverage. Physical mixed-scale displays and fullscreen Spaces remain untested.
+Display images are captured in sequence, so moving content is not synchronized
+across screens. This run used uncommitted changes on base commit
+`2ed5032`; the bundle hash identifies the tested executable.
 
 ## macOS area capture cursor, October 5, 2026
 

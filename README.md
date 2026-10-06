@@ -1,6 +1,9 @@
 # Sniplet
 
-
+A Rust screenshot utility and editor for Windows, macOS, and Linux, built with
+[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and
+[gpui-kit](https://github.com/longbridge/gpui-kit). Capture a screen or area,
+add annotations, then copy or save the image.
 
 ## Run
 
@@ -225,9 +228,17 @@ keyboard integration tests. Native mode launches a smoke-test window and runs
 a real capture-to-PNG self-test; its output is in `artifacts/self-test`.
 Upload tests use a loopback HTTP server and never send screenshots externally.
 
-## Known differences
+## Known limitations
 
-
+Sniplet implements the main capture, annotation, export, tray, hotkey, OCR/QR,
+scrolling, pin, project, and upload paths. Several features are
+still incomplete. Window presentation modes, cursor capture,
+manual-scroll speed and idle feedback, advanced text/freehand/highlighter
+styles, comparison GIF, print, upload history, contrast checking, URL-scheme
+commands, and OS credential-store integration are not implemented. Launch at
+Startup is implemented for packaged macOS apps; other platforms remain open.
+Some tools still need more property controls. See the
+[feature checklist](docs/parity.md) for implementation and test status.
 
 Platform qualification is a separate gap. Windows native capture, editor input,
 and diagnostics have passed locally, while mixed-DPI hardware, tray/hotkey
@@ -247,15 +258,14 @@ Screen Recording grant for the new app ID. See the
 The linked magnifier passed native Mac creation, circle movement, size changes,
 factor adjustment, undo and PNG export. All 52 core and 50 app tests passed;
 see the [magnifier test record](docs/platform-testing.md#macos-linked-magnifier-october-4-2026).
-Exact visual parity still needs 1×/2× reference comparisons and golden-image review.
+Visual checks at 1× and 2× remain open.
 
-## Research and scope
+## Feature coverage and testing
 
-
-
-This is an actively developed independent implementation. A claim of 100%
-visual or behavioral parity would require reference comparisons and native
-verification on all three platforms; that has not yet been established.
+[The feature checklist](docs/parity.md) tracks implementation and open checks.
+[Platform testing](docs/platform-testing.md) records test results and the checks
+that still need native machines. Development is active, and full verification
+on all three platforms remains open.
 
 The bundled Noto Sans font is licensed under the SIL Open Font License;
 see `assets/fonts/OFL.txt`.

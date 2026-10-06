@@ -1,8 +1,8 @@
-# Sniplet parity checklist
+# Sniplet feature checklist
 
-
-
-
+This checklist covers 75 product checks. The execution protocol and test records
+are in [platform testing](platform-testing.md). Each completed check needs test
+evidence from Sniplet.
 
 ## Status and evidence
 
@@ -19,7 +19,7 @@ Evidence should be a test name, CI run, desktop test record, screenshot/recordin
 
 ## Shortcut baseline for product Help
 
-
+The in-app Help panel must describe implemented commands. Tool keys are `V` Select/Crop, `B` Blur/Erase, `H` Highlighter, context-sensitive `C` Counter, `O` Oval, `L` Line, `S` Spotlight, and `A` Arrow. Selection Auto Adjust remains in the application menu. `Z` enters quick zoom. `Command/Ctrl+A` remains Add Capture and `Command/Ctrl+V` is Paste Image. Text, Ruler, Rectangle, Backdrop, Freehand, and Magnifier have no default tool key.
 
 The `C`, `B`, `Z`, and modified-key commands require editor context that a plain `Tool::from_key` lookup cannot model. Tool keys, including `A`, must preserve text-input focus. Help text may list commands only after dispatcher behavior exists and has an input regression test.
 
@@ -79,10 +79,12 @@ The `C`, `B`, `Z`, and modified-key commands require editor context that a plain
 | EDIT-03 | Arrow supports head, weight, curve/bend, reverse, classic, and hand-drawn variants. | In progress | Four variants are implemented: bold Solid, rounded Hand drawn, angular Thin, and Double ended using Thin heads. A tapered 1–30 size slider updates live with one undo step per drag. All variants preserve the start/middle/end controls and bend when restyled; legacy projects default to Solid. Core tests pin old Solid pixels and cover variant rendering, head hit testing, scaling, degeneracy, and serialization. GPUI pointer/key tests cover style changes, all controls, remembered choices, live size, grouped undo, Escape, and minimum-window layout in both themes. Native Windows verification covers all four style buttons and slider undo. Preview rendering now coalesces pointer input into one frame and releases replaced GPU images; exact pixel and input regressions accompany the [performance record](platform-testing.md#october-4-2026-interactive-preview-performance). Modifier-based reversal and exact reference pixel comparisons remain open. | Editor qualification |
 | EDIT-04 | Text supports size, color, background/point style, editing, and multiline layout. | In progress | Windows native input selected Text, typed and committed `Sniplet native UI test`, then Ctrl+Z removed it; GPUI text-entry/export test also passed. The remaining property and multiline matrix is open. | Editor qualification |
 | EDIT-05 | Rectangle and Oval support outline, fill, opacity, and hand-drawn style. | In progress | Rectangle/Oval render outline and optional fill with palette and width controls; vector rendering and resize tests pass. Opacity control and hand-drawn style remain open. | Editor qualification |
+| EDIT-06 | Held-key measurement finds areas and gaps, supports outer edges and sensitivity, and imprints the ruler. | In progress | The three approved states are implemented. Core and GPUI tests cover both axes, Shift, wheel sensitivity, pt/px units, crop, raster source, click placement, export, project reload and one-step undo. Ruler opens keyboard help. Thresholds, numeric-key axis mapping and native held-pointer input still need native checks. | Editor qualification |
 | EDIT-07 | Freehand supports live stroke, smoothing, and variability controls. | In progress | Pointer movement collects a live freehand polyline, and capsule rendering covers continuous diagonals, round caps, single points, and overlap alpha. Smoothing and variability controls remain open. | Editor qualification |
 | EDIT-08 | Highlighter supports cap style and remains visually translucent after export. | In progress | Highlighter renders a default translucent fill and core vector export coverage passes. Cap-style controls and exported-alpha reference comparison remain open. | Editor qualification |
 | EDIT-09 | Spotlight supports levels 1–9 and dims the outside region accurately. | In progress | GPUI test `magnifier_and_spotlight_property_buttons_change_rendering` passed on WSL2; the complete level range and native comparison remain open. The local `pasted_images_stay_below_drawings_and_spotlight_shading` pixel test confirms that image objects receive the outside shade. | Editor qualification |
 | EDIT-10 | Counter accepts 0–99 and subsequent counters increment from the selected value. | In progress | GPUI test `counter_buttons_clamp_and_set_the_next_value` passed on WSL2; native input and export remain open. | Editor qualification |
+| EDIT-11 | Magnifier renders a crisp callout from the correct source region and scale. | In progress | New magnifiers have separate source and lens circles with an edge connector. The October 4 pixel test checks exact source alignment and fixed-source lens movement. GPUI tests cover both circle handles, factor changes, grouped undo/redo and cancellation. Native Mac creation, move, resize, factor, undo and PNG export passed; the export matches the core example byte for byte. Edited-source sampling and a complete native input check remain open. See the [magnifier record](platform-testing.md#macos-linked-magnifier-october-4-2026). | Editor qualification |
 | EDIT-12 | Backdrop supports gradient, inset, rounded corners, and shadow. | In progress | Backdrop presets, 24/56/100-pixel padding, corner and shadow toggles are implemented; `live_preview_crop_backdrop_rounding_shadow_and_gradient_are_applied` passes. Native property flow and reference pixels remain open. | Editor qualification |
 | EDIT-13 | Pasted images and added captures remain movable objects until rasterized. | In progress | Paste/Add Capture encode PNG annotations with movable/resizable bounds. Add Capture also expands the canvas and remains a single undo group; core raster/canvas tests plus `added_image_keeps_existing_document_and_undo` and `added_capture_expands_canvas_and_undoes_in_one_step` pass. The local pixel tests also confirm image objects stay below drawings and resist raster edits. Rasterize Image and native clipboard/capture append remain open. | Editor qualification |
 | EDIT-14 | Selection brings an object forward; Option/Alt-drag and copy/paste duplicate all properties. | In progress | Alt-drag duplicates the selected annotation with its kind/style and one grouped undo history. Bring-to-front on selection and annotation copy/paste are not implemented. | Editor qualification |
