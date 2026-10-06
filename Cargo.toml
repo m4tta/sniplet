@@ -3,6 +3,9 @@ members = ["crates/sniplet-core", "crates/sniplet-platform", "crates/sniplet-app
 default-members = ["crates/sniplet-app"]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+
 [profile.dev]
 debug = 0
 

@@ -42,9 +42,15 @@ fi
 target_dir=$(cargo metadata --format-version 1 --no-deps --locked \
     | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 host_target=$(rustc -vV | sed -n 's/^host: //p')
+app_version=$(awk '
+    /^\[/ { in_package = ($0 == "[workspace.package]") }
+    in_package && /^version = / {
+        sub(/^version = "/, ""); sub(/".*$/, ""); print
+    }
+' Cargo.toml)
 
-if [ -z "$target_dir" ] || [ -z "$host_target" ]; then
-    echo "could not determine Cargo target directory or Rust host target" >&2
+if [ -z "$target_dir" ] || [ -z "$host_target" ] || [ -z "$app_version" ]; then
+    echo "could not determine Cargo target directory, Rust host target, or app version" >&2
     exit 1
 fi
 
@@ -91,8 +97,8 @@ case "$(uname -s)" in
   <key>CFBundleName</key><string>Sniplet</string>
   <key>CFBundleIconFile</key><string>Sniplet.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>$app_version</string>
+  <key>CFBundleVersion</key><string>$app_version</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSScreenCaptureUsageDescription</key><string>Sniplet captures screen regions and windows that you choose.</string>

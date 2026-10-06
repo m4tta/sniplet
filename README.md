@@ -163,6 +163,15 @@ Set `SNIPLET_SIGNING_IDENTITY` to select a certificate name or SHA-1 fingerprint
 set it to `-` to use ad hoc signing. Keep private keys outside the repository.
 Local signing is for development; it does not notarize a public release.
 
+## GitHub releases
+
+Use **Actions → Bump Version**, **Build Nightly**, or **Promote Stable**.
+These release workflows run only when you select **Run workflow**. Nightly
+builds run in parallel for Mac Apple Silicon, Mac Intel, Windows x64, and
+Linux x64. Stable promotion copies the tested packages without rebuilding.
+See [the release instructions](docs/releases.md) for version inputs, downloads,
+repeat runs, and signing limits.
+
 ## Testing on a Mac
 
 Install Xcode and select it as the active developer directory. The locked GPUI

@@ -1,0 +1,43 @@
+name: Promote Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      nightly_tag:
+        description: Published nightly tag to promote (for example v0.2.0-a1b2c3d)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: sniplet-release-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Check release scripts
+        run: python -m unittest discover -s scripts -p 'test_release.py'
+      - name: Verify and promote nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_TAG: ${{ inputs.nightly_tag }}
+        run: python scripts/release.py promote "$NIGHTLY_TAG"
+      - name: Report stable release
+        env:
+          NIGHTLY_TAG: ${{ inputs.nightly_tag }}
+        run: |
+          TAG="${NIGHTLY_TAG%-*}"
+          printf '[Download stable](https://github.com/%s/releases/tag/%s)\n' "$GITHUB_REPOSITORY" "$TAG" >> "$GITHUB_STEP_SUMMARY"
