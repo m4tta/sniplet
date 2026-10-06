@@ -419,7 +419,11 @@ impl Render for WindowCaptureOverlay {
 pub(crate) fn open(editor: Entity<Editor>, window: &Window, cx: &mut App) -> Result<(), String> {
     let editor_window = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
+    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |cx| {
+        if !hide_delay.is_zero() {
+            cx.background_executor().timer(hide_delay).await;
+        }
         if escape.is_cancelled() {
             cx.update(|cx| crate::runtime::end_escape_session(&escape, cx));
             return;
@@ -442,9 +446,13 @@ pub(crate) fn open(editor: Entity<Editor>, window: &Window, cx: &mut App) -> Res
                     if let Err(error) = open_snapshot(
                         frames,
                         windows,
-                        // The snapshot predates selector panels. Keep the
-                        // Sniplet editor eligible, like every other app window.
-                        0,
+                        // Live Mac capture can include the editor; other
+                        // desktops hide it before taking the picker snapshot.
+                        if cfg!(target_os = "macos") {
+                            0
+                        } else {
+                            std::process::id()
+                        },
                         editor.clone(),
                         editor_window,
                         escape.clone(),
@@ -573,10 +581,9 @@ fn fail_open(
 }
 
 fn start_capture(id: u32, editor: Entity<Editor>, editor_window: AnyWindowHandle, cx: &mut App) {
-    let capture_editor = editor.clone();
     let _ = editor_window.update(cx, move |_, owner_window, cx| {
-        editor.update(cx, |_, editor_cx| {
-            crate::capture::window(id, capture_editor, owner_window, editor_cx);
+        editor.update(cx, |editor, editor_cx| {
+            crate::capture::window(id, editor, owner_window, editor_cx);
         });
     });
 }
@@ -823,6 +830,55 @@ mod tests {
 
         assert_eq!(SELECTED.get(), Some((11, 1)));
         assert!(cx.update_window(overlay, |_, _, _| {}).is_err());
+    }
+
+    #[gpui_kit::test]
+    fn selection_hands_off_to_the_editor_capture_task_without_reborrowing(cx: &mut TestAppContext) {
+        let (owner, editor) = editor(cx);
+        let original = cx.update(|cx| {
+            editor
+                .read(cx)
+                .document
+                .as_ref()
+                .unwrap()
+                .original()
+                .clone()
+        });
+        let overlay = cx.update(|cx| {
+            open_snapshot(
+                vec![frame()],
+                vec![fixture(11, 0, 0, 1)],
+                std::process::id(),
+                editor.clone(),
+                owner,
+                crate::runtime::begin_escape_session(cx),
+                start_capture,
+                cx,
+            )
+            .unwrap()[0]
+        });
+
+        cx.update_window(overlay, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at("window-capture-overlay", point(px(150.0), px(100.0)), cx);
+        })
+        .unwrap();
+        // Exercise the production handoff, then cancel before calling a native
+        // backend: the fixture window exists only in the GPUI test desktop.
+        cx.update(crate::runtime::cancel_active_escape);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+
+        assert!(cx.update_window(overlay, |_, _, _| {}).is_err());
+        cx.update(|cx| {
+            assert_eq!(cx.windows(), vec![owner]);
+            assert_ne!(cx.active_window(), Some(owner));
+            assert_eq!(
+                editor.read(cx).document.as_ref().unwrap().original(),
+                &original
+            );
+        });
     }
 
     #[gpui_kit::test]

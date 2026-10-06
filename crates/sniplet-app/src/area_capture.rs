@@ -296,7 +296,11 @@ pub(crate) fn start(
     let started = Instant::now();
     let owner = window.window_handle();
     let escape = runtime::begin_escape_session(cx);
+    let delay = runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
+        if !delay.is_zero() {
+            cx.background_executor().timer(delay).await;
+        }
         if escape.is_cancelled() {
             return;
         }

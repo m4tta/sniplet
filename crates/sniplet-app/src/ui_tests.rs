@@ -355,30 +355,37 @@ fn appearance_choices_apply_immediately_and_preserve_capture(cx: &mut TestAppCon
     cx.update_window(handle, |_, window, cx| {
         entity.update(cx, |editor, cx| {
             editor.settings_path = Some(path.clone());
-            editor.panel = Some(crate::editor::Panel::Settings);
+            editor.open_settings(crate::settings_window::Page::General, window, cx);
             cx.notify();
         });
-        let before = entity.read(cx).export_pixels().unwrap();
-        window.render_frame(cx);
-        assert_eq!(entity.read(cx).settings.theme, ThemePreference::System);
-        for (id, preference, mode) in [
-            ("theme-dark", ThemePreference::Dark, ThemeMode::Dark),
-            ("theme-light", ThemePreference::Light, ThemeMode::Light),
-            (
-                "theme-system",
-                ThemePreference::System,
-                window.appearance().into(),
-            ),
-        ] {
-            assert!(window.find(id).visible());
-            window.click(id, cx);
-            assert_eq!(cx.theme().mode, mode);
-            assert_eq!(entity.read(cx).settings.theme, preference);
-            assert_eq!(store.load().unwrap().theme, preference);
-            assert_eq!(entity.read(cx).export_pixels().unwrap(), before);
-        }
     })
     .unwrap();
+    cx.update(|cx| {
+        let before = entity.read(cx).export_pixels().unwrap();
+        let settings_handle = entity.read(cx).settings_window.as_ref().unwrap().0;
+        settings_handle
+            .update(cx, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(entity.read(cx).settings.theme, ThemePreference::System);
+                for (id, preference, mode) in [
+                    ("theme-dark", ThemePreference::Dark, ThemeMode::Dark),
+                    ("theme-light", ThemePreference::Light, ThemeMode::Light),
+                    (
+                        "theme-system",
+                        ThemePreference::System,
+                        window.appearance().into(),
+                    ),
+                ] {
+                    assert!(window.find(id).visible());
+                    window.click(id, cx);
+                    assert_eq!(cx.theme().mode, mode);
+                    assert_eq!(entity.read(cx).settings.theme, preference);
+                    assert_eq!(store.load().unwrap().theme, preference);
+                    assert_eq!(entity.read(cx).export_pixels().unwrap(), before);
+                }
+            })
+            .unwrap();
+    });
     std::fs::remove_file(path).unwrap();
 }
 

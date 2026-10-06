@@ -8,7 +8,7 @@ sniplet-core = { path = "../sniplet-core" }
 arboard = "3.6"
 directories = "6"
 enigo = "0.6"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
 rqrr = "0.10"
 s3 = { version = "0.1.36", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +18,9 @@ thiserror = "2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
 xcap = "=0.9.8"
+
+[target.'cfg(not(windows))'.dependencies]
+wallpaper = { version = "3.2", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

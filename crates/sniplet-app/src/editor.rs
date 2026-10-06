@@ -15,7 +15,7 @@ use sniplet_core::{
     Color, ColorFormat, Document, ImageRect, MagnifierPart, Measurement, MeasurementAxis,
     Point as ImagePoint, RenderOptions, Shadow, ViewportTransform, measure_at,
 };
-use sniplet_platform::{Clipboard, Settings, SettingsStore, ThemePreference};
+use sniplet_platform::{Clipboard, Settings, SettingsStore};
 
 use crate::{capture, tools::Tool};
 
@@ -51,9 +51,6 @@ pub enum Panel {
     Tools,
     Text,
     Backdrop,
-    Settings,
-    Cloud,
-    Hotkeys,
     Help,
     Ruler,
 }
@@ -90,7 +87,6 @@ pub enum Command {
     Quit,
     Ocr,
     Qr,
-    #[expect(dead_code, reason = "The upload button is hidden for now.")]
     Upload,
     Fit,
     ActualSize,
@@ -138,6 +134,7 @@ pub struct Editor {
     pub selection: Option<ImageRect>,
     pub status: String,
     pub settings: Settings,
+    pub(crate) hotkey_error: Option<String>,
     pub monitor_index: usize,
     pub panel: Option<Panel>,
     _theme_subscription: Subscription,
@@ -145,9 +142,10 @@ pub struct Editor {
     pub settings_path: Option<PathBuf>,
     focus: FocusHandle,
     input: Entity<InputState>,
-    cloud_url: Entity<InputState>,
-    cloud_public_url: Entity<InputState>,
-    hotkey_inputs: [Entity<InputState>; 8],
+    pub(crate) settings_window: Option<(
+        AnyWindowHandle,
+        WeakEntity<crate::settings_window::SettingsWindow>,
+    )>,
     text_origin: ImagePoint,
     text_edit: Option<AnnotationId>,
     style: AnnotationStyle,
@@ -217,33 +215,6 @@ impl Editor {
             }
         })
         .detach();
-        let (upload_url, public_url) = match &settings.cloud_upload {
-            Some(sniplet_platform::CloudUploadConfig::PresignedPut { url, public_url }) => {
-                (url.clone(), public_url.clone().unwrap_or_default())
-            }
-            _ => (String::new(), String::new()),
-        };
-        let cloud_url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://… signed PUT URL")
-                .default_value(upload_url)
-        });
-        let cloud_public_url = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://… public image URL (optional)")
-                .default_value(public_url)
-        });
-        let hotkey_inputs = [
-            &settings.hotkeys.capture_area,
-            &settings.hotkeys.capture_screen,
-            &settings.hotkeys.capture_window,
-            &settings.hotkeys.scrolling_capture,
-            &settings.hotkeys.repeat_area,
-            &settings.hotkeys.active_window,
-            &settings.hotkeys.capture_ocr,
-            &settings.hotkeys.show_editor,
-        ]
-        .map(|value| cx.new(|cx| InputState::new(window, cx).default_value(value.clone())));
         let c = settings.annotation_color;
         let measure_scale = document
             .as_ref()
@@ -255,6 +226,7 @@ impl Editor {
             selection: None,
             status: "Ready".into(),
             settings,
+            hotkey_error: None,
             monitor_index: if cfg!(test) {
                 0
             } else {
@@ -271,9 +243,7 @@ impl Editor {
             settings_path: None,
             focus,
             input,
-            cloud_url,
-            cloud_public_url,
-            hotkey_inputs,
+            settings_window: None,
             text_origin: ImagePoint::default(),
             text_edit: None,
             style: AnnotationStyle {
@@ -884,10 +854,7 @@ impl Editor {
         if !command
             && !modifiers.alt
             && self.drag.is_none()
-            && !matches!(
-                self.panel,
-                Some(Panel::Text | Panel::Cloud | Panel::Hotkeys)
-            )
+            && !matches!(self.panel, Some(Panel::Text))
         {
             if key == "shift" && self.measure.is_some() {
                 self.update_measure(self.cursor, true);
@@ -929,10 +896,7 @@ impl Editor {
                 return;
             }
         }
-        if matches!(
-            self.panel,
-            Some(Panel::Text | Panel::Cloud | Panel::Hotkeys)
-        ) {
+        if matches!(self.panel, Some(Panel::Text)) {
             if key == "enter" && self.panel == Some(Panel::Text) {
                 self.commit_text(window, cx);
             }
@@ -963,10 +927,7 @@ impl Editor {
                 "0" => Some(Command::ActualSize),
                 "+" | "=" => Some(Command::ZoomIn),
                 "-" => Some(Command::ZoomOut),
-                "," => {
-                    self.panel = Some(Panel::Settings);
-                    None
-                }
+                "," => Some(Command::Settings),
                 "a" => Some(Command::AddCapture),
                 "2" => Some(Command::ZoomSelection),
                 "left" | "right" | "up" | "down" => {
@@ -1384,16 +1345,14 @@ impl Editor {
                 }
             }
             Command::ActiveWindow => {
-                if let Err(error) = capture::active_window(cx.entity(), window, cx) {
+                if let Err(error) = capture::active_window(self, window, cx) {
                     self.status = error;
                     cx.notify();
                 }
             }
             Command::ShowEditor => crate::runtime::show_editor(window, cx),
             Command::Settings => {
-                crate::runtime::show_editor(window, cx);
-                self.panel = Some(Panel::Settings);
-                cx.notify();
+                self.open_settings(crate::settings_window::Page::General, window, cx);
             }
             Command::GitHub => cx.open_url("https://github.com/m4tta/sniplet"),
             Command::Quit => cx.quit(),
@@ -1574,12 +1533,23 @@ impl Editor {
             document.set_backdrop(Backdrop::default());
         }
         let format = self.settings.format;
+        let scale = if self.settings.downscale_on_save {
+            document.source_scale_factor().unwrap_or(1.0)
+        } else {
+            1.0
+        };
         let hide = !project
             && self.selection.is_none()
             && self.settings.hide_after_export
             && crate::runtime::has_tray(cx);
-        let directory =
-            sniplet_platform::default_export_directory().unwrap_or_else(|_| std::env::temp_dir());
+        let directory = self
+            .settings
+            .screenshot_directory
+            .clone()
+            .unwrap_or_else(|| {
+                sniplet_platform::default_export_directory()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+            });
         let suggested = format!(
             "Sniplet.{}",
             if project {
@@ -1599,7 +1569,10 @@ impl Editor {
                             .to_project(PathBuf::from(source.file_name().unwrap()))
                             .save(&path)?;
                     } else {
-                        let image = document.render(&render_options())?;
+                        let image = sniplet_platform::image_at_1x(
+                            document.render(&render_options())?,
+                            scale,
+                        );
                         let extension = path
                             .extension()
                             .map(|x| x.to_string_lossy().to_ascii_lowercase());
@@ -1665,8 +1638,7 @@ impl Editor {
 
     fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(config) = self.settings.cloud_upload.clone() else {
-            self.panel = Some(Panel::Cloud);
-            cx.notify();
+            self.open_settings(crate::settings_window::Page::Uploading, window, cx);
             return;
         };
         let image = match self.export_pixels() {
@@ -2433,9 +2405,6 @@ impl Editor {
                     Panel::Tools => "Tools",
                     Panel::Text => "Text annotation",
                     Panel::Backdrop => "Backdrop",
-                    Panel::Settings => "Settings",
-                    Panel::Cloud => "Cloud upload",
-                    Panel::Hotkeys => "Capture shortcuts",
                     Panel::Help => "Keyboard shortcuts",
                     Panel::Ruler => "Use the keyboard",
                 }))
@@ -2533,7 +2502,14 @@ impl Editor {
                     body = body.child(self.menu_row(id, label, key, command, cx));
                 }
                 body = body
-                    .child(self.panel_button("settings", "Settings…", Panel::Settings, cx))
+                    .child(self.menu_row(
+                        "settings",
+                        "Settings…",
+                        "Ctrl/Cmd ,",
+                        Command::Settings,
+                        cx,
+                    ))
+                    .child(self.menu_row("upload-image", "Upload image…", "", Command::Upload, cx))
                     .child(self.panel_button("help", "Keyboard shortcuts", Panel::Help, cx));
             }
             Panel::Tools => {
@@ -2684,200 +2660,6 @@ impl Editor {
                             })),
                     );
             }
-            Panel::Settings => {
-                body = body.child(div().text_sm().child("Appearance")).child(
-                    div().flex().gap_2().children(
-                        [
-                            ("theme-system", "System", ThemePreference::System),
-                            ("theme-light", "Light", ThemePreference::Light),
-                            ("theme-dark", "Dark", ThemePreference::Dark),
-                        ]
-                        .map(|(id, label, preference)| {
-                            Button::new(id)
-                                .ghost()
-                                .label(label)
-                                .selected(self.settings.theme == preference)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.settings.theme = preference;
-                                    crate::theme::apply(preference, window, cx);
-                                    this.persist_settings(cx);
-                                }))
-                        }),
-                    ),
-                );
-                body = body.child(div().text_sm().child("Image format"));
-                for format in [
-                    sniplet_platform::ExportFormat::Png,
-                    sniplet_platform::ExportFormat::Jpeg,
-                    sniplet_platform::ExportFormat::Webp,
-                ] {
-                    body = body.child(
-                        Button::new(format.extension())
-                            .ghost()
-                            .label(format.extension().to_uppercase())
-                            .selected(self.settings.format == format)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings.format = format;
-                                this.persist_settings(cx);
-                            })),
-                    );
-                }
-                body = body
-                    .child(
-                        Button::new("auto-copy")
-                            .ghost()
-                            .label(format!(
-                                "{} Copy captures automatically",
-                                if self.settings.auto_copy {
-                                    "✓"
-                                } else {
-                                    "○"
-                                }
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings.auto_copy = !this.settings.auto_copy;
-                                this.persist_settings(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("hide-after-export")
-                            .ghost()
-                            .label(format!(
-                                "{} Hide editor after copy / save",
-                                if self.settings.hide_after_export {
-                                    "✓"
-                                } else {
-                                    "○"
-                                }
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings.hide_after_export = !this.settings.hide_after_export;
-                                this.persist_settings(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("always-on-top")
-                            .ghost()
-                            .label(format!(
-                                "{} Keep editor on top (restart)",
-                                if self.settings.always_on_top {
-                                    "✓"
-                                } else {
-                                    "○"
-                                }
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings.always_on_top = !this.settings.always_on_top;
-                                this.persist_settings(cx);
-                            })),
-                    )
-                    .child(self.panel_button(
-                        "hotkey-settings",
-                        "Capture shortcuts…",
-                        Panel::Hotkeys,
-                        cx,
-                    ))
-                    .child(self.panel_button("cloud-settings", "Cloud upload…", Panel::Cloud, cx));
-                if let Ok(monitors) = sniplet_platform::list_monitors() {
-                    body = body.child(div().mt_2().child("Capture display"));
-                    for monitor in monitors {
-                        let index = monitor.index;
-                        body = body.child(
-                            Button::new(("monitor", index))
-                                .ghost()
-                                .label(format!(
-                                    "{} · {} × {}",
-                                    monitor.name, monitor.width, monitor.height
-                                ))
-                                .selected(self.monitor_index == index)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.monitor_index = index;
-                                    cx.notify();
-                                })),
-                        );
-                    }
-                }
-                body = body.child(
-                    Button::new("reveal-settings")
-                        .ghost()
-                        .label("Show settings file")
-                        .on_click(|_, _, cx| {
-                            if let Ok(store) = SettingsStore::for_app() {
-                                cx.reveal_path(store.path());
-                            }
-                        }),
-                );
-            }
-            Panel::Cloud => {
-                body = body.child(div().text_sm().child("Configure a signed upload URL. Upload sends the image only when you click the cloud button."))
-                    .child(div().text_xs().child("Signed PUT URL")).child(Input::new(&self.cloud_url).id("upload-url"))
-                    .child(div().text_xs().child("Image link")).child(Input::new(&self.cloud_public_url).id("upload-public-url"))
-                    .child(Button::new("save-upload").primary().label("Save destination").on_click(cx.listener(|this, _, w, cx| {
-                        let url = this.cloud_url.read(cx).value().trim().to_owned(); let public_url = this.cloud_public_url.read(cx).value().trim().to_owned();
-                        if !url.starts_with("https://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") { this.status = "Enter an HTTPS upload URL".into(); cx.notify(); return; }
-                        this.settings.cloud_upload = Some(sniplet_platform::CloudUploadConfig::PresignedPut { url, public_url: (!public_url.is_empty()).then_some(public_url) }); this.persist_settings(cx); this.panel = None; this.focus.focus(w, cx);
-                    })))
-                    .child(Button::new("disable-upload").ghost().label("Disable upload").on_click(cx.listener(|this, _, _, cx| { this.settings.cloud_upload = None; this.persist_settings(cx); })))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("S3-compatible destinations are configured in settings.json. Credentials use AWS environment variables."));
-            }
-            Panel::Hotkeys => {
-                for (i, label) in [
-                    "Capture area",
-                    "Capture screen",
-                    "Capture window",
-                    "Scrolling capture",
-                    "Repeat area",
-                    "Active window",
-                    "Capture text / QR",
-                    "Reopen editor",
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    body = body
-                        .child(div().text_xs().child(label))
-                        .child(Input::new(&self.hotkey_inputs[i]).id(("hotkey-input", i)));
-                }
-                body = body.child(
-                    Button::new("save-hotkeys")
-                        .primary()
-                        .label("Save shortcuts · restart to apply")
-                        .on_click(cx.listener(|this, _, w, cx| {
-                            let values = this
-                                .hotkey_inputs
-                                .each_ref()
-                                .map(|input| input.read(cx).value().trim().to_owned());
-                            if let Err(error) = crate::runtime::validate_hotkeys(&values) {
-                                this.status = error;
-                                cx.notify();
-                                return;
-                            }
-                            let [
-                                capture_area,
-                                capture_screen,
-                                capture_window,
-                                scrolling_capture,
-                                repeat_area,
-                                active_window,
-                                capture_ocr,
-                                show_editor,
-                            ] = values;
-                            this.settings.hotkeys = sniplet_platform::HotkeySettings {
-                                capture_area,
-                                capture_screen,
-                                capture_window,
-                                scrolling_capture,
-                                repeat_area,
-                                active_window,
-                                capture_ocr,
-                                show_editor,
-                            };
-                            this.persist_settings(cx);
-                            this.panel = None;
-                            this.focus.focus(w, cx);
-                        })),
-                ).child(div().text_xs().text_color(cx.theme().muted_foreground).child("Leave a shortcut empty to disable it. Each enabled shortcut must be unique."));
-            }
             Panel::Help => {
                 for text in [
                     "V Select / Crop    Enter Apply crop",
@@ -2910,18 +2692,63 @@ impl Editor {
             .into_any_element()
     }
 
-    fn persist_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(
+        &mut self,
+        page: crate::settings_window::Page,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel = None;
+        let editor = cx.entity();
+        let parent = window.window_handle();
+        // Opening a window can render it immediately. Release the editor's
+        // update before the settings view reads its shared preferences.
+        cx.defer(move |cx| {
+            let existing = editor.read(cx).settings_window.clone();
+            if let Some((handle, entity)) = existing
+                && let Some(entity) = entity.upgrade()
+            {
+                entity.update(cx, |settings, cx| settings.select_page(page, cx));
+                if handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            let settings = editor.read(cx).settings.clone();
+            let result = parent
+                .update(cx, |_, window, cx| {
+                    crate::settings_window::open(editor.clone(), settings, page, window, cx)
+                })
+                .and_then(|result| result);
+            editor.update(cx, |editor, cx| {
+                match result {
+                    Ok((handle, entity)) => {
+                        editor.settings_window = Some((handle, entity.downgrade()))
+                    }
+                    Err(error) => editor.status = format!("Could not open settings: {error}"),
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+    pub(crate) fn persist_settings(&mut self, cx: &mut Context<Self>) -> bool {
         let store = SettingsStore::for_app();
         #[cfg(test)]
         let store = self
             .settings_path
             .as_ref()
             .map_or(store, |path| Ok(SettingsStore::at(path)));
-        match store.and_then(|s| s.save(&self.settings)) {
+        let result = store.and_then(|s| s.save(&self.settings));
+        let saved = result.is_ok();
+        match result {
             Ok(_) => self.status = "Settings saved".into(),
             Err(e) => self.status = e.to_string(),
         }
         cx.notify();
+        saved
     }
 }
 

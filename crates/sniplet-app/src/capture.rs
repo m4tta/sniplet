@@ -65,9 +65,11 @@ pub fn start(
         None
     };
     let target = CaptureTarget::for_command(command, monitor);
+    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
         if trace_capture { eprintln!("capture: task started in {:?}", capture_started.elapsed()); }
-        if matches!(command, Command::Delayed) { cx.background_executor().timer(Duration::from_secs(3)).await; }
+        let delay = if matches!(command, Command::Delayed) { Duration::from_secs(3) } else { hide_delay };
+        if !delay.is_zero() { cx.background_executor().timer(delay).await; }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);
@@ -166,14 +168,17 @@ pub fn start(
 }
 
 pub fn active_window(
-    editor: Entity<Editor>,
+    editor: &Editor,
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> Result<(), String> {
     let windows = sniplet_platform::list_windows().map_err(|error| error.to_string())?;
     let active = windows
         .into_iter()
-        .find(|candidate| candidate.is_focused)
+        .find(|candidate| {
+            candidate.is_focused
+                && (cfg!(target_os = "macos") || candidate.process_id != std::process::id())
+        })
         .ok_or_else(|| "No focused window is available for capture".to_owned())?;
     let id = active.id;
     #[cfg(target_os = "macos")]
@@ -188,10 +193,16 @@ pub fn active_window(
     Ok(())
 }
 
-pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Editor>) {
+pub fn window(id: u32, editor: &Editor, window: &mut Window, cx: &mut Context<Editor>) {
+    let style = editor.settings.window_capture.clone();
+    let editor = cx.entity();
     let handle = window.window_handle();
     let escape = crate::runtime::begin_escape_session(cx);
+    let hide_delay = crate::runtime::hide_for_capture(window);
     cx.spawn(async move |_, cx| {
+        if !hide_delay.is_zero() {
+            cx.background_executor().timer(hide_delay).await;
+        }
         if escape.is_cancelled() {
             cx.update(|cx| {
                 crate::runtime::end_escape_session(&escape, cx);
@@ -200,7 +211,7 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
         }
         let frame = cx
             .background_executor()
-            .spawn(async move { sniplet_platform::capture_window(id) })
+            .spawn(async move { sniplet_platform::capture_window_with_background(id, &style) })
             .await;
         cx.update(|cx| {
             if escape.is_cancelled() {
@@ -208,7 +219,7 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
                 return;
             }
             editor.update(cx, |this, cx| match frame {
-                Ok(frame) => {
+                Ok((frame, warning)) => {
                     if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
                         eprintln!(
                             "window capture: captured id={id}; image={:?}; origin={:?}",
@@ -217,7 +228,11 @@ pub fn window(id: u32, editor: Entity<Editor>, window: &mut Window, cx: &mut Con
                         );
                     }
                     copy_capture_if_enabled(this, &frame.image);
-                    this.load(Document::new(frame.image), "Window captured", cx);
+                    this.load(
+                        Document::new(frame.image),
+                        warning.as_deref().unwrap_or("Window captured"),
+                        cx,
+                    );
                     this.set_measure_scale(frame.scale_factor);
                 }
                 Err(error) => {
@@ -344,7 +359,12 @@ impl Overlay {
         };
         let image = crop_image(&self.source, rect);
         if matches!(self.command, Command::Scroll | Command::ScrollUp) {
-            let mut options = sniplet_platform::AutomaticScrollOptions::default();
+            let settings = &self.editor.read(cx).settings;
+            let mut options = sniplet_platform::AutomaticScrollOptions {
+                max_frames: settings.scroll_max_frames.clamp(2, 200),
+                settle_delay: Duration::from_millis(settings.scroll_settle_ms.clamp(100, 700)),
+                ..Default::default()
+            };
             if matches!(self.command, Command::ScrollUp) {
                 options.scroll_clicks = -options.scroll_clicks;
             }

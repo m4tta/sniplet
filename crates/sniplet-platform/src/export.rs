@@ -11,6 +11,16 @@ pub fn default_export_directory() -> Result<PathBuf> {
     Ok(base.join("Sniplet"))
 }
 
+/// Saving at 1x leaves the editable source and clipboard image at full resolution.
+pub fn image_at_1x(image: RgbaImage, scale: f32) -> RgbaImage {
+    if !scale.is_finite() || scale <= 1.0 {
+        return image;
+    }
+    let width = (image.width() as f32 / scale).round().max(1.0) as u32;
+    let height = (image.height() as f32 / scale).round().max(1.0) as u32;
+    image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3)
+}
+
 /// Removes path separators, control characters, reserved Windows characters,
 /// traversal components, and problematic trailing characters from a filename stem.
 pub fn sanitize_filename(input: &str) -> String {
@@ -103,6 +113,16 @@ pub fn export_image(image: &RgbaImage, path: &Path, format: ExportFormat) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_at_1x_uses_the_capture_scale_and_preserves_standard_images() {
+        let image = RgbaImage::from_pixel(600, 400, image::Rgba([20, 40, 60, 255]));
+        assert_eq!(image_at_1x(image.clone(), 2.0).dimensions(), (300, 200));
+        assert_eq!(image_at_1x(image.clone(), 1.5).dimensions(), (400, 267));
+        for scale in [1.0, 0.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(image_at_1x(image.clone(), scale), image);
+        }
+    }
 
     #[test]
     fn sanitizes_untrusted_filename_stems() {

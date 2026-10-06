@@ -12,6 +12,7 @@ mod editor;
 mod macos;
 mod menu_bar;
 mod runtime;
+mod settings_window;
 mod theme;
 mod tools;
 mod window_picker;
@@ -23,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help") {
         println!(
-            "Sniplet — cross-platform screenshot editor\n\nUsage: sniplet [IMAGE | PROJECT.sniplet] [--demo] [--smoke]\n       sniplet --self-test [OUTPUT_DIRECTORY]\n\n--demo       Open an original generated sample image\n--smoke      Open a native GPUI window and quit after 3 seconds\n--self-test  Exercise capture, annotation, PNG export, and image reload\n"
+            "Sniplet — cross-platform screenshot editor\n\nUsage: sniplet [IMAGE | PROJECT.sniplet] [--demo] [--settings] [--smoke]\n       sniplet --self-test [OUTPUT_DIRECTORY]\n\n--demo       Open an original generated sample image\n--settings   Open the settings window\n--smoke      Open a native GPUI window and quit after 3 seconds\n--self-test  Exercise capture, annotation, PNG export, and image reload\n"
         );
         return Ok(());
     }
@@ -122,6 +123,13 @@ fn main() -> anyhow::Result<()> {
             })
         })
         .expect("Could not open Sniplet");
+        if args.iter().any(|arg| arg == "--settings") {
+            let _ = handle.update(cx, |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.command(editor::Command::Settings, window, cx)
+                });
+            });
+        }
         if smoke {
             cx.spawn(async move |cx| {
                 cx.background_executor()

@@ -124,11 +124,24 @@ fn register_hotkeys(
         .filter(|(text, _)| !text.is_empty())
     {
         match parse_hotkey(text).and_then(|key| {
-            manager.register(key).map_err(|error| error.to_string())?;
+            manager.register(key).map_err(|error| {
+                eprintln!("Could not register shortcut {text}: {error}");
+                "It may be in use by another app. Choose a different shortcut.".to_owned()
+            })?;
             Ok(key)
         }) {
             Ok(key) => bindings.push((key, command)),
-            Err(error) => errors.push(format!("Shortcut {text} could not be registered: {error}")),
+            Err(error) => {
+                let label = text.replace(
+                    "CommandOrControl",
+                    if cfg!(target_os = "macos") {
+                        "Cmd"
+                    } else {
+                        "Ctrl"
+                    },
+                );
+                errors.push(format!("Shortcut {label} could not be enabled. {error}"));
+            }
         }
     }
     (bindings, errors)
@@ -150,6 +163,21 @@ pub fn show_editor(window: &Window, cx: &mut App) {
     cx.activate(true);
 }
 
+/// Return the time needed for the editor to leave the captured screen.
+pub fn hide_for_capture(window: &Window) -> Duration {
+    // Mac selectors use live Quartz capture and allow capturing the editor.
+    if cfg!(target_os = "macos") {
+        return Duration::ZERO;
+    }
+    // GPUI's test desktop has no implementation of native minimization. Keep
+    // the capture task's delay so integration tests can cancel before the OS call.
+    if cfg!(all(test, feature = "ui-tests")) {
+        return Duration::from_millis(220);
+    }
+    window.minimize_window();
+    Duration::from_millis(220)
+}
+
 pub fn reopen(cx: &mut App) {
     if cx.has_global::<Services>()
         && let Some(handle) = cx.global::<Services>().editor_window
@@ -166,6 +194,10 @@ pub fn install(
 ) {
     let manager = GlobalHotKeyManager::new().ok();
     let (mut registered, errors) = register_hotkeys(manager.as_ref(), settings);
+    editor.update(cx, |editor, cx| {
+        editor.hotkey_error = errors.first().cloned();
+        cx.notify();
+    });
     for error in errors {
         editor.update(cx, |this, cx| {
             this.status = error;
@@ -232,6 +264,7 @@ pub fn install(
                         errors.push(format!("Menu shortcuts could not be updated: {error}"));
                     }
                     current_hotkeys = hotkeys;
+                    editor.update(cx, |editor, cx| { editor.hotkey_error = errors.first().cloned(); cx.notify(); });
                     for error in errors {
                         editor.update(cx, |this, cx| {
                             this.status = error;
@@ -310,10 +343,7 @@ pub fn install(
 
 fn invoke(handle: AnyWindowHandle, editor: &Entity<Editor>, command: Command, cx: &mut App) {
     let _ = handle.update(cx, |_, window, cx| {
-        if matches!(
-            command,
-            Command::Open | Command::LoadClipboard | Command::Settings
-        ) {
+        if matches!(command, Command::Open | Command::LoadClipboard) {
             show_editor(window, cx);
         }
         editor.update(cx, |this, cx| this.command(command, window, cx))

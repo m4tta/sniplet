@@ -80,21 +80,37 @@ places a new capture to the right on an expanded canvas as an editable object.
 
 ## Upload and preferences
 
-Use the application menu → Settings for format, automatic clipboard copy,
-display selection, editor behavior, and capture shortcuts. Shortcut changes
-apply immediately. The macOS menu bar also offers Launch at Startup and
+Open the application menu → Settings, press `Ctrl/Cmd + ,`, or start with
+`sniplet --settings`. Settings open in a separate window with General, Hotkeys,
+Uploading, and Advanced pages in the sidebar. General includes appearance,
+the screenshots folder, image format, 1× saving for Retina captures, automatic
+clipboard copy, and hiding the editor after export. Saving at 1× keeps the
+editable capture and clipboard at full resolution. Advanced includes the
+scrolling frame limit, scrolling speed, and editor behavior. Shortcut changes
+apply immediately after saving. The macOS menu bar also offers Launch at Startup and
 upward scrolling capture under More. Upload is disabled until a destination is configured.
+General → Window screenshot background offers Wallpaper, Transparent, Solid color,
+and Trim shadow. Padded modes add a soft shadow and 0–120 points of padding
+(32 by default), scaled for the capture's display. Choose a background hex color,
+use the desktop wallpaper, or choose an image. Wallpaper images are center-cropped
+to fill the frame. If the wallpaper cannot be read, Sniplet uses the chosen solid
+color and reports this in the editor. Trim shadow keeps the exact native window
+bounds. These settings apply to both selected-window and active-window captures;
+area, screen, and scrolling captures keep their existing behavior. PNG and WebP
+preserve transparent padding; JPEG uses the existing opaque export behavior.
 Sniplet follows the system's light or dark appearance by default. Settings →
-Appearance lets you choose System, Light, or Dark; changes apply immediately and
+General → Appearance lets you choose System, Light, or Dark; changes apply immediately and
 remain selected after restarting.
 Capture Window (`Ctrl/Cmd + Shift + 3` by default) shows the desktop with a capture
-cursor and camera marker while keeping the editor hidden. Point at a visible
-window to highlight it, then click to capture it. Escape or right-click cancels
+cursor and camera marker. Windows and Linux hide the editor; macOS also allows
+capturing the editor itself. Point at a visible window to highlight it, then click
+to capture it. Escape or right-click cancels
 without reopening the editor.
-Settings → Cloud upload accepts a signed PUT URL and an optional public image URL.
-Click the cloud button to upload the current image and copy its link.
+Settings → Uploading accepts a signed PUT URL and an optional public image URL,
+or an S3-compatible destination. Use the application menu → Upload image to
+upload the current image and copy its link. Saving a destination makes no network request.
 
-S3-compatible uploads can be configured in the settings file:
+S3-compatible uploads can also be configured in the settings file:
 
 ```json
 {

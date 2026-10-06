@@ -32,6 +32,42 @@ pub enum CloudUploadConfig {
     },
 }
 
+impl CloudUploadConfig {
+    /// Checks destination metadata without sending a request or reading credentials.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::PresignedPut { url, public_url } => {
+                parse_http_url(url, "presigned PUT URL")?;
+                if let Some(url) = public_url {
+                    parse_http_url(url, "public URL")?;
+                }
+            }
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                key_prefix,
+                public_base_url,
+            } => {
+                if bucket.trim().is_empty() {
+                    return Err(invalid_config("S3 bucket must not be empty"));
+                }
+                if region.trim().is_empty() {
+                    return Err(invalid_config("S3 region must not be empty"));
+                }
+                if let Some(url) = endpoint {
+                    parse_http_url(url, "S3 endpoint")?;
+                }
+                if let Some(url) = public_base_url {
+                    parse_http_url(url, "public base URL")?;
+                }
+                object_key(key_prefix, "Sniplet.png")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The location produced by a completed upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadedImage {

@@ -16,6 +16,7 @@ mod qr;
 mod scroll;
 mod settings;
 mod upload;
+mod window_background;
 
 #[cfg(target_os = "macos")]
 pub use capture::capture_desktop_region;
@@ -23,11 +24,13 @@ pub use capture::capture_desktop_region;
 pub use capture::{
     CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_active_window,
     capture_monitor, capture_monitor_region, capture_monitor_under_pointer, capture_monitors,
-    capture_window, list_monitors, list_windows, window_at_point,
+    capture_window, capture_window_with_background, list_monitors, list_windows, window_at_point,
 };
 pub use clipboard::Clipboard;
 pub use error::{PlatformError, Result};
-pub use export::{default_export_directory, export_image, sanitize_filename, unique_export_path};
+pub use export::{
+    default_export_directory, export_image, image_at_1x, sanitize_filename, unique_export_path,
+};
 pub use image::RgbaImage;
 #[cfg(windows)]
 pub use ocr::recognize_text_native_windows;
@@ -41,3 +44,6 @@ pub use settings::{
     AnnotationColor, ExportFormat, HotkeySettings, Settings, SettingsStore, ThemePreference,
 };
 pub use upload::{CloudUploadConfig, UploadedImage, upload_image};
+pub use window_background::{
+    WindowBackground, WindowCaptureStyle, compose_window_capture, load_wallpaper_image,
+};

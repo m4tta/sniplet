@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::{CloudUploadConfig, PlatformError, Result};
+use crate::{CloudUploadConfig, PlatformError, Result, WindowCaptureStyle};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -91,6 +91,11 @@ pub struct Settings {
     pub auto_copy: bool,
     pub hide_after_export: bool,
     pub always_on_top: bool,
+    pub screenshot_directory: Option<PathBuf>,
+    pub downscale_on_save: bool,
+    pub window_capture: WindowCaptureStyle,
+    pub scroll_max_frames: usize,
+    pub scroll_settle_ms: u64,
     pub annotation_color: AnnotationColor,
     /// Upload destination metadata. Credentials are loaded from the environment
     /// at upload time and are never persisted here.
@@ -106,6 +111,11 @@ impl Default for Settings {
             auto_copy: true,
             hide_after_export: true,
             always_on_top: false,
+            screenshot_directory: None,
+            downscale_on_save: false,
+            window_capture: WindowCaptureStyle::default(),
+            scroll_max_frames: 40,
+            scroll_settle_ms: 250,
             annotation_color: AnnotationColor::default(),
             cloud_upload: None,
         }
@@ -210,6 +220,16 @@ mod tests {
                 blue: 3,
                 alpha: 4,
             },
+            screenshot_directory: Some(directory.path().join("Screenshots")),
+            downscale_on_save: true,
+            window_capture: WindowCaptureStyle {
+                background: crate::WindowBackground::Solid,
+                padding: 64,
+                color: [20, 30, 40],
+                wallpaper: Some(directory.path().join("background.png")),
+            },
+            scroll_max_frames: 80,
+            scroll_settle_ms: 500,
             ..Settings::default()
         };
         store.save(&settings).unwrap();
@@ -250,6 +270,11 @@ mod tests {
         assert_eq!(settings.theme, ThemePreference::System);
         assert_eq!(settings.format, ExportFormat::Png);
         assert_eq!(settings.hotkeys, HotkeySettings::default());
+        assert!(settings.screenshot_directory.is_none());
+        assert!(!settings.downscale_on_save);
+        assert_eq!(settings.window_capture, WindowCaptureStyle::default());
+        assert_eq!(settings.scroll_max_frames, 40);
+        assert_eq!(settings.scroll_settle_ms, 250);
     }
 
     #[test]

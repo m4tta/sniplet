@@ -471,6 +471,45 @@ pub fn capture_window(id: u32) -> Result<CapturedFrame> {
     capture_backend("capture a window", || capture_window_impl(id))
 }
 
+/// Window-only presentation; raw captures remain available for scrolling and
+/// monitor/area captures. A missing wallpaper falls back to the chosen solid
+/// color and returns a message for the editor rather than losing the capture.
+pub fn capture_window_with_background(
+    id: u32,
+    style: &crate::WindowCaptureStyle,
+) -> Result<(CapturedFrame, Option<String>)> {
+    let mut frame = capture_window(id)?;
+    let (wallpaper, warning) = if style.background == crate::WindowBackground::Wallpaper {
+        match crate::window_background::load_wallpaper(style) {
+            Ok(image) => (Some(image), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Window captured · solid background used. {error}. Choose a wallpaper image in Settings."
+                )),
+            ),
+        }
+    } else {
+        (None, None)
+    };
+    frame.image =
+        crate::compose_window_capture(frame.image, style, frame.scale_factor, wallpaper.as_ref());
+    if style.background != crate::WindowBackground::TrimShadow {
+        let scale = if frame.scale_factor.is_finite() {
+            frame.scale_factor.clamp(1.0, 8.0)
+        } else {
+            1.0
+        };
+        let padding = desktop_units(
+            (style.padding.min(120) as f32 * scale).round() as u32,
+            scale,
+        ) as i32;
+        frame.origin.x = frame.origin.x.saturating_sub(padding);
+        frame.origin.y = frame.origin.y.saturating_sub(padding);
+    }
+    Ok((frame, warning))
+}
+
 fn capture_window_impl(id: u32) -> Result<CapturedFrame> {
     let windows = Window::all().map_err(|source| PlatformError::Enumeration {
         kind: "windows",
