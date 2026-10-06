@@ -744,6 +744,81 @@ and its native logs. The record identifies the base commit and final executable.
 Physical global shortcuts, native mixed-scale displays, Windows, and Linux
 remain untested in this run.
 
+## October 5, 2026: Mac area-drag pauses
+
+On macOS 26.5 (25F71), the native profiler found the UI thread waiting in
+`SMAppService.status`. The runtime checked Launch at Startup once a second
+from the same task that processed shortcuts and menu commands. Each synchronous
+system-service request could stop drawing and input processing.
+
+The periodic status check now runs in its own task, with the system request on
+a background worker. The checkbox update stays on the UI thread. The worker uses
+an Objective-C autorelease pool. Windows retains its existing tray-theme check.
+
+Both native profiles ran for 12 seconds with a 2 ms sampling interval and
+included the same large area drag. Before the change, 2,404 of 4,484 main-thread
+samples (53.6%) were in `SMAppService.status`. After the change, none of 4,706
+main-thread samples were in that call. The second profile found the status
+requests on background workers. This measures the removal of that UI block;
+it does not measure display frame rate or establish a bound on all input delays.
+
+The rebuilt, locally signed app completed the area capture. Escape closed a
+second selection. Seven area tests, three runtime tests, strict app Clippy with
+UI tests enabled, formatting, the locked build, and the bundle signature check
+passed. The native profiles and counts are in
+`artifacts/area-drag-2026-10-05/`. Windows and Linux were not run for this change.
+
+## October 6, 2026: Editor and export responsiveness
+
+The checkout was updated with `git pull --rebase --autostash origin main` before
+these changes. It advanced to `f4ac199`, and the local area-drag fix was restored
+without conflicts.
+
+Large preview rendering and RGBA-to-BGRA conversion now run on a worker. One
+preview render runs at a time. Pointer input updates the pending state, and each
+completed render can appear during a continuous drag. A result from another
+document is discarded. Previews of at most 262,144 canvas pixels keep the small
+synchronous path. Opening and cancelling a file dialog does not cancel the
+current document's preview.
+
+Automatic and manual image copying, file decoding, Save rendering and encoding,
+QR/OCR preparation, large pasted-image encoding, large measurement-source
+preparation, and manual scroll stitching now use workers. Clipboard writes are
+ordered so an old render cannot replace a later successful copy. A failed text
+scan does not cancel a pending automatic image copy. Source pixels are shared
+with workers instead of copied on the UI thread. Settings saves keep one write
+in progress and then save the latest values. The app waits for pending settings
+saves during normal shutdown.
+
+The new settings window also queried `SMAppService.status` on each draw. It now
+uses cached startup state. Startup checks and registration changes run on
+workers with Objective-C autorelease pools.
+
+On macOS 26.5 (25F71), the old build's 12-second capture/copy profile contained
+150 main-thread samples in image clipboard writes and 17 in raster rendering.
+The updated build's 15-second capture/copy profile contained zero main-thread
+samples in either call. It found both calls on background workers. A separate
+20-second drawing/Save profile also contained zero main-thread samples in raster
+rendering, PNG encoding, image clipboard writes, or startup-status checks. All
+profiles used a 1 ms sampling interval. These checks show where the work runs;
+they do not measure frame rate or set a maximum input delay.
+
+Native screen capture, Copy, arrow drawing, and Save passed. The PNG export is
+6016 × 3384 pixels. Area capture produced a 500 × 275 point image, and Escape
+cancelled a second area selection. No new Screen Recording approval was needed.
+
+All 83 app tests, five focused preview tests after the final document guard
+change, two focused stitch tests, strict app Clippy with UI tests enabled,
+formatting, the locked Mac build, and strict bundle-signature verification
+passed. Windows and Linux native checks were not run. Native scrolling stitch
+success was not retested; the overlap matcher is unchanged. Drag-out file export
+still prepares its file synchronously when the native drag starts.
+
+The signed debug app is running. Its executable SHA-256 is
+`2bbc904ccd6c418e45dcf04d9801e9cf06008132d75cc9cf74ae077a5712d57e`.
+Profiles, counts, and the native PNG export are under
+`artifacts/responsiveness-2026-10-06/`.
+
 ## OS-specific release gates
 
 ### macOS
