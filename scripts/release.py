@@ -196,7 +196,17 @@ class GitHub:
         return json.loads(result.stdout) if result.stdout.strip() else None
 
     def release(self, tag):
-        return self.api('releases/tags/' + tag)
+        release = self.api('releases/tags/' + tag)
+        if release is not None:
+            return release
+        page = 1
+        while True:
+            releases = self.api(f'releases?per_page=100&page={page}')
+            require(releases is not None, 'Could not list releases')
+            match = next((item for item in releases if item['tag_name'] == tag), None)
+            if match is not None or len(releases) < 100:
+                return match
+            page += 1
 
     def tag_sha(self, tag):
         ref = self.api('git/ref/tags/' + tag)
@@ -300,8 +310,9 @@ def publish(github, build, assets, directory):
                              'make_latest': 'false'})
     github.upload(build.tag, files)
     # Publication happens only after every upload is complete and verified.
-    uploaded = github.release(build.tag)
-    require(uploaded['draft'], 'Release changed during upload; publication stopped')
+    uploaded = github.api('releases/' + str(release['id']))
+    require(uploaded is not None and uploaded['draft'],
+            'Release changed during upload; publication stopped')
     require({item['name'] for item in uploaded['assets']} == {path.name for path in files},
             'Draft upload is incomplete')
     for path in files:

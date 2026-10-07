@@ -12,13 +12,14 @@ import tempfile
 import tomllib
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 import release
 
 SHA = 'a1b2c3d' + '0' * 33
 
 
-class FakeGitHub:
+class FakeGitHub(release.GitHub):
     def __init__(self):
         self.tags = {}
         self.releases = {}
@@ -26,7 +27,7 @@ class FakeGitHub:
         self.writes = []
         self.uploads = 0
 
-    def release(self, tag):
+    def release_snapshot(self, tag):
         if tag not in self.releases:
             return None
         value = copy.deepcopy(self.releases[tag])
@@ -39,6 +40,24 @@ class FakeGitHub:
         return self.tags.get(tag)
 
     def api(self, endpoint, method='GET', data=None):
+        if method == 'GET':
+            if endpoint.startswith('releases/tags/'):
+                value = self.release_snapshot(endpoint.removeprefix('releases/tags/'))
+                return None if value and value['draft'] else value
+            path, _, query = endpoint.partition('?')
+            if path == 'releases':
+                parameters = parse_qs(query)
+                page = int(parameters.get('page', ['1'])[0])
+                per_page = int(parameters.get('per_page', ['30'])[0])
+                start = (page - 1) * per_page
+                tags = list(reversed(self.releases))[start:start + per_page]
+                return [self.release_snapshot(tag) for tag in tags]
+            if path.startswith('releases/'):
+                release_id = int(path.removeprefix('releases/'))
+                tag = next((tag for tag, value in self.releases.items()
+                            if value['id'] == release_id), None)
+                return self.release_snapshot(tag)
+            raise AssertionError(endpoint)
         self.writes.append((endpoint, method, data))
         if endpoint == 'git/refs':
             tag = data['ref'].removeprefix('refs/tags/')
@@ -46,9 +65,10 @@ class FakeGitHub:
             self.tags[tag] = data['sha']
         elif endpoint == 'releases':
             tag = data['tag_name']
+            assert tag not in self.releases, 'Release already exists'
             self.releases[tag] = {'id': len(self.releases) + 1, **data}
             self.files[tag] = {}
-            return self.release(tag)
+            return self.release_snapshot(tag)
         elif endpoint.startswith('releases/'):
             value = next(item for item in self.releases.values()
                          if item['id'] == int(endpoint.split('/')[-1]))
@@ -161,6 +181,29 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(self.github.release(build.tag)['draft'])
         self.assertEqual(len(self.github.files[build.tag]), 6)
 
+    def test_new_draft_is_verified_and_published(self):
+        build, _, _ = self.nightly()
+        self.assertFalse(self.github.release(build.tag)['draft'])
+        self.assertEqual(len(self.github.files[build.tag]), 6)
+
+    def test_draft_after_first_release_page_can_resume(self):
+        build = release.Build('0.2.0', SHA)
+        directory, assets = self.packages(build)
+        self.github.tags[build.tag] = build.sha
+        draft = self.github.api('releases', 'POST', {
+            'tag_name': build.tag, 'draft': True, 'prerelease': True,
+        })
+        for index in range(100):
+            self.github.api('releases', 'POST', {
+                'tag_name': f'v0.0.{index}', 'draft': False,
+            })
+        release.publish(self.github, build, assets, directory)
+        published = self.github.release(build.tag)
+        self.assertEqual(published['id'], draft['id'])
+        self.assertFalse(published['draft'])
+        self.assertEqual(len(published['assets']), 6)
+        self.assertEqual(len(self.github.releases), 101)
+
     def test_another_commit_gets_another_nightly_but_cannot_replace_stable(self):
         build, _, _ = self.nightly()
         release.promote(self.github, build.tag)
@@ -227,8 +270,10 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     github.release('v0.2.0')
         response = subprocess.CompletedProcess([], 1, '', 'gh: Not Found (HTTP 404)')
-        with patch.object(release.subprocess, 'run', return_value=response):
+        empty = subprocess.CompletedProcess([], 0, '[]', '')
+        with patch.object(release.subprocess, 'run', side_effect=[response, empty]):
             self.assertIsNone(github.release('v0.2.0'))
+        with patch.object(release.subprocess, 'run', return_value=response):
             with self.assertRaises(ValueError):
                 github.api('releases/1', 'PATCH', {'draft': False})
 
