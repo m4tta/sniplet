@@ -105,7 +105,7 @@ pub fn shortcut(command: Command, hotkeys: &HotkeySettings) -> Option<&str> {
         Command::ActiveWindow => &hotkeys.active_window,
         Command::Window => &hotkeys.capture_window,
         Command::Open => "CommandOrControl+O",
-        Command::LoadClipboard => "CommandOrControl+V",
+        Command::Paste | Command::LoadClipboard => "CommandOrControl+V",
         Command::Settings => "CommandOrControl+Comma",
         Command::Quit => "CommandOrControl+Q",
         _ => return None,
