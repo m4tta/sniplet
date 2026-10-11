@@ -1724,3 +1724,29 @@ fn magnifier_and_spotlight_property_buttons_change_rendering(cx: &mut TestAppCon
     })
     .unwrap();
 }
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[gpui_kit::test]
+fn tray_panel_item_closes_the_panel_and_runs_its_command(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    let panel = cx.update(|cx| {
+        let before = cx.windows();
+        let display = cx.displays()[0].id();
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(352.0), px(194.0)));
+        crate::tray_panel::open(bounds, display, handle, editor.clone(), cx);
+        cx.windows()
+            .into_iter()
+            .find(|window| !before.contains(window))
+            .unwrap()
+    });
+    cx.update_window(panel, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("tray-more", 6_usize)).visible());
+        window.click(("tray-footer", 1_usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    assert!(!cx.windows().contains(&panel));
+    cx.update(|cx| assert!(editor.read(cx).settings_window.is_some()));
+}
