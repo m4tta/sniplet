@@ -91,6 +91,19 @@ pub fn has_tray(cx: &App) -> bool {
     cx.has_global::<Services>() && cx.global::<Services>()._tray.is_some()
 }
 
+const TRAY_TOOLTIP: &str = "Sniplet";
+
+/// Hide the tray tooltip while the panel is open, so it cannot cover the panel.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn show_tray_tooltip(show: bool, cx: &App) {
+    if let Some(tray) = cx
+        .try_global::<Services>()
+        .and_then(|services| services._tray.as_ref())
+    {
+        let _ = tray.set_tooltip(show.then_some(TRAY_TOOLTIP));
+    }
+}
+
 #[cfg(all(test, feature = "ui-tests"))]
 pub(crate) fn install_test_services(cx: &mut App) {
     cx.set_global(Services {
@@ -245,7 +258,7 @@ pub fn install(
     #[cfg(target_os = "linux")]
     let mut native_menu = None;
     let tray = (|| -> anyhow::Result<TrayIcon> {
-        let tray = TrayIconBuilder::new().with_tooltip("Sniplet");
+        let tray = TrayIconBuilder::new().with_tooltip(TRAY_TOOLTIP);
         // Linux trays report no icon position for the panel, so they keep the native menu.
         #[cfg(target_os = "linux")]
         let menu = crate::menu_bar::NativeMenu::new(settings)?;

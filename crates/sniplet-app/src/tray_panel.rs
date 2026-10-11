@@ -110,6 +110,7 @@ fn dismiss(window: &mut Window, cx: &mut App) {
         cx.set_global(Lifecycle::<AnyWindowHandle>::Closed {
             closed_at: Some(Instant::now()),
         });
+        crate::runtime::show_tray_tooltip(true, cx);
     }
     window.remove_window();
 }
@@ -141,6 +142,7 @@ pub(crate) fn open(
         return;
     };
     cx.set_global(Lifecycle::Open(panel));
+    crate::runtime::show_tray_tooltip(false, cx);
     cx.activate(true);
     let _ = panel.update(cx, |_, window, cx| {
         // The root paints the theme background, which would square off the panel's corners.
