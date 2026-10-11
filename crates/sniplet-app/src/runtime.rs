@@ -1,7 +1,4 @@
-use crate::{
-    editor::{Command, Editor, render_options},
-    menu_bar::NativeMenu,
-};
+use crate::editor::{Command, Editor, render_options};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui_kit::*;
 use sniplet_core::{
@@ -10,7 +7,7 @@ use sniplet_core::{
 #[cfg(target_os = "windows")]
 use std::time::Instant;
 use std::{path::PathBuf, str::FromStr, time::Duration};
-use tray_icon::{TrayIcon, TrayIconBuilder, menu::MenuEvent};
+use tray_icon::{TrayIcon, TrayIconBuilder};
 
 struct Services {
     manager: Option<GlobalHotKeyManager>,
@@ -245,20 +242,29 @@ pub fn install(
     let mut tray_light_theme = crate::menu_bar::taskbar_uses_light_theme();
     #[cfg(not(target_os = "windows"))]
     let tray_light_theme = true;
-    let native = NativeMenu::new(settings).and_then(|menu| {
+    #[cfg(target_os = "linux")]
+    let mut native_menu = None;
+    let tray = (|| -> anyhow::Result<TrayIcon> {
+        let tray = TrayIconBuilder::new().with_tooltip("Sniplet");
+        // Linux trays report no icon position for the panel, so they keep the native menu.
+        #[cfg(target_os = "linux")]
+        let menu = crate::menu_bar::NativeMenu::new(settings)?;
+        #[cfg(target_os = "linux")]
+        let tray = tray.with_menu(Box::new(menu.menu.clone()));
         let icon = crate::menu_bar::tray_icon(tray_light_theme)?;
-        let tray = TrayIconBuilder::new()
-            .with_tooltip("Sniplet")
-            .with_menu(Box::new(menu.menu.clone()));
         #[cfg(target_os = "macos")]
         let tray = tray.with_icon_templated(icon);
         #[cfg(not(target_os = "macos"))]
         let tray = tray.with_icon(icon);
         let tray = tray.build()?;
-        Ok((menu, tray))
-    });
-    let (mut native_menu, tray) = match native {
-        Ok((menu, tray)) => (Some(menu), Some(tray)),
+        #[cfg(target_os = "linux")]
+        {
+            native_menu = Some(menu);
+        }
+        Ok(tray)
+    })();
+    let tray = match tray {
+        Ok(tray) => Some(tray),
         Err(error) => {
             editor.update(cx, |this, cx| {
                 this.status = format!(
@@ -266,7 +272,7 @@ pub fn install(
                 );
                 cx.notify();
             });
-            (None, None)
+            None
         }
     };
     let mut current_hotkeys = settings.clone();
@@ -280,9 +286,8 @@ pub fn install(
         next_escape_id: 1,
     });
     #[cfg(target_os = "macos")]
-    if let Some(menu) = &native_menu {
+    {
         cx.set_global(StartupState::default());
-        let startup = menu.startup.clone();
         let editor = editor.clone();
         // ServiceManagement can wait on another process. Keep that wait off
         // both the UI thread and the shortcut/menu event polling task.
@@ -305,7 +310,6 @@ pub fn install(
                     if !state.busy && state.generation == generation {
                         let changed = state.enabled != enabled;
                         state.enabled = enabled;
-                        startup.set_checked(enabled);
                         if changed {
                             editor.update(cx, |_, cx| cx.notify());
                         }
@@ -331,15 +335,21 @@ pub fn install(
                             let _ = manager.unregister(*key);
                         }
                     }
-                    let (bindings, mut errors) = register_hotkeys(manager, &hotkeys);
+                    let (bindings, errors) = register_hotkeys(manager, &hotkeys);
                     registered = bindings;
+                    #[cfg(target_os = "linux")]
+                    let mut errors = errors;
+                    #[cfg(target_os = "linux")]
                     if let Some(menu) = &mut native_menu
                         && let Err(error) = menu.update_hotkeys(&hotkeys)
                     {
                         errors.push(format!("Menu shortcuts could not be updated: {error}"));
                     }
                     current_hotkeys = hotkeys;
-                    editor.update(cx, |editor, cx| { editor.hotkey_error = errors.first().cloned(); cx.notify(); });
+                    editor.update(cx, |editor, cx| {
+                        editor.hotkey_error = errors.first().cloned();
+                        cx.notify();
+                    });
                     for error in errors {
                         editor.update(cx, |this, cx| {
                             this.status = error;
@@ -362,44 +372,32 @@ pub fn install(
                         cancel_active_escape(cx);
                         continue;
                     }
-                    if let Some((_, command)) = registered.iter().find(|(key, _)| key.id() == event.id) {
+                    if let Some((_, command)) =
+                        registered.iter().find(|(key, _)| key.id() == event.id)
+                    {
                         invoke(handle, &editor, *command, cx);
                     }
                 }
-                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                #[cfg(target_os = "linux")]
+                while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                     let Some(menu) = &native_menu else { continue };
-                    if event.id == *menu.startup.id() {
-                        #[cfg(target_os = "macos")]
-                        {
-                            if startup_state(cx).1 { menu.startup.set_checked(startup_state(cx).0); continue; }
-                            let enabled = menu.startup.is_checked();
-                            let startup = menu.startup.clone();
-                            startup.set_enabled(false);
-                            let task = change_startup(enabled, cx);
-                            let editor = editor.clone();
-                            cx.spawn(async move |cx| {
-                                let result = task.await;
-                                cx.update(|cx| {
-                                    startup.set_checked(startup_state(cx).0);
-                                    startup.set_enabled(true);
-                                    editor.update(cx, |this, cx| {
-                                this.status = match result {
-                                    Ok(true) => "Sniplet will launch at startup".into(),
-                                    Ok(false) if !enabled => "Launch at startup is disabled".into(),
-                                    Ok(false) => "Check Sniplet's setting in System Settings → General → Login Items".into(),
-                                    Err(error) => format!("Could not change launch at startup: {error}"),
-                                };
-                                cx.notify();
-                                    });
-                                });
-                            }).detach();
-                        }
-                    } else if let Some(command) = menu.command(&event.id) {
+                    if let Some(command) = menu.command(&event.id) {
                         if matches!(command, Command::Quit) {
                             cx.quit();
                             return;
                         }
                         invoke(handle, &editor, command, cx);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                    if let tray_icon::TrayIconEvent::Click {
+                        rect,
+                        button_state: tray_icon::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        crate::tray_panel::toggle(rect, handle, &editor, cx);
                     }
                 }
                 #[cfg(target_os = "windows")]
@@ -420,7 +418,12 @@ pub fn install(
     .detach();
 }
 
-fn invoke(handle: AnyWindowHandle, editor: &Entity<Editor>, command: Command, cx: &mut App) {
+pub(crate) fn invoke(
+    handle: AnyWindowHandle,
+    editor: &Entity<Editor>,
+    command: Command,
+    cx: &mut App,
+) {
     let _ = handle.update(cx, |_, window, cx| {
         if matches!(command, Command::Open | Command::LoadClipboard) {
             show_editor(window, cx);

@@ -16,6 +16,8 @@ mod runtime;
 mod settings_window;
 mod theme;
 mod tools;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod tray_panel;
 mod window_picker;
 
 use gpui_kit::{component::TitleBar, *};

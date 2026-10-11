@@ -1,5 +1,6 @@
 use gpui_kit::{AssetSource, assets::AllAssets};
 use sniplet_platform::HotkeySettings;
+#[cfg(target_os = "linux")]
 use tray_icon::menu::{
     CheckMenuItem, Icon, IconMenuItem, Menu, MenuId, PredefinedMenuItem, Submenu,
     accelerator::Accelerator,
@@ -7,13 +8,14 @@ use tray_icon::menu::{
 
 use crate::editor::Command;
 
+#[cfg(target_os = "linux")]
 pub struct NativeMenu {
     pub menu: Menu,
-    pub startup: CheckMenuItem,
     items: Vec<(IconMenuItem, Command)>,
     hotkeys: HotkeySettings,
 }
 
+#[cfg(target_os = "linux")]
 impl NativeMenu {
     pub fn new(hotkeys: &HotkeySettings) -> anyhow::Result<Self> {
         let menu = Menu::new();
@@ -25,7 +27,7 @@ impl NativeMenu {
             ("Scrolling Capture", "chevrons-down", Command::Scroll),
             ("Recognize Text/QR", "scan-text", Command::CaptureOcr),
         ] {
-            let item = menu_item(label, icon, shortcut(command, hotkeys));
+            let item = menu_item(label, icon, accelerator(command, hotkeys));
             menu.append(&item)?;
             items.push((item, command));
             if matches!(command, Command::ShowEditor) {
@@ -33,8 +35,6 @@ impl NativeMenu {
             }
         }
         let more = Submenu::new("More", true);
-        #[cfg(target_os = "macos")]
-        more.set_icon_templated(menu_icon("ellipsis"));
         for (label, icon, command) in [
             ("Repeat Area Capture", "scan", Command::Repeat),
             ("Capture Active Window", "monitor", Command::ActiveWindow),
@@ -47,7 +47,7 @@ impl NativeMenu {
             if matches!(command, Command::Open) {
                 more.append(&PredefinedMenuItem::separator())?;
             }
-            let item = menu_item(label, icon, shortcut(command, hotkeys));
+            let item = menu_item(label, icon, accelerator(command, hotkeys));
             more.append(&item)?;
             items.push((item, command));
         }
@@ -57,26 +57,17 @@ impl NativeMenu {
         menu.append(&github)?;
         items.push((github, Command::GitHub));
         menu.append(&PredefinedMenuItem::separator())?;
-        // The background startup check sets the checkbox after menu creation.
-        let enabled = false;
-        let startup = CheckMenuItem::new(
-            "Launch at Startup",
-            cfg!(target_os = "macos"),
-            enabled,
-            None,
-        );
-        menu.append(&startup)?;
+        menu.append(&CheckMenuItem::new("Launch at Startup", false, false, None))?;
         for (label, icon, command) in [
             ("Settings…", "settings", Command::Settings),
             ("Quit Sniplet", "power", Command::Quit),
         ] {
-            let item = menu_item(label, icon, shortcut(command, hotkeys));
+            let item = menu_item(label, icon, accelerator(command, hotkeys));
             menu.append(&item)?;
             items.push((item, command));
         }
         Ok(Self {
             menu,
-            startup,
             items,
             hotkeys: hotkeys.clone(),
         })
@@ -95,14 +86,15 @@ impl NativeMenu {
             return Ok(false);
         }
         for (item, command) in &self.items {
-            item.set_accelerator(shortcut(*command, hotkeys))?;
+            item.set_accelerator(accelerator(*command, hotkeys))?;
         }
         self.hotkeys = hotkeys.clone();
         Ok(true)
     }
 }
 
-fn shortcut(command: Command, hotkeys: &HotkeySettings) -> Option<Accelerator> {
+/// The shortcut text bound to `command`, such as `CommandOrControl+Shift+2`.
+pub fn shortcut(command: Command, hotkeys: &HotkeySettings) -> Option<&str> {
     let key = match command {
         Command::ShowEditor => &hotkeys.show_editor,
         Command::Screen => &hotkeys.capture_screen,
@@ -118,34 +110,24 @@ fn shortcut(command: Command, hotkeys: &HotkeySettings) -> Option<Accelerator> {
         Command::Quit => "CommandOrControl+Q",
         _ => return None,
     };
-    if key.is_empty() {
-        return None;
-    }
-    key.replace(
-        "CommandOrControl",
-        if cfg!(target_os = "macos") {
-            "Super"
-        } else {
-            "Ctrl"
-        },
-    )
-    .parse()
-    .ok()
+    (!key.is_empty()).then_some(key)
 }
 
+#[cfg(target_os = "linux")]
+fn accelerator(command: Command, hotkeys: &HotkeySettings) -> Option<Accelerator> {
+    shortcut(command, hotkeys)?
+        .replace("CommandOrControl", "Ctrl")
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
 fn menu_item(label: &str, name: &str, accelerator: Option<Accelerator>) -> IconMenuItem {
-    let icon = menu_icon(name);
-    let item = IconMenuItem::new(label, true, icon.clone(), accelerator);
-    #[cfg(target_os = "macos")]
-    item.set_icon_templated(icon);
-    item
+    let icon = icon_pixels(name).and_then(|pixels| Icon::from_rgba(pixels, 32, 32).ok());
+    IconMenuItem::new(label, true, icon, accelerator)
 }
 
-fn menu_icon(name: &str) -> Option<Icon> {
-    Icon::from_rgba(icon_pixels(name)?, 32, 32).ok()
-}
-
-/// Rasterize the same bundled icons used by the editor for the native menu.
+/// Rasterize a bundled editor icon at the tray's 32 px size.
 pub fn icon_pixels(name: &str) -> Option<Vec<u8>> {
     let svg = AllAssets.load(&format!("icons/{name}.svg")).ok()??;
     let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default()).ok()?;
@@ -193,20 +175,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn menu_shortcuts_follow_custom_and_disabled_capture_keys() {
+    fn shortcuts_follow_custom_and_disabled_capture_keys() {
         let mut hotkeys = HotkeySettings {
             capture_area: "Super+Shift+9".into(),
             ..HotkeySettings::default()
         };
-        assert_eq!(
-            shortcut(Command::Area, &hotkeys),
-            Some("Super+Shift+9".parse::<Accelerator>().unwrap())
-        );
+        assert_eq!(shortcut(Command::Area, &hotkeys), Some("Super+Shift+9"));
         hotkeys.capture_area.clear();
         assert_eq!(shortcut(Command::Area, &hotkeys), None);
-        assert!(shortcut(Command::Settings, &hotkeys).is_some());
+        assert_eq!(
+            shortcut(Command::Settings, &hotkeys),
+            Some("CommandOrControl+Comma")
+        );
+        assert_eq!(shortcut(Command::Delayed, &hotkeys), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_menu_accelerators_use_control() {
+        assert_eq!(
+            accelerator(Command::Screen, &HotkeySettings::default()),
+            Some("Ctrl+Shift+1".parse::<Accelerator>().unwrap())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_menu_icons_are_available_in_the_bundle() {
         for name in [
@@ -215,7 +208,6 @@ mod tests {
             "scan",
             "chevrons-down",
             "scan-text",
-            "ellipsis",
             "timer",
             "chevrons-up",
             "file",

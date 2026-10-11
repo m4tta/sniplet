@@ -83,6 +83,7 @@ pub enum Command {
     CaptureOcr,
     ShowEditor,
     Settings,
+    #[cfg(target_os = "linux")]
     GitHub,
     Quit,
     Ocr,
@@ -1606,6 +1607,7 @@ impl Editor {
             Command::Settings => {
                 self.open_settings(crate::settings_window::Page::General, window, cx);
             }
+            #[cfg(target_os = "linux")]
             Command::GitHub => cx.open_url("https://github.com/m4tta/sniplet"),
             Command::Quit => cx.quit(),
             Command::Upload => self.upload(window, cx),
