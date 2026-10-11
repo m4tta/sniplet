@@ -1,49 +1,12 @@
 use std::time::{Duration, Instant};
 
-use gpui_kit::{
-    component::{
-        ActiveTheme, Sizable,
-        button::{Button, ButtonVariants},
-    },
-    prelude::*,
-    *,
+use gpui_kit::{prelude::*, *};
+
+use crate::{
+    editor::Editor,
+    quick_menu::{self, Action},
 };
 
-use crate::editor::{Command, Editor, tool_icon};
-
-const CAPTURES: [(&str, &str, Command); 4] = [
-    ("Screen", "monitor", Command::Screen),
-    ("Area", "scan", Command::Area),
-    ("Scrolling", "chevrons-down", Command::Scroll),
-    ("Text & QR", "scan-text", Command::CaptureOcr),
-];
-
-const MORE: [(&str, &str, Command); 7] = [
-    ("Repeat Area", "repeat", Command::Repeat),
-    ("Active Window", "app-window", Command::ActiveWindow),
-    ("Pick Window", "square-mouse-pointer", Command::Window),
-    ("Delayed 3s", "timer", Command::Delayed),
-    ("Scroll Up", "chevrons-up", Command::ScrollUp),
-    ("Open File", "folder-open", Command::Open),
-    (
-        "Paste From Clipboard",
-        "clipboard-paste",
-        Command::LoadClipboard,
-    ),
-];
-
-const FOOTER: [(&str, &str, Command); 3] = [
-    ("Open Editor", "scissors", Command::ShowEditor),
-    ("Settings", "settings", Command::Settings),
-    ("Quit", "power", Command::Quit),
-];
-
-const WIDTH: f32 = 352.0;
-const PADDING: f32 = 8.0;
-const GAP: f32 = 8.0;
-const TILE_HEIGHT: f32 = 80.0;
-const ROW_HEIGHT: f32 = 32.0;
-const HEIGHT: f32 = 2.0 * PADDING + TILE_HEIGHT + 2.0 * ROW_HEIGHT + 2.0 + 4.0 * GAP;
 /// Distance kept between the panel, the tray icon, and the display edges.
 const MARGIN: f32 = 8.0;
 /// A click on the tray icon first deactivates an open panel, closing it, and
@@ -96,9 +59,11 @@ pub(crate) fn toggle(
             let _ = panel.update(cx, |_, window, cx| dismiss(window, cx));
         }
         Click::Open => {
-            if let Some((bounds, display)) =
-                placement(icon, &screens(cx), size(px(WIDTH), px(HEIGHT)))
-            {
+            if let Some((bounds, display)) = placement(
+                icon,
+                &screens(cx),
+                size(px(quick_menu::WIDTH), px(quick_menu::TRAY.height())),
+            ) {
                 open(bounds, display, editor_window, editor.clone(), cx);
             }
         }
@@ -216,31 +181,6 @@ fn placement(
     Some((Bounds::new(point(x, y), panel), screen.id))
 }
 
-/// A readable shortcut such as `Ctrl+Shift+2`, from a settings string such as
-/// `CommandOrControl+Shift+2`.
-fn shortcut_label(key: &str, mac: bool) -> String {
-    key.split('+')
-        .map(|part| match part {
-            "CommandOrControl" | "CmdOrCtrl" if mac => "Cmd",
-            "CommandOrControl" | "CmdOrCtrl" | "Control" => "Ctrl",
-            "Super" | "Command" | "Meta" if mac => "Cmd",
-            "Super" | "Command" | "Meta" => "Win",
-            "Alt" if mac => "Option",
-            "Comma" => ",",
-            part => part
-                .strip_prefix("Key")
-                .or_else(|| part.strip_prefix("Digit"))
-                .unwrap_or(part),
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
-fn shortcut(command: Command, cx: &App, editor: &Entity<Editor>) -> Option<String> {
-    crate::menu_bar::shortcut(command, &editor.read(cx).settings.hotkeys)
-        .map(|key| shortcut_label(key, cfg!(target_os = "macos")))
-}
-
 struct TrayPanel {
     focus: FocusHandle,
     editor: Entity<Editor>,
@@ -269,114 +209,34 @@ impl TrayPanel {
             _activation: activation,
         }
     }
-
-    fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        dismiss(window, cx);
-        let (editor_window, editor) = (self.editor_window, self.editor.clone());
-        App::defer(cx, move |cx| {
-            crate::runtime::invoke(editor_window, &editor, command, cx)
-        });
-    }
-
-    fn capture_tile(
-        &self,
-        index: usize,
-        (label, icon, command): (&'static str, &'static str, Command),
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let hover = cx.theme().secondary_hover;
-        div()
-            .id(("tray-capture", index))
-            .flex_1()
-            .h(px(TILE_HEIGHT))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .rounded_md()
-            .bg(cx.theme().secondary)
-            .hover(move |style| style.bg(hover))
-            .cursor_pointer()
-            .child(tool_icon(icon).size(px(24.0)))
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .children(shortcut(command, cx, &self.editor)),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| this.run(command, window, cx)))
-    }
-
-    fn divider(cx: &App) -> Div {
-        div().h(px(1.0)).bg(cx.theme().border)
-    }
 }
 
 impl Render for TrayPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tiles = CAPTURES
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| self.capture_tile(index, item, cx))
-            .collect::<Vec<_>>();
-        let more = MORE
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, icon, command))| {
-                let tooltip = match shortcut(command, cx, &self.editor) {
-                    Some(key) => format!("{label} · {key}"),
-                    None => label.to_owned(),
-                };
-                Button::new(("tray-more", index))
-                    .ghost()
-                    .icon(tool_icon(icon))
-                    .tooltip(tooltip)
-                    .w(px(40.0))
-                    .h(px(ROW_HEIGHT))
-                    .on_click(cx.listener(move |this, _, window, cx| this.run(command, window, cx)))
-            })
-            .collect::<Vec<_>>();
-        let [open_editor, settings, quit]: [Button; 3] = std::array::from_fn(|index| {
-            let (label, icon, command) = FOOTER[index];
-            Button::new(("tray-footer", index))
-                .ghost()
-                .icon(tool_icon(icon))
-                .label(label)
-                .small()
-                .h(px(ROW_HEIGHT))
-                .on_click(cx.listener(move |this, _, window, cx| this.run(command, window, cx)))
-        });
-        div()
-            .id("tray-panel")
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(GAP))
-            .p(px(PADDING))
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    dismiss(window, cx);
-                }
-            }))
-            .child(div().flex().gap(px(GAP)).children(tiles))
-            .child(Self::divider(cx))
-            .child(div().flex().justify_between().children(more))
-            .child(Self::divider(cx))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(div().flex().child(open_editor).child(settings))
-                    .child(quit),
-            )
+        let (editor_window, editor) = (self.editor_window, self.editor.clone());
+        let choose = move |action, window: &mut Window, cx: &mut App| {
+            let Action::Run(command) = action else {
+                return;
+            };
+            dismiss(window, cx);
+            let editor = editor.clone();
+            App::defer(cx, move |cx| {
+                crate::runtime::invoke(editor_window, &editor, command, cx)
+            });
+        };
+        quick_menu::view(
+            &quick_menu::TRAY,
+            &self.editor.read(cx).settings.hotkeys,
+            choose,
+            cx,
+        )
+        .track_focus(&self.focus)
+        .size_full()
+        .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                dismiss(window, cx);
+            }
+        }))
     }
 }
 
@@ -466,32 +326,5 @@ mod tests {
             Click::Open
         );
         assert_eq!(Lifecycle::Open(7_u32).click(closed_at), Click::Close(7));
-    }
-
-    #[test]
-    fn shortcut_labels_are_readable_on_each_platform() {
-        assert_eq!(
-            shortcut_label("CommandOrControl+Shift+2", false),
-            "Ctrl+Shift+2"
-        );
-        assert_eq!(
-            shortcut_label("CommandOrControl+Shift+2", true),
-            "Cmd+Shift+2"
-        );
-        assert_eq!(shortcut_label("Control+Alt+KeyA", false), "Ctrl+Alt+A");
-        assert_eq!(shortcut_label("Super+Alt+Digit9", true), "Cmd+Option+9");
-        assert_eq!(shortcut_label("CommandOrControl+Comma", false), "Ctrl+,");
-    }
-
-    #[test]
-    fn every_panel_icon_is_bundled() {
-        for (_, icon, _) in CAPTURES.iter().chain(&MORE).chain(&FOOTER) {
-            assert!(
-                AssetSource::load(&gpui_kit::assets::AllAssets, &format!("icons/{icon}.svg"))
-                    .unwrap()
-                    .is_some(),
-                "{icon}"
-            );
-        }
     }
 }

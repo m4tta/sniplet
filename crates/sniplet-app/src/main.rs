@@ -12,6 +12,7 @@ mod editor;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu_bar;
+mod quick_menu;
 mod runtime;
 mod settings_window;
 mod theme;

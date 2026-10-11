@@ -1287,9 +1287,112 @@ fn toolbar_menu_and_canvas_have_layout(cx: &mut TestAppContext) {
         assert!(window.find("save").visible());
         assert!(window.find("copy").bounds().size.width > px(0.0));
         window.click("app-menu", cx);
-        assert!(window.find("capture-area").visible());
+        assert!(window.find(("menu-tile", 1_usize)).visible());
         window.press("escape", cx);
-        assert!(window.try_find("capture-area").is_none());
+        assert!(window.try_find(("menu-tile", 1_usize)).is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn app_menu_opens_below_the_toolbar_and_closes_on_outside_and_trigger_clicks(
+    cx: &mut TestAppContext,
+) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("app-menu", cx);
+        window.render_frame(cx);
+        // The first tile sits inside the menu's 1 px border and 8 px padding.
+        let tile = window.find(("menu-tile", 0_usize)).bounds();
+        let trigger = window.find("app-menu").bounds();
+        assert_eq!(tile.top(), px(crate::editor::BAR + 8.0 + 9.0));
+        assert_eq!(tile.left(), trigger.left() + px(9.0));
+        let right = |id| window.find(id).bounds().right();
+        assert_eq!(right(("menu-more", 7_usize)), right(("menu-tile", 3_usize)));
+        assert_eq!(
+            right(("menu-image", 4_usize)),
+            right(("menu-more", 4_usize))
+        );
+        assert!(editor.read(cx).panel == Some(crate::editor::Panel::Menu));
+
+        pointer_down(window, point(px(900.0), px(600.0)), cx);
+        pointer_up(window, point(px(900.0), px(600.0)), cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("menu-tile", 0_usize)).is_none());
+        assert!(editor.read(cx).panel.is_none());
+
+        window.click("app-menu", cx);
+        window.render_frame(cx);
+        assert!(window.find(("menu-tile", 0_usize)).visible());
+        window.click("app-menu", cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("menu-tile", 0_usize)).is_none());
+        assert!(editor.read(cx).panel.is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn app_menu_tile_runs_its_command_and_closes_the_menu(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    let earlier = cx.update(|cx| {
+        crate::runtime::install_test_services(cx);
+        crate::runtime::begin_escape_session(cx)
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("app-menu", cx);
+        assert!(!earlier.is_cancelled());
+        window.click(("menu-tile", 1_usize), cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("menu-tile", 0_usize)).is_none());
+        assert!(editor.read(cx).panel.is_none());
+    })
+    .unwrap();
+    // Starting the Area capture replaces any earlier capture session.
+    assert!(earlier.is_cancelled());
+    cx.update(crate::runtime::cancel_active_escape);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(250));
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(cx.windows(), vec![handle]));
+}
+
+#[gpui_kit::test]
+fn app_menu_image_row_acts_on_the_open_image(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            let doc = editor.document.as_mut().unwrap();
+            doc.set_crop(sniplet_core::ImageRect::new(10.0, 10.0, 50.0, 40.0));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("app-menu", cx);
+        window.click(("menu-image", 3_usize), cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("menu-tile", 0_usize)).is_none());
+        assert_eq!(editor.read(cx).document.as_ref().unwrap().crop(), None);
+        assert_eq!(
+            editor.read(cx).export_pixels().unwrap().dimensions(),
+            (400, 300)
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn app_menu_keyboard_shortcuts_item_opens_the_shortcuts_panel(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("app-menu", cx);
+        window.click(("menu-footer", 0_usize), cx);
+        window.render_frame(cx);
+        assert!(window.try_find(("menu-tile", 0_usize)).is_none());
+        assert!(editor.read(cx).panel == Some(crate::editor::Panel::Help));
+        assert!(window.find("close-panel").visible());
     })
     .unwrap();
 }
@@ -1741,8 +1844,9 @@ fn tray_panel_item_closes_the_panel_and_runs_its_command(cx: &mut TestAppContext
     });
     cx.update_window(panel, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.find(("tray-more", 6_usize)).visible());
-        window.click(("tray-footer", 1_usize), cx);
+        assert!(window.find(("menu-more", 6_usize)).visible());
+        assert!(window.try_find(("menu-image", 0_usize)).is_none());
+        window.click(("menu-footer", 1_usize), cx);
     })
     .unwrap();
     cx.run_until_parked();

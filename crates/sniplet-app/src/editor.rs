@@ -6,6 +6,7 @@ use gpui_kit::{
         ActiveTheme, Icon, Selectable, TitleBar,
         button::{Button, ButtonVariants},
         input::{Input, InputState},
+        popover::Popover,
     },
     prelude::*,
     *,
@@ -17,7 +18,11 @@ use sniplet_core::{
 };
 use sniplet_platform::{Clipboard, Settings, SettingsStore};
 
-use crate::{capture, tools::Tool};
+use crate::{
+    capture,
+    quick_menu::{self, Action},
+    tools::Tool,
+};
 
 pub const FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
 pub(crate) const BAR: f32 = 54.0;
@@ -2263,20 +2268,51 @@ impl Editor {
             .on_click(cx.listener(move |this, _, window, cx| this.command(command, window, cx)))
     }
 
-    fn panel_button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        panel: Panel,
-        cx: &mut Context<Self>,
-    ) -> Button {
-        Button::new(id)
-            .ghost()
-            .label(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.panel = Some(panel);
+    fn render_app_menu(&self, cx: &mut Context<Self>) -> Popover {
+        let editor = cx.entity().downgrade();
+        let hotkeys = self.settings.hotkeys.clone();
+        Popover::new("app-menu-popover")
+            .appearance(false)
+            // The trigger spans the toolbar's height so the menu opens just below it.
+            .trigger_style(StyleRefinement::default().h(px(BAR)).flex().items_center())
+            .offset(px(8.0))
+            .open(self.panel == Some(Panel::Menu))
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                if *open {
+                    this.panel = Some(Panel::Menu);
+                } else if this.panel == Some(Panel::Menu) {
+                    this.panel = None;
+                }
                 cx.notify();
             }))
+            .trigger(
+                Button::new("app-menu")
+                    .ghost()
+                    .icon(tool_icon("scissors"))
+                    .tooltip("Sniplet · capture and settings"),
+            )
+            .content(move |_, _, cx| {
+                let editor = editor.clone();
+                quick_menu::view(
+                    &quick_menu::EDITOR,
+                    &hotkeys,
+                    move |action, window, cx| {
+                        let _ = editor.update(cx, |editor, cx| editor.choose(action, window, cx));
+                    },
+                    cx,
+                )
+                .shadow_lg()
+            })
+    }
+
+    fn choose(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            Action::Run(command) => self.command(command, window, cx),
+            Action::Help => {
+                self.panel = Some(Panel::Help);
+                cx.notify();
+            }
+        }
     }
 
     fn menu_row(
@@ -2695,6 +2731,14 @@ impl Editor {
         let Some(panel) = self.panel else {
             return div().into_any_element();
         };
+        let title = match panel {
+            Panel::Menu => return div().into_any_element(),
+            Panel::Tools => "Tools",
+            Panel::Text => "Text annotation",
+            Panel::Backdrop => "Backdrop",
+            Panel::Help => "Keyboard shortcuts",
+            Panel::Ruler => "Use the keyboard",
+        };
         let mut body = div()
             .id("floating-panel")
             .flex()
@@ -2716,14 +2760,7 @@ impl Editor {
                 .flex()
                 .justify_between()
                 .items_center()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(match panel {
-                    Panel::Menu => "Sniplet",
-                    Panel::Tools => "Tools",
-                    Panel::Text => "Text annotation",
-                    Panel::Backdrop => "Backdrop",
-                    Panel::Help => "Keyboard shortcuts",
-                    Panel::Ruler => "Use the keyboard",
-                }))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 .child(
                     Button::new("close-panel")
                         .ghost()
@@ -2736,97 +2773,11 @@ impl Editor {
                 ),
         );
         match panel {
+            Panel::Menu => {}
             Panel::Ruler => {
                 body = body.child("Hold 1 or Left/Right to measure the width. Hold 2 or Up/Down to measure the height. Move the pointer to the area or gap.")
                     .child("Hold Shift to include the outer edges. Use the wheel to adjust sensitivity. Click to place the measurement on the image.")
                     .child("Click the image size to switch between points and physical pixels.");
-            }
-            Panel::Menu => {
-                for (id, label, key, command) in [
-                    (
-                        "capture-area",
-                        "Capture area",
-                        "Ctrl/Cmd Shift 2",
-                        Command::Area,
-                    ),
-                    (
-                        "capture-screen",
-                        "Capture screen",
-                        "Ctrl/Cmd Shift 1",
-                        Command::Screen,
-                    ),
-                    (
-                        "capture-window",
-                        "Capture window",
-                        "Ctrl/Cmd Shift 3",
-                        Command::Window,
-                    ),
-                    (
-                        "capture-repeat",
-                        "Repeat area capture",
-                        "Ctrl/Cmd Shift 5",
-                        Command::Repeat,
-                    ),
-                    (
-                        "capture-active",
-                        "Capture active window",
-                        "Ctrl/Cmd Shift 6",
-                        Command::ActiveWindow,
-                    ),
-                    (
-                        "capture-ocr",
-                        "Capture text / QR",
-                        "Ctrl/Cmd Shift 7",
-                        Command::CaptureOcr,
-                    ),
-                    (
-                        "capture-delayed",
-                        "Capture after 3 seconds",
-                        "",
-                        Command::Delayed,
-                    ),
-                    (
-                        "capture-scroll",
-                        "Scrolling capture",
-                        "Ctrl/Cmd Shift 4",
-                        Command::Scroll,
-                    ),
-                    (
-                        "capture-scroll-manual",
-                        "Manual scrolling capture",
-                        "",
-                        Command::ManualScroll,
-                    ),
-                    ("open-image", "Open image…", "Ctrl/Cmd O", Command::Open),
-                    (
-                        "paste-image",
-                        "Load from clipboard",
-                        "Ctrl/Cmd V",
-                        Command::Paste,
-                    ),
-                    ("ocr", "Recognize text", "", Command::Ocr),
-                    ("qr", "Read QR code", "", Command::Qr),
-                    (
-                        "auto-adjust",
-                        "Auto-adjust selection",
-                        "",
-                        Command::AutoAdjust,
-                    ),
-                    ("reset-crop", "Reset crop", "", Command::ResetCrop),
-                    ("quit-sniplet", "Quit Sniplet", "Ctrl/Cmd Q", Command::Quit),
-                ] {
-                    body = body.child(self.menu_row(id, label, key, command, cx));
-                }
-                body = body
-                    .child(self.menu_row(
-                        "settings",
-                        "Settings…",
-                        "Ctrl/Cmd ,",
-                        Command::Settings,
-                        cx,
-                    ))
-                    .child(self.menu_row("upload-image", "Upload image…", "", Command::Upload, cx))
-                    .child(self.panel_button("help", "Keyboard shortcuts", Panel::Help, cx));
             }
             Panel::Tools => {
                 body = body.child(self.menu_row(
@@ -3141,20 +3092,7 @@ impl Render for Editor {
             .bg(cx.theme().title_bar)
             .text_color(cx.theme().foreground);
         bar = bar
-            .child(
-                Button::new("app-menu")
-                    .ghost()
-                    .icon(tool_icon("scissors"))
-                    .tooltip("Sniplet · capture and settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.panel = if this.panel == Some(Panel::Menu) {
-                            None
-                        } else {
-                            Some(Panel::Menu)
-                        };
-                        cx.notify();
-                    })),
-            )
+            .child(self.render_app_menu(cx))
             .child(self.toolbar_button(
                 "copy",
                 "copy",
