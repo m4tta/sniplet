@@ -572,6 +572,7 @@ impl SettingsWindow {
                     )),
                 cx,
             ))
+            .child(crate::updates::settings_section(&self.editor, cx))
             .into_any_element()
     }
 
@@ -856,6 +857,9 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.editor.read(cx).updates.installing() {
+            return crate::updates::installing_screen(cx);
+        }
         let page = match self.page {
             Page::General => self.general(cx),
             Page::Hotkeys => self.hotkeys(cx),
@@ -1044,6 +1048,7 @@ impl Render for SettingsWindow {
                         ),
                 ),
             )
+            .into_any_element()
     }
 }
 
@@ -1065,14 +1070,14 @@ fn hotkey_values(keys: &HotkeySettings) -> [String; 8] {
     .map(Clone::clone)
 }
 
-fn note(text: impl Into<SharedString>, cx: &App) -> Div {
+pub(crate) fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
 
-fn card(cx: &App) -> Div {
+pub(crate) fn card(cx: &App) -> Div {
     div()
         .rounded(px(12.0))
         .border_1()
@@ -1081,7 +1086,7 @@ fn card(cx: &App) -> Div {
         .overflow_hidden()
 }
 
-fn section(title: &'static str, content: impl IntoElement, cx: &App) -> Div {
+pub(crate) fn section(title: &'static str, content: impl IntoElement, cx: &App) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1097,11 +1102,16 @@ fn section(title: &'static str, content: impl IntoElement, cx: &App) -> Div {
         .child(content)
 }
 
-fn divider(cx: &App) -> Div {
+pub(crate) fn divider(cx: &App) -> Div {
     div().mx_4().h(px(1.0)).bg(cx.theme().border)
 }
 
-fn row(title: &'static str, description: &'static str, control: impl IntoElement, cx: &App) -> Div {
+pub(crate) fn row(
+    title: &'static str,
+    description: &'static str,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
     div()
         .p_4()
         .flex()

@@ -15,6 +15,7 @@ mod ocr;
 mod qr;
 mod scroll;
 mod settings;
+pub mod updates;
 mod upload;
 mod window_background;
 

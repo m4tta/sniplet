@@ -64,7 +64,8 @@ are uploaded without a second compression pass.
 | `Sniplet-0.2.0-a1b2c3d-windows-x64.zip` | Portable Windows executable and support files |
 | `Sniplet-0.2.0-a1b2c3d-linux-x64.tar.gz` | Linux executable, desktop entry, icons, and support files |
 | `SHA256SUMS` | SHA-256 checksums for all four packages |
-| `release.json` | Version, full source SHA, target names, package sizes, and checksums |
+| `release.json` | Version, build number, channel, source SHA, package sizes, and checksums |
+| `release.json.sig` | Free Ed25519 signature for the exact manifest bytes |
 
 The publisher waits for all four jobs to pass. It uploads and verifies all files
 in a draft, then publishes the nightly as a GitHub prerelease. Nightlies do not
@@ -100,6 +101,65 @@ with an error.
 
 ## Signing and platform limits
 
+In-app updates use `self_update` for archive extraction and replacement. They
+check a pinned Ed25519 public key before they trust the release manifest. They
+then check the package size and SHA-256 checksum before installation. An unsigned
+release is available for manual download only.
+
+The app starts on Stable. General settings has the channel choice, automatic
+checks, and the manual check button. Automatic checks download verified updates
+in the background. Installation always waits for the user's restart action.
+Nightly builds include the Actions run ID
+as their build number. This permits updates between commits with the same
+numeric version. Promotion keeps this build number and the package bytes. It
+signs a new manifest for Stable. Changing to Stable never installs an older
+version automatically; the app waits for a newer Stable version.
+
+The user selects Download, then Restart & update. Before replacement, the app
+saves the current screenshot and edits to a recovery project beside its settings.
+The next process restores this project. Installation does not change user settings.
+Windows replaces its portable executable. Mac and Linux replace the complete
+portable app bundle. A read-only installation cannot update itself.
+The new process waits for the old process to exit before it restores work and
+registers global shortcuts. Recovery files stay on disk until the new editor
+window opens. Recovery keeps the screenshot, crop, backdrop, and annotations;
+it does not keep undo history.
+
+### Update key setup
+
+Install the release tool dependency:
+
+```sh
+python3 -m pip install -r scripts/requirements-release.txt
+```
+
+For the first setup only, run:
+
+```sh
+python3 scripts/update_signing.py init --install-github-secret
+```
+
+This creates a private key at `~/.sniplet-release/update-signing.pem`, writes
+`assets/update-public-key.hex`, and sets the repository's `UPDATER_SIGNING_KEY`
+Actions secret through `gh`. The private key stays outside the repository.
+Back it up in a secure location. Do not generate another key for each release.
+Existing apps trust the public key that was compiled into them. A key change
+needs a planned migration or a manual app installation.
+
+To create a verified backup outside the checkout, use a separate disk or a
+secure mounted backup location:
+
+```sh
+python3 scripts/update_signing.py backup --destination /secure-backup/sniplet-update.pem
+```
+
+The command limits file access to the current user (and SYSTEM on Windows).
+It refuses to overwrite a file or put the backup in this repository. Keep an
+offline or off-site copy as well for protection against loss of the computer.
+
+Only the publish jobs receive the signing secret. Build jobs do not need it.
+The signature is free and does not need an Apple or Windows certificate.
+
 Mac packages use ad hoc signing and are not notarized. macOS can require manual
 approval before opening them or a new Screen Recording grant after an update.
 The workflow has no Apple account credentials and does not use the local
@@ -114,6 +174,7 @@ They are not AppImages or distribution packages.
 Local release checks:
 
 ```sh
+python3 -m pip install -r scripts/requirements-release.txt
 python3 -m unittest discover -s scripts -p test_release.py
 cargo metadata --format-version 1 --no-deps --locked
 ```

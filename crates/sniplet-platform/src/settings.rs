@@ -85,6 +85,8 @@ impl Default for HotkeySettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub update_channel: crate::updates::ReleaseChannel,
+    pub check_for_updates: bool,
     pub hotkeys: HotkeySettings,
     pub theme: ThemePreference,
     pub format: ExportFormat,
@@ -105,6 +107,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            update_channel: crate::updates::ReleaseChannel::Stable,
+            check_for_updates: true,
             hotkeys: HotkeySettings::default(),
             theme: ThemePreference::System,
             format: ExportFormat::Png,

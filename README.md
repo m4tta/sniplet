@@ -35,6 +35,7 @@ where you can mark it up and then copy, save, pin, or upload it.
 | **Recognize**  | Copy text out of an image with OCR, or decode a QR code                               |
 | **Share**      | Copy to the clipboard, save as PNG, JPEG, or WebP, drag into another app, or upload   |
 | **Keep**       | Save an editable `.sniplet` project and continue editing it later                     |
+| **Update**     | Choose Stable or Nightly, download verified updates, and choose when to restart      |
 
 ## How it works
 

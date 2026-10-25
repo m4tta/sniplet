@@ -67,11 +67,13 @@ class Build:
     version: str
     sha: str
     channel: str = 'nightly'
+    build_number: int = 0
 
     def __post_init__(self):
         require(re.fullmatch(VERSION, self.version), 'Invalid release version')
         require(re.fullmatch(r'[0-9a-f]{40}', self.sha), 'Expected a full commit SHA')
         require(self.channel in ('nightly', 'stable'), 'Invalid release channel')
+        require(type(self.build_number) is int and self.build_number >= 0, 'Invalid build number')
 
     @property
     def tag(self):
@@ -110,7 +112,7 @@ def manifest(build, assets, source_nightly=None):
             'All four platform packages are required')
     for asset in assets:
         asset.validate(build)
-    result = {'schema': 1, **asdict(build), 'tag': build.tag,
+    result = {'schema': 2 if build.build_number else 1, **asdict(build), 'tag': build.tag,
               'assets': [asdict(asset) for asset in sorted(assets, key=lambda item: item.target)]}
     if source_nightly:
         result['source_nightly'] = source_nightly
@@ -119,8 +121,9 @@ def manifest(build, assets, source_nightly=None):
 
 def read_manifest(path):
     data = json.loads(path.read_text())
-    require(data['schema'] == 1, 'Unsupported release manifest')
-    build = Build(data['version'], data['sha'], data['channel'])
+    require(data['schema'] in (1, 2), 'Unsupported release manifest')
+    build = Build(data['version'], data['sha'], data['channel'], data.get('build_number', 0))
+    require(data['schema'] == (2 if build.build_number else 1), 'Build number does not match the manifest schema')
     assets = [Asset(**item) for item in data['assets']]
     require(data['tag'] == build.tag, 'Release tag does not match its source commit')
     manifest(build, assets)
@@ -139,6 +142,9 @@ def verify_files(directory, build, assets):
 def write_metadata(directory, build, assets, source_nightly=None):
     verify_files(directory, build, assets)
     write_json(directory / 'release.json', manifest(build, assets, source_nightly))
+    if build.build_number:
+        from update_signing import sign
+        sign(directory / 'release.json')
     (directory / 'SHA256SUMS').write_text(''.join(
         f'{asset.sha256}  {asset.name}\n' for asset in sorted(assets, key=lambda item: item.name)))
 
@@ -155,7 +161,7 @@ def archive_bundle(bundle, destination, target):
 
 
 def package(target, sha):
-    build = Build(version(), sha)
+    build = Build(version(), sha, build_number=int(os.environ.get('SNIPLET_BUILD_NUMBER', '0')))
     current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     require(current == sha, 'Checkout does not match the requested source commit')
     host = subprocess.check_output(['rustc', '-vV'], text=True)
@@ -170,6 +176,15 @@ def package(target, sha):
                             'SNIPLET_PACKAGE_PROFILE': 'release'})
         name = 'Sniplet.app' if target.startswith('macos-') else 'sniplet-' + TARGETS[target][0]
         bundle = ROOT / 'dist-release' / name
+    if build.build_number:
+        executable = (bundle / 'Sniplet.exe' if target == 'windows-x64' else
+                      bundle / 'Contents/MacOS/Sniplet' if target.startswith('macos-') else
+                      bundle / 'bin/sniplet')
+        identity = json.loads(subprocess.check_output([str(executable), '--build-info'],
+                                                     text=True, timeout=15))
+        require(identity == {'version': build.version, 'sha': build.sha,
+                             'build_number': build.build_number},
+                'The executable was not built with this release identity')
     directory = ROOT / 'dist-release' / 'assets'
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / build.filename(target)
@@ -241,10 +256,16 @@ def published_manifest(github, release):
         directory = Path(temporary)
         github.download(release['tag_name'], directory, ['release.json'])
         build, assets = read_manifest(directory / 'release.json')
+        if build.build_number:
+            from update_signing import verify
+            github.download(release['tag_name'], directory, ['release.json.sig'])
+            verify(directory / 'release.json')
     require(release['tag_name'] == build.tag and release['prerelease'] == (build.channel == 'nightly'),
             'Release channel does not match its manifest')
     require(github.tag_sha(build.tag) == build.sha, 'Release tag does not match its source commit')
     expected = {asset.name for asset in assets} | {'release.json', 'SHA256SUMS'}
+    if build.build_number:
+        expected.add('release.json.sig')
     require({item['name'] for item in release['assets']} == expected, 'Release package set is incomplete')
     for asset in assets:
         remote = next(item for item in release['assets'] if item['name'] == asset.name)
@@ -271,13 +292,17 @@ def prepare(github):
     completed = release is not None and not release['draft']
     if completed:
         existing, _ = published_manifest(github, release)
-        require(existing == build, 'Existing nightly has a different source commit')
+        require(existing.version == build.version and existing.sha == build.sha,
+                'Existing nightly has a different source commit')
     output(version=build.version, sha=build.sha, tag=build.tag, build=not completed)
 
 
 def publish(github, build, assets, directory):
     """Retry draft uploads only. Published packages and tags are never overwritten."""
     verify_files(directory, build, assets)
+    metadata_build, metadata_assets = read_manifest(directory / 'release.json')
+    require(metadata_build == build and sorted(metadata_assets, key=lambda a: a.target) ==
+            sorted(assets, key=lambda a: a.target), 'Release metadata does not match its packages')
     tag_sha = check_tag(github, build)
     release = github.release(build.tag)
     if release and not release['draft']:
@@ -291,6 +316,10 @@ def publish(github, build, assets, directory):
         return
     files = [directory / asset.name for asset in assets]
     files += [directory / 'release.json', directory / 'SHA256SUMS']
+    if build.build_number:
+        from update_signing import verify
+        verify(directory / 'release.json')
+        files.append(directory / 'release.json.sig')
     if release:
         require({item['name'] for item in release['assets']} <= {path.name for path in files},
                 'Draft contains unexpected assets; inspect it before retrying')
@@ -328,13 +357,14 @@ def publish(github, build, assets, directory):
 
 
 def publish_nightly(github, sha, directory):
-    build = Build(version(), sha)
+    build = Build(version(), sha, build_number=int(os.environ.get('SNIPLET_BUILD_NUMBER', '0')))
+    require(build.build_number > 0, 'SNIPLET_BUILD_NUMBER is required for update releases')
     current = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     require(current == sha, 'Checkout does not match the requested source commit')
     assets = []
     for target in TARGETS:
         data = json.loads((directory / (target + '.json')).read_text())
-        require(Build(data['version'], data['sha'], data['channel']) == build,
+        require(Build(data['version'], data['sha'], data['channel'], data.get('build_number', 0)) == build,
                 'Platform packages came from different builds')
         assets.append(Asset(**data['asset']))
     write_metadata(directory, build, assets)
@@ -347,7 +377,7 @@ def promote(github, tag):
     require(release is not None, 'Nightly release not found')
     build, assets = published_manifest(github, release)
     require(build.channel == 'nightly', 'Select a nightly release')
-    stable = Build(build.version, build.sha, 'stable')
+    stable = Build(build.version, build.sha, 'stable', build.build_number)
     check_tag(github, stable)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
@@ -398,5 +428,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as error:
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         raise SystemExit(f'Release failed: {error}') from error

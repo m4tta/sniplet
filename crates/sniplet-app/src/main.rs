@@ -19,6 +19,7 @@ mod theme;
 mod tools;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray_panel;
+mod updates;
 mod window_picker;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -28,6 +29,19 @@ use sniplet_core::Document;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--build-info") {
+        println!(
+            "{}",
+            serde_json::to_string(&sniplet_platform::updates::current_build())?
+        );
+        return Ok(());
+    }
+    if let Some(parent) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--update-parent="))
+    {
+        sniplet_platform::updates::wait_for_parent(parent.parse()?)?;
+    }
     if args.iter().any(|arg| arg == "--help") {
         println!(
             "Sniplet — cross-platform screenshot editor\n\nUsage: sniplet [IMAGE | PROJECT.sniplet] [--demo] [--settings] [--smoke]\n       sniplet --self-test [OUTPUT_DIRECTORY]\n\n--demo       Open an original generated sample image\n--settings   Open the settings window\n--smoke      Open a native GPUI window and quit after 3 seconds\n--self-test  Exercise capture, annotation, PNG export, and image reload\n"
@@ -42,7 +56,19 @@ fn main() -> anyhow::Result<()> {
         );
     }
     let mut startup_messages = Vec::new();
-    let document_result = if args.iter().any(|arg| arg == "--demo") {
+    let restoring = args.iter().any(|arg| arg == updates::RESTORE_ARG);
+    let document_result = if restoring {
+        let restored = sniplet_platform::SettingsStore::for_app()
+            .map_err(anyhow::Error::from)
+            .and_then(|store| updates::restore(&store));
+        startup_messages.push(match &restored {
+            Ok(_) => "Sniplet is updated. Your screenshot is back.".to_owned(),
+            Err(error) => {
+                format!("Sniplet is updated, but your screenshot could not come back: {error}")
+            }
+        });
+        Ok(restored.ok())
+    } else if args.iter().any(|arg| arg == "--demo") {
         Ok(Some(runtime::demo()))
     } else if let Some(path) = args.iter().find(|arg| !arg.starts_with('-')) {
         (|| -> anyhow::Result<Option<Document>> {
@@ -62,6 +88,7 @@ fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let recovered = restoring && document.is_some();
     let settings = match sniplet_platform::SettingsStore::for_app().and_then(|store| store.load()) {
         Ok(settings) => settings,
         Err(error) => {
@@ -129,6 +156,9 @@ fn main() -> anyhow::Result<()> {
             })
         })
         .expect("Could not open Sniplet");
+        if recovered && let Ok(store) = sniplet_platform::SettingsStore::for_app() {
+            updates::clear_recovery(&store);
+        }
         if args.iter().any(|arg| arg == "--settings") {
             let _ = handle.update(cx, |_, window, cx| {
                 editor.update(cx, |editor, cx| {

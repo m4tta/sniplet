@@ -5,6 +5,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -251,6 +252,8 @@ class ReleaseTests(unittest.TestCase):
             release.write_metadata(directory, build, [bad, *assets[1:]])
 
     def test_linux_archive_keeps_execute_permission(self):
+        if os.name == 'nt':
+            self.skipTest('Windows does not store Unix execute bits')
         bundle = self.root / 'portable'
         (bundle / 'bin').mkdir(parents=True)
         binary = bundle / 'bin/sniplet'
@@ -276,6 +279,75 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release.subprocess, 'run', return_value=response):
             with self.assertRaises(ValueError):
                 github.api('releases/1', 'PATCH', {'draft': False})
+
+    def signing_key(self):
+        import update_signing
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        key = Ed25519PrivateKey.generate()
+        public = self.root / 'public.hex'
+        public.write_text(key.public_key().public_bytes_raw().hex())
+        self.enterContext(patch.object(update_signing, 'PUBLIC_KEY', public))
+        private = key.private_bytes(serialization.Encoding.PEM,
+                                    serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption()).decode()
+        self.enterContext(patch.dict('os.environ', {'UPDATER_SIGNING_KEY': private}))
+
+    def test_key_setup_creates_a_matching_pair_and_refuses_replacement(self):
+        import update_signing
+        from cryptography.hazmat.primitives import serialization
+        private = self.root / 'private' / 'update.pem'
+        public = self.root / 'update-public.hex'
+        with patch.object(update_signing, 'PUBLIC_KEY', public):
+            update_signing.initialize(private, False)
+            key = serialization.load_pem_private_key(private.read_bytes(), password=None)
+            self.assertEqual(public.read_text().strip(), key.public_key().public_bytes_raw().hex())
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                update_signing.initialize(private, False)
+            backup = self.root / 'backup' / 'update.pem'
+            update_signing.backup(private, backup)
+            copied = serialization.load_pem_private_key(backup.read_bytes(), password=None)
+            self.assertEqual(copied.public_key().public_bytes_raw(), key.public_key().public_bytes_raw())
+            with self.assertRaises(FileExistsError):
+                update_signing.backup(private, backup)
+            with self.assertRaisesRegex(ValueError, 'outside the repository'):
+                update_signing.backup(private, release.ROOT / 'private-key.pem')
+
+    def test_signed_promotion_keeps_build_identity_and_resigns_stable_metadata(self):
+        import update_signing
+        self.signing_key()
+        build = release.Build('0.2.0', SHA, build_number=42)
+        directory, assets = self.packages(build)
+        release.publish(self.github, build, assets, directory)
+        self.assertEqual(len(self.github.files[build.tag]), 7)
+        release.promote(self.github, build.tag)
+        stable = release.Build(build.version, build.sha, 'stable', 42)
+        metadata = json.loads(self.github.files[stable.tag]['release.json'])
+        self.assertEqual(metadata['schema'], 2)
+        self.assertEqual(metadata['build_number'], 42)
+        self.assertEqual(metadata['channel'], 'stable')
+        self.assertNotEqual(self.github.files[stable.tag]['release.json.sig'],
+                            self.github.files[build.tag]['release.json.sig'])
+        for name in ['release.json', 'release.json.sig']:
+            (self.root / name).write_bytes(self.github.files[stable.tag][name])
+        update_signing.verify(self.root / 'release.json')
+        for asset in assets:
+            self.assertEqual(self.github.files[stable.tag][stable.filename(asset.target)],
+                             self.github.files[build.tag][asset.name])
+
+    def test_changed_signature_or_manifest_stops_promotion_before_any_write(self):
+        self.signing_key()
+        build = release.Build('0.2.0', SHA, build_number=42)
+        directory, assets = self.packages(build)
+        release.publish(self.github, build, assets, directory)
+        self.github.files[build.tag]['release.json'] += b' '
+        writes = len(self.github.writes)
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            release.promote(self.github, build.tag)
+        self.assertEqual(len(self.github.writes), writes)
+        with patch.dict('os.environ', {'UPDATER_SIGNING_KEY': ''}):
+            with self.assertRaisesRegex(ValueError, 'UPDATER_SIGNING_KEY'):
+                release.write_metadata(directory, build, assets)
 
 
 if __name__ == '__main__':

@@ -179,7 +179,7 @@ pub struct Editor {
     document_revision: u64,
     pub(crate) load_revision: u64,
     settings_revision: u64,
-    settings_save_running: bool,
+    pub(crate) settings_save_running: bool,
     pub(crate) settings_save_result: Option<(u64, Option<String>)>,
     #[cfg(all(test, feature = "ui-tests"))]
     pub(crate) preview_frames: usize,
@@ -203,6 +203,7 @@ pub struct Editor {
     pub scroll_frames: Vec<Arc<image::RgbaImage>>,
     pub scroll_region: Option<ImageRect>,
     pub last_capture: Option<crate::area_capture::Region>,
+    pub(crate) updates: crate::updates::Updates,
 }
 
 impl Editor {
@@ -232,7 +233,9 @@ impl Editor {
         cx.on_app_quit(|_, cx| {
             cx.spawn(async move |this, cx| {
                 while this
-                    .read_with(cx, |editor, _| editor.settings_save_running)
+                    .read_with(cx, |editor, _| {
+                        editor.settings_save_running || editor.updates.installing()
+                    })
                     .unwrap_or(false)
                 {
                     cx.background_executor()
@@ -326,12 +329,17 @@ impl Editor {
             scroll_frames: vec![],
             scroll_region: None,
             last_capture: None,
+            updates: crate::updates::Updates::new(),
         };
         this.refresh(cx);
+        crate::updates::schedule(cx);
         this
     }
 
     pub fn load(&mut self, document: Document, label: &str, cx: &mut Context<Self>) {
+        if self.updates.installing() {
+            return;
+        }
         self.load_revision += 1;
         self.document_revision += 1;
         self.finish_arrow_size_edit();
@@ -1465,6 +1473,9 @@ impl Editor {
     }
 
     pub fn command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if self.updates.installing() {
+            return;
+        }
         self.finish_arrow_size_edit();
         self.panel = None;
         self.measure = None;
@@ -2271,6 +2282,23 @@ impl Editor {
     fn render_app_menu(&self, cx: &mut Context<Self>) -> Popover {
         let editor = cx.entity().downgrade();
         let hotkeys = self.settings.hotkeys.clone();
+        let update = self.waiting_update_label();
+        let dot = update.is_some().then(|| {
+            let dot = div()
+                .id("update-dot")
+                .absolute()
+                .top(px(5.0))
+                .right(px(5.0))
+                .size(px(7.0))
+                .rounded_full()
+                .bg(rgb(0x0a84ff));
+            #[cfg(feature = "ui-tests")]
+            let dot = {
+                use gpui_kit::test::TestSupportExt;
+                dot.test_support()
+            };
+            dot
+        });
         Popover::new("app-menu-popover")
             .appearance(false)
             // The trigger spans the toolbar's height so the menu opens just below it.
@@ -2288,20 +2316,36 @@ impl Editor {
             .trigger(
                 Button::new("app-menu")
                     .ghost()
+                    .relative()
                     .icon(tool_icon("scissors"))
-                    .tooltip("Sniplet · capture and settings"),
+                    .tooltip("Sniplet · capture and settings")
+                    .children(dot),
             )
             .content(move |_, _, cx| {
-                let editor = editor.clone();
-                quick_menu::view(
+                let menu_editor = editor.clone();
+                let menu = quick_menu::view(
                     &quick_menu::EDITOR,
                     &hotkeys,
                     move |action, window, cx| {
-                        let _ = editor.update(cx, |editor, cx| editor.choose(action, window, cx));
+                        let _ =
+                            menu_editor.update(cx, |editor, cx| editor.choose(action, window, cx));
                     },
                     cx,
+                );
+                let Some(label) = update.clone() else {
+                    return menu.shadow_lg();
+                };
+                let editor = editor.clone();
+                menu.shadow_lg().child(
+                    Button::new("menu-update")
+                        .primary()
+                        .icon(tool_icon("download"))
+                        .label(label)
+                        .w_full()
+                        .on_click(move |_, _, cx| {
+                            let _ = editor.update(cx, |editor, cx| editor.show_update_notice(cx));
+                        }),
                 )
-                .shadow_lg()
             })
     }
 
@@ -3001,6 +3045,14 @@ impl Editor {
         });
         cx.notify();
     }
+    pub(crate) fn settings_store(&self) -> anyhow::Result<SettingsStore> {
+        #[cfg(test)]
+        if let Some(path) = &self.settings_path {
+            return Ok(SettingsStore::at(path));
+        }
+        Ok(SettingsStore::for_app()?)
+    }
+
     pub(crate) fn persist_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_revision += 1;
         self.save_settings(cx);
@@ -3014,15 +3066,10 @@ impl Editor {
         let revision = self.settings_revision;
         let load_revision = self.load_revision;
         let settings = self.settings.clone();
-        let store = SettingsStore::for_app();
-        #[cfg(test)]
-        let store = self
-            .settings_path
-            .as_ref()
-            .map_or(store, |path| Ok(SettingsStore::at(path)));
+        let store = self.settings_store();
         let task = cx
             .background_executor()
-            .spawn(async move { store.and_then(|store| store.save(&settings)) });
+            .spawn(async move { store.and_then(|store| Ok(store.save(&settings)?)) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -3045,6 +3092,9 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.updates.installing() {
+            return crate::updates::installing_screen(cx);
+        }
         let measurement = self
             .measure
             .as_ref()
@@ -3444,6 +3494,7 @@ impl Render for Editor {
                 .text_color(cx.theme().muted_foreground)
                 .child(self.status.clone()),
         );
+        canvas = canvas.children(self.render_update_notice(cx));
         canvas = canvas.child(self.render_panel(window, cx));
         div()
             .size_full()
@@ -3484,6 +3535,7 @@ impl Render for Editor {
                     this.load_path(path.clone(), window, cx);
                 }
             }))
+            .into_any_element()
     }
 }
 
