@@ -640,6 +640,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::zombie_processes,
+        reason = "The replacement waits for this process to exit; Unix then adopts and reaps it"
+    )]
     fn unix_install_replaces_the_complete_running_bundle() {
         const CHILD: &str = "SNIPLET_UPDATE_BUNDLE_TEST";
         if std::env::var(CHILD).as_deref() == Ok("restarted") {
