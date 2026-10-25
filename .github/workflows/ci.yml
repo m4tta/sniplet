@@ -49,7 +49,7 @@ jobs:
             libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev \
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxrandr-dev \
             libdbus-1-dev libpipewire-0.3-dev libegl-dev libgbm-dev \
-            libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
+            libssl-dev libzstd-dev vulkan-validationlayers libvulkan1 xvfb xauth
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,6 +59,10 @@ jobs:
       - name: Verify workspace and UI test feature
         if: runner.os != 'Windows'
         run: bash scripts/verify.sh all
+
+      - name: Verify Linux clipboard ownership across processes
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test -p sniplet-platform --test clipboard_linux --locked -- --ignored
 
       - name: Verify workspace and UI test feature
         if: runner.os == 'Windows'

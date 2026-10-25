@@ -418,6 +418,25 @@ Use a fixture with fine one-pixel lines, flat-color regions, text, transparency,
 2. Load an image from the clipboard and paste another image as a movable overlay.
 3. Copy an edited image and paste it into at least one native application and one browser application.
 4. Verify graceful errors for non-image clipboard data, corrupt files, unwritable destinations, and a destination disappearing during save.
+5. On Linux, repeat full-image, selected-region, and automatic capture copies
+   without a clipboard manager. After each copy completes, hide the editor and
+   paste repeatedly from another application. Replace the image with copied
+   text, then copy another image and verify the new pixels. Keep Sniplet running;
+   clipboard retention after quitting depends on the desktop clipboard manager.
+
+The Linux ownership regression can also be tested on an isolated X11 display:
+
+```sh
+xvfb-run -a cargo test -p sniplet-platform --test clipboard_linux --locked -- --ignored
+```
+
+`copied_data_outlives_worker_and_handle` writes on a worker, joins it, and reads
+from fresh processes after the public clipboard handle has been dropped. It
+compares RGBA dimensions and pixels (including transparency) and Unicode text,
+replaces image/text contents repeatedly, and pastes each value twice. No clipboard
+manager runs on this display. Linux CI runs this test separately from the ordinary
+headless suite. It verifies X11 ownership and data transfer; native application
+interoperability and Wayland compositor behavior remain separate desktop checks.
 
 ### 7. Pin window
 
@@ -839,6 +858,36 @@ The signed debug app is running. Its executable SHA-256 is
 `2bbc904ccd6c418e45dcf04d9801e9cf06008132d75cc9cf74ae077a5712d57e`.
 Profiles, counts, and the native PNG export are under
 `artifacts/responsiveness-2026-10-06/`.
+
+## Linux clipboard lifetime regression, October 25, 2026
+
+Copy used to drop the last native clipboard handle when its worker finished.
+On Linux this stopped serving the copied data, even though the UI reported
+"Image copied". The platform adapter now retains one lazily initialized owner
+for the process lifetime and serializes operations across short-lived handles.
+Image copy, capture auto-copy, OCR, colors, and upload links share this adapter.
+
+The isolated X11 regression above failed on the original `a27d136` source with
+`ContentNotAvailable` in an independent reader. It passed on the corrected
+working tree using Ubuntu 24.04, Rust 1.99.1, and Xvfb without a clipboard
+manager. It verifies exact RGBA pixels, transparency, Unicode text, repeated
+pastes, and replacement between image and text after each copying worker exits.
+This is development evidence, not stable Linux release sign-off.
+
+Formatting, the locked desktop build, all 36 platform tests, all 93 app/UI tests,
+and strict platform/app Clippy passed. The rebuilt app also passed native X11
+input checks on a 1600 × 1100 Xvfb/Openbox desktop without a clipboard manager:
+Ctrl+C copied a 160 × 100 fixture, and the area-capture shortcut automatically
+copied a 321 × 241 capture. After minimizing the editor, independent `xclip`
+clients pasted each image twice with exact RGBA pixels and an advertised
+`image/png` target. Results and the executable SHA-256 are recorded in
+`artifacts/clipboard-fix/native-result.json`; the repeatable checks and logs are
+in the same directory.
+
+The native Tab color-copy probe did not change the clipboard, even after
+restoring focus. It remains a separate shortcut/input follow-up; native text
+copy is not qualified by this run. The platform-level Unicode text lifetime
+regression passed. Wayland and physical desktop interoperability remain open.
 
 ## OS-specific release gates
 
