@@ -194,10 +194,14 @@ fn register_hotkeys(
     (bindings, errors)
 }
 
-/// Hide the editor without dropping its document or sending it to the Dock.
+/// Hide the editor without dropping its document or leaving a taskbar button.
 pub fn hide_editor(window: &Window, _cx: &mut App) {
     #[cfg(target_os = "macos")]
     if crate::macos::hide_editor(window) {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if has_tray(_cx) && crate::windows::hide_editor(window) {
         return;
     }
     window.minimize_window();
@@ -206,6 +210,8 @@ pub fn hide_editor(window: &Window, _cx: &mut App) {
 pub fn show_editor(window: &Window, cx: &mut App) {
     #[cfg(target_os = "macos")]
     crate::macos::show_dock_icon(window);
+    #[cfg(target_os = "windows")]
+    crate::windows::show_editor(window);
     window.activate_window();
     cx.activate(true);
 }
@@ -297,6 +303,19 @@ pub fn install(
         editor_window: Some(handle),
         escape: None,
         next_escape_id: 1,
+    });
+    #[cfg(target_os = "windows")]
+    let _ = handle.update(cx, |_, window, _| {
+        window
+            .observe_window_visibility(|visibility, window, cx| {
+                if visibility == WindowVisibility::Hidden
+                    && has_tray(cx)
+                    && crate::windows::is_minimized(window)
+                {
+                    hide_editor(window, cx);
+                }
+            })
+            .detach();
     });
     #[cfg(target_os = "macos")]
     {

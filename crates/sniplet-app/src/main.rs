@@ -20,6 +20,8 @@ mod tools;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray_panel;
 mod window_picker;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use gpui_kit::{component::TitleBar, *};
 use sniplet_core::Document;

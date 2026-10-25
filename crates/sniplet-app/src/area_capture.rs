@@ -563,7 +563,13 @@ fn open(
             .map(|frame| display_image(frame.image.clone()));
         let live = image.is_none();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+            // Windows adds a frame to a windowed popup. Fullscreen removes that
+            // frame and aligns the client area with the monitor's physical pixels.
+            window_bounds: Some(if cfg!(target_os = "windows") {
+                WindowBounds::Fullscreen(window_bounds)
+            } else {
+                WindowBounds::Windowed(window_bounds)
+            }),
             titlebar: None,
             kind: WindowKind::PopUp,
             is_movable: false,
