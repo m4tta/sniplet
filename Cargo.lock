@@ -7326,7 +7326,7 @@ dependencies = [
 
 [[package]]
 name = "sniplet-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -7349,7 +7349,7 @@ dependencies = [
 
 [[package]]
 name = "sniplet-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -7362,7 +7362,7 @@ dependencies = [
 
 [[package]]
 name = "sniplet-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "core-foundation 0.10.1",
