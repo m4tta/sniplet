@@ -419,7 +419,8 @@ class ReleaseTests(unittest.TestCase):
         bundle = self.root / 'source/Sniplet.app'
         binary = bundle / 'Contents/MacOS/Sniplet'
         binary.parent.mkdir(parents=True)
-        shutil.copy2('/usr/bin/true', binary)
+        shutil.copyfile('/usr/bin/true', binary)
+        binary.chmod(0o755)
         resources = bundle / 'Contents/Resources'
         resources.mkdir()
         (resources / 'manual.txt').write_text('Bundle resource fixture')
