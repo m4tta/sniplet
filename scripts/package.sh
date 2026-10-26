@@ -107,6 +107,8 @@ case "$(uname -s)" in
 PLIST
         codesign --force --timestamp=none --sign "$signing_identity" "$bundle"
         printf 'Created macOS application bundle: %s\n' "$bundle"
+        python3 "$workspace_root/scripts/macos_dmg.py" "$bundle" \
+            "$output_root/Sniplet$bundle_suffix.dmg"
         ;;
     Linux)
         binary="$target_dir/$profile/sniplet"

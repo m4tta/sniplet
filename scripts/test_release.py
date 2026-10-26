@@ -7,7 +7,10 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -96,7 +99,7 @@ class ReleaseTests(unittest.TestCase):
         self.enterContext(redirect_stdout(io.StringIO()))
         self.enterContext(patch.dict('os.environ', {'GITHUB_OUTPUT': ''}))
 
-    def packages(self, build, name=None):
+    def packages(self, build, name=None, installers=False):
         directory = self.root / (name or build.tag)
         directory.mkdir()
         assets = []
@@ -104,6 +107,12 @@ class ReleaseTests(unittest.TestCase):
             path = directory / build.filename(target)
             path.write_bytes((target + '\n' + build.sha).encode())
             assets.append(release.Asset(target, path.name, release.checksum(path), path.stat().st_size))
+        if installers:
+            for target in ['macos-arm64', 'macos-x64']:
+                path = directory / build.filename(target, 'installer')
+                path.write_bytes((target + '\nDMG\n' + build.sha).encode())
+                assets.append(release.Asset(target, path.name, release.checksum(path),
+                                            path.stat().st_size, 'installer'))
         release.write_metadata(directory, build, assets)
         return directory, assets
 
@@ -348,6 +357,94 @@ class ReleaseTests(unittest.TestCase):
         with patch.dict('os.environ', {'UPDATER_SIGNING_KEY': ''}):
             with self.assertRaisesRegex(ValueError, 'UPDATER_SIGNING_KEY'):
                 release.write_metadata(directory, build, assets)
+
+    def test_signed_disk_images_promote_without_changing_update_packages(self):
+        self.signing_key()
+        build = release.Build('0.2.0', SHA, build_number=42)
+        directory, assets = self.packages(build, installers=True)
+        metadata = json.loads((directory / 'release.json').read_text())
+        self.assertEqual(len(metadata['assets']), 4)
+        self.assertEqual(len(metadata['installers']), 2)
+        self.assertNotIn('kind', metadata['assets'][0])
+        release.publish(self.github, build, assets, directory)
+        self.assertEqual(len(self.github.files[build.tag]), 9)
+        release.promote(self.github, build.tag)
+        stable = release.Build(build.version, build.sha, 'stable', build.build_number)
+        for asset in assets:
+            self.assertEqual(self.github.files[stable.tag][stable.filename(asset.target, asset.kind)],
+                             self.github.files[build.tag][asset.name])
+        self.assertEqual(len(self.github.files[stable.tag]['SHA256SUMS'].splitlines()), 6)
+        uploads = self.github.uploads
+        release.promote(self.github, build.tag)
+        self.assertEqual(self.github.uploads, uploads)
+        disk = next(asset for asset in assets if asset.kind == 'installer')
+        self.github.files[build.tag][disk.name] = b'changed DMG'
+        writes = len(self.github.writes)
+        with self.assertRaisesRegex(ValueError, 'size|checksum'):
+            release.promote(self.github, build.tag)
+        self.assertEqual(len(self.github.writes), writes)
+
+    def test_disk_image_metadata_rejects_missing_platforms_and_wrong_names(self):
+        build = release.Build('0.2.0', SHA)
+        directory, assets = self.packages(build, installers=True)
+        with self.assertRaisesRegex(ValueError, 'Both Mac'):
+            release.write_metadata(directory, build, assets[:-1])
+        bad = release.Asset('macos-x64', '../outside.dmg', 'a' * 64, 1, 'installer')
+        with self.assertRaisesRegex(ValueError, 'filename'):
+            release.write_metadata(directory, build, [*assets[:-1], bad])
+
+    def test_nightly_collects_both_disk_images_and_rejects_missing_ones(self):
+        self.signing_key()
+        build = release.Build('0.2.0', SHA, build_number=42)
+        directory, assets = self.packages(build, installers=True)
+        for target in release.TARGETS:
+            release.write_json(directory / (target + '.json'), {
+                **release.asdict(build), 'assets': [release.asdict(a) for a in assets if a.target == target],
+            })
+        with patch.object(release, 'version', return_value=build.version), \
+                patch.object(release.subprocess, 'check_output', return_value=build.sha), \
+                patch.dict('os.environ', {'SNIPLET_BUILD_NUMBER': '42'}):
+            release.publish_nightly(self.github, build.sha, directory)
+            self.assertEqual(len(self.github.files[build.tag]), 9)
+            path = directory / 'macos-arm64.json'
+            data = json.loads(path.read_text())
+            data['assets'] = [a for a in data['assets'] if a['kind'] == 'update']
+            release.write_json(path, data)
+            with self.assertRaisesRegex(ValueError, 'both Mac disk images'):
+                release.publish_nightly(self.github, build.sha, directory)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Disk images require macOS')
+    def test_mac_disk_image_can_install_the_signed_app_into_applications(self):
+        import macos_dmg
+        bundle = self.root / 'source/Sniplet.app'
+        binary = bundle / 'Contents/MacOS/Sniplet'
+        binary.parent.mkdir(parents=True)
+        shutil.copy2('/usr/bin/true', binary)
+        resources = bundle / 'Contents/Resources'
+        resources.mkdir()
+        (resources / 'manual.txt').write_text('Bundle resource fixture')
+        (resources / 'manual-link').symlink_to('manual.txt')
+        (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleExecutable': 'Sniplet', 'CFBundleIdentifier': 'io.github.m4tta.sniplet.dmg-test',
+            'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
+        }))
+        subprocess.run(['codesign', '--force', '--timestamp=none', '--sign', '-', str(bundle)], check=True)
+        image = macos_dmg.create(bundle, self.root / 'Sniplet.dmg')
+        mount = self.root / 'mount'
+        mount.mkdir()
+        subprocess.run(['hdiutil', 'attach', '-readonly', '-nobrowse', '-noautoopen',
+                        '-mountpoint', str(mount), str(image)], check=True)
+        try:
+            self.assertEqual(os.readlink(mount / 'Applications'), '/Applications')
+            installed = self.root / 'Applications/Sniplet.app'
+            subprocess.run(['ditto', str(mount / 'Sniplet.app'), str(installed)], check=True)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)
+            self.assertEqual((installed / 'Contents/Resources/manual.txt').read_text(),
+                             'Bundle resource fixture')
+            self.assertEqual(os.readlink(installed / 'Contents/Resources/manual-link'), 'manual.txt')
+            subprocess.run([str(installed / 'Contents/MacOS/Sniplet')], check=True)
+        finally:
+            subprocess.run(['hdiutil', 'detach', str(mount)], check=True)
 
 
 if __name__ == '__main__':

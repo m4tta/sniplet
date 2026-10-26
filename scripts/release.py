@@ -80,8 +80,9 @@ class Build:
         suffix = '-' + self.sha[:7] if self.channel == 'nightly' else ''
         return 'v' + self.version + suffix
 
-    def filename(self, target):
-        return f'Sniplet-{self.tag[1:]}-{target}{TARGETS[target][1]}'
+    def filename(self, target, kind='update'):
+        extension = '.dmg' if kind == 'installer' else TARGETS[target][1]
+        return f'Sniplet-{self.tag[1:]}-{target}{extension}'
 
 
 @dataclass(frozen=True)
@@ -90,10 +91,14 @@ class Asset:
     name: str
     sha256: str
     size: int
+    kind: str = 'update'
 
     def validate(self, build):
         require(self.target in TARGETS, 'Unknown package target')
-        require(self.name == build.filename(self.target), 'Unexpected package filename')
+        require(self.kind in ('update', 'installer'), 'Unknown package kind')
+        require(self.kind != 'installer' or self.target.startswith('macos-'),
+                'Only Mac packages have disk image installers')
+        require(self.name == build.filename(self.target, self.kind), 'Unexpected package filename')
         require(re.fullmatch(r'[0-9a-f]{64}', self.sha256), 'Invalid package checksum')
         require(type(self.size) is int and self.size > 0, 'Invalid package size')
 
@@ -108,12 +113,22 @@ def write_json(path, value):
 
 
 def manifest(build, assets, source_nightly=None):
-    require(len(assets) == len(TARGETS) and {asset.target for asset in assets} == set(TARGETS),
+    updates = [asset for asset in assets if asset.kind == 'update']
+    installers = [asset for asset in assets if asset.kind == 'installer']
+    require(len(updates) == len(TARGETS) and {asset.target for asset in updates} == set(TARGETS),
             'All four platform packages are required')
+    require(not installers or (len(installers) == 2 and
+            {asset.target for asset in installers} == {'macos-arm64', 'macos-x64'}),
+            'Both Mac disk image installers are required')
     for asset in assets:
         asset.validate(build)
     result = {'schema': 2 if build.build_number else 1, **asdict(build), 'tag': build.tag,
-              'assets': [asdict(asset) for asset in sorted(assets, key=lambda item: item.target)]}
+              'assets': [{key: value for key, value in asdict(asset).items() if key != 'kind'}
+                         for asset in sorted(updates, key=lambda item: item.target)]}
+    if installers:
+        result['installers'] = [
+            {key: value for key, value in asdict(asset).items() if key != 'kind'}
+            for asset in sorted(installers, key=lambda item: item.target)]
     if source_nightly:
         result['source_nightly'] = source_nightly
     return result
@@ -125,6 +140,8 @@ def read_manifest(path):
     build = Build(data['version'], data['sha'], data['channel'], data.get('build_number', 0))
     require(data['schema'] == (2 if build.build_number else 1), 'Build number does not match the manifest schema')
     assets = [Asset(**item) for item in data['assets']]
+    require(all(asset.kind == 'update' for asset in assets), 'Update archives must stay in assets')
+    assets += [Asset(**item, kind='installer') for item in data.get('installers', [])]
     require(data['tag'] == build.tag, 'Release tag does not match its source commit')
     manifest(build, assets)
     return build, assets
@@ -190,7 +207,12 @@ def package(target, sha):
     destination = directory / build.filename(target)
     archive_bundle(bundle, destination, target)
     asset = Asset(target, destination.name, checksum(destination), destination.stat().st_size)
-    write_json(directory / (target + '.json'), {**asdict(build), 'asset': asdict(asset)})
+    assets = [asset]
+    if target.startswith('macos-'):
+        image = directory / build.filename(target, 'installer')
+        (bundle.parent / 'Sniplet.dmg').replace(image)
+        assets.append(Asset(target, image.name, checksum(image), image.stat().st_size, 'installer'))
+    write_json(directory / (target + '.json'), {**asdict(build), 'assets': [asdict(a) for a in assets]})
 
 
 class GitHub:
@@ -301,16 +323,16 @@ def publish(github, build, assets, directory):
     """Retry draft uploads only. Published packages and tags are never overwritten."""
     verify_files(directory, build, assets)
     metadata_build, metadata_assets = read_manifest(directory / 'release.json')
-    require(metadata_build == build and sorted(metadata_assets, key=lambda a: a.target) ==
-            sorted(assets, key=lambda a: a.target), 'Release metadata does not match its packages')
+    require(metadata_build == build and sorted(metadata_assets, key=lambda a: a.name) ==
+            sorted(assets, key=lambda a: a.name), 'Release metadata does not match its packages')
     tag_sha = check_tag(github, build)
     release = github.release(build.tag)
     if release and not release['draft']:
         existing, published_assets = published_manifest(github, release)
         require(existing == build, 'Existing release has a different source commit')
         if build.channel == 'stable':
-            require(sorted(published_assets, key=lambda item: item.target) ==
-                    sorted(assets, key=lambda item: item.target),
+            require(sorted(published_assets, key=lambda item: item.name) ==
+                    sorted(assets, key=lambda item: item.name),
                     'Existing stable release has different packages')
         print(f'Reusing published release {build.tag}')
         return
@@ -331,6 +353,8 @@ def publish(github, build, assets, directory):
              'Packages: macOS Apple Silicon and Intel, Windows x64, and Linux x64.\n'
              'Use SHA256SUMS to check the downloads. Mac packages use ad hoc signing; '
              'they are not notarized. Linux packages need the native libraries listed in the README.\n')
+    if any(asset.kind == 'installer' for asset in assets):
+        notes += '\nMac: open the DMG, drag Sniplet to Applications, then eject the disk image. ZIP files are used for in-app updates.\n'
     if not nightly:
         notes += f'\nPromoted from `{Build(build.version, build.sha).tag}` without rebuilding.\n'
     if release is None:
@@ -366,7 +390,12 @@ def publish_nightly(github, sha, directory):
         data = json.loads((directory / (target + '.json')).read_text())
         require(Build(data['version'], data['sha'], data['channel'], data.get('build_number', 0)) == build,
                 'Platform packages came from different builds')
-        assets.append(Asset(**data['asset']))
+        target_assets = [Asset(**item) for item in data['assets']]
+        require(all(asset.target == target for asset in target_assets),
+                'Package metadata has the wrong platform')
+        assets.extend(target_assets)
+    require(sum(asset.kind == 'installer' for asset in assets) == 2,
+            'New nightly releases require both Mac disk images')
     write_metadata(directory, build, assets)
     publish(github, build, assets, directory)
 
@@ -387,9 +416,9 @@ def promote(github, tag):
         require((directory / 'SHA256SUMS').read_text() == expected, 'Nightly checksums do not match')
         promoted = []
         for asset in assets:
-            name = stable.filename(asset.target)
+            name = stable.filename(asset.target, asset.kind)
             (directory / asset.name).rename(directory / name)
-            promoted.append(Asset(asset.target, name, asset.sha256, asset.size))
+            promoted.append(Asset(asset.target, name, asset.sha256, asset.size, asset.kind))
         write_metadata(directory, stable, promoted, source_nightly=tag)
         publish(github, stable, promoted, directory)
 

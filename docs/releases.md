@@ -59,13 +59,26 @@ are uploaded without a second compression pass.
 
 | Download | Contents |
 | --- | --- |
+| `Sniplet-0.2.0-a1b2c3d-macos-arm64.dmg` | Mac Apple Silicon drag-to-Applications disk image |
+| `Sniplet-0.2.0-a1b2c3d-macos-x64.dmg` | Mac Intel drag-to-Applications disk image |
 | `Sniplet-0.2.0-a1b2c3d-macos-arm64.zip` | Mac Apple Silicon `.app` |
 | `Sniplet-0.2.0-a1b2c3d-macos-x64.zip` | Mac Intel `.app` |
 | `Sniplet-0.2.0-a1b2c3d-windows-x64.zip` | Portable Windows executable and support files |
 | `Sniplet-0.2.0-a1b2c3d-linux-x64.tar.gz` | Linux executable, desktop entry, icons, and support files |
-| `SHA256SUMS` | SHA-256 checksums for all four packages |
+| `SHA256SUMS` | SHA-256 checksums for all six packages |
 | `release.json` | Version, build number, channel, source SHA, package sizes, and checksums |
 | `release.json.sig` | Free Ed25519 signature for the exact manifest bytes |
+
+On Mac, download the DMG for your processor, open it, and drag Sniplet to the
+Applications shortcut. Eject the disk image, then open Sniplet from Applications.
+The ZIP packages remain available for in-app updates. Each DMG contains the
+same signed `.app` as its matching ZIP. Packaging mounts the image read-only,
+checks the app signature and executable, then ejects it before upload.
+
+The signed manifest keeps the four update archives in `assets` and puts the
+two DMGs in `installers`. Existing updater builds continue to read `assets`.
+Stable promotion copies all six package files without rebuilding them.
+Older releases without DMGs can still be verified and promoted.
 
 The publisher waits for all four jobs to pass. It uploads and verifies all files
 in a draft, then publishes the nightly as a GitHub prerelease. Nightlies do not

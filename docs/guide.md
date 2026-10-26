@@ -146,8 +146,12 @@ Create a portable release on the current host:
 ./scripts/package.sh
 ```
 
-The shell script creates `dist/Sniplet.app` on macOS or a portable Linux directory
-under `dist/`. Packages contain the executable, licenses, and documentation.
+The shell script creates `dist/Sniplet.app` and `dist/Sniplet.dmg` on macOS,
+or a portable Linux directory under `dist/`. On Mac, open the DMG and drag
+Sniplet to its Applications shortcut. Eject the image, then open the installed
+app. Debug packages use `Sniplet-debug.app` and `Sniplet-debug.dmg`.
+Mac packaging also requires Python 3.11 or newer.
+Packages contain the executable, licenses, and documentation.
 The app icon is included in the macOS bundle and Windows executable. Linux
 packages include a desktop entry and icons under `share/icons/hicolor`; install
 the `bin` and `share` contents into the matching directories in `~/.local` to
