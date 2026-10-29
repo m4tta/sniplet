@@ -7342,6 +7342,7 @@ dependencies = [
  "serde_json",
  "sniplet-core",
  "sniplet-platform",
+ "tempfile",
  "tray-icon",
  "windows-registry 0.6.1",
 ]

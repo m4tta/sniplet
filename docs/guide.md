@@ -89,8 +89,17 @@ Uploading, and Advanced pages in the sidebar. General includes appearance,
 the screenshots folder, image format, 1× saving for Retina captures, automatic
 clipboard copy, and hiding the editor after export. Saving at 1× keeps the
 editable capture and clipboard at full resolution. Advanced includes the
-scrolling frame limit, scrolling speed, and editor behavior. Shortcut changes
-apply immediately after saving. The macOS menu bar also offers Launch at Startup and
+scrolling frame limit, scrolling speed, editor behavior, and **Launch at startup**.
+Turn on Launch at startup to start Sniplet in the tray when you sign in.
+The editor stays closed until you use a capture shortcut or open it from the tray.
+Turn the switch off to remove startup registration. A manual launch opens the editor.
+You can also use `sniplet --minimized` to start in the tray. An image, project,
+`--demo`, or `--settings` takes priority and opens a window. If the tray is
+unavailable, Sniplet opens the editor so that you can still use the app.
+Windows uses the current user's Run registry entry. Linux uses an XDG autostart
+entry. macOS uses Login Items and requires a packaged app; the system can ask
+you to approve it. Keep the app in a fixed location after you enable startup.
+Shortcut changes apply immediately after saving. The macOS menu bar also offers
 upward scrolling capture under More. Upload is disabled until a destination is configured.
 General → Window screenshot background offers Wallpaper, Transparent, Solid color,
 and Trim shadow. Padded modes add a soft shadow and 0–120 points of padding
@@ -214,6 +223,16 @@ build outputs, and local research downloads are excluded from Git.
 ./scripts/verify.sh --native
 ```
 
+On Windows, check the startup window states after a build:
+
+```powershell
+cargo build -p sniplet-app --locked
+python scripts/test_startup.py target/debug/sniplet.exe
+```
+
+The check tests a minimized launch, a manual launch, and an explicit request
+to open Settings. It stops only its own processes and does not change startup registration.
+
 Generate a repeatable arrow rendering fixture for visual review:
 
 ```sh
@@ -244,8 +263,7 @@ scrolling, pin, project, and upload paths. Several features are
 still incomplete. Window presentation modes, cursor capture,
 manual-scroll speed and idle feedback, advanced text/freehand/highlighter
 styles, comparison GIF, print, upload history, contrast checking, URL-scheme
-commands, and OS credential-store integration are not implemented. Launch at
-Startup is implemented for packaged macOS apps; other platforms remain open.
+commands, and OS credential-store integration are not implemented.
 Some tools still need more property controls. See the
 [feature checklist](parity.md) for implementation and test status.
 

@@ -18,23 +18,19 @@ struct Services {
 }
 impl Global for Services {}
 
-#[cfg(target_os = "macos")]
 #[derive(Default)]
 pub(crate) struct StartupState {
     pub enabled: bool,
     pub busy: bool,
     generation: u64,
 }
-#[cfg(target_os = "macos")]
 impl Global for StartupState {}
 
-#[cfg(target_os = "macos")]
 pub(crate) fn startup_state(cx: &App) -> (bool, bool) {
     cx.try_global::<StartupState>()
         .map_or((false, false), |state| (state.enabled, state.busy))
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn change_startup(enabled: bool, cx: &mut App) -> Task<Result<bool, String>> {
     if cx.try_global::<StartupState>().is_none() {
         cx.set_global(StartupState::default());
@@ -44,7 +40,9 @@ pub(crate) fn change_startup(enabled: bool, cx: &mut App) -> Task<Result<bool, S
     cx.spawn(async move |cx| {
         let result = cx
             .background_executor()
-            .spawn(async move { crate::macos::set_launch_at_startup(enabled) })
+            .spawn(async move {
+                crate::startup::set_enabled(enabled).map_err(|error| error.to_string())
+            })
             .await;
         cx.update(|cx| {
             let state = cx.global_mut::<StartupState>();
@@ -298,11 +296,10 @@ pub fn install(
         escape: None,
         next_escape_id: 1,
     });
-    #[cfg(target_os = "macos")]
     {
         cx.set_global(StartupState::default());
         let editor = editor.clone();
-        // ServiceManagement can wait on another process. Keep that wait off
+        // OS startup APIs can wait on another process. Keep that wait off
         // both the UI thread and the shortcut/menu event polling task.
         cx.spawn(async move |cx| {
             loop {
@@ -316,11 +313,14 @@ pub fn install(
                 }
                 let enabled = cx
                     .background_executor()
-                    .spawn(async { crate::macos::launch_at_startup() })
+                    .spawn(async { crate::startup::enabled() })
                     .await;
                 cx.update(|cx| {
                     let state = cx.global_mut::<StartupState>();
-                    if !state.busy && state.generation == generation {
+                    if !state.busy
+                        && state.generation == generation
+                        && let Ok(enabled) = enabled
+                    {
                         let changed = state.enabled != enabled;
                         state.enabled = enabled;
                         if changed {

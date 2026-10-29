@@ -804,30 +804,42 @@ impl SettingsWindow {
                 )),
                 cx,
             ));
-        #[cfg(target_os = "macos")]
         let content = content.child(section(
             "Startup",
             card(cx).child(row(
                 "Launch at startup",
-                "Open Sniplet when you sign in.",
+                "Start in the tray when you sign in. The editor stays closed.",
                 Switch::new("launch-at-startup")
                     .checked(crate::runtime::startup_state(cx).0)
                     .disabled(crate::runtime::startup_state(cx).1)
                     .on_click(cx.listener(|this, enabled: &bool, _, cx| {
-                        let task = crate::runtime::change_startup(*enabled, cx);
+                        let enabled = *enabled;
+                        let task = crate::runtime::change_startup(enabled, cx);
                         let editor = this.editor.clone();
                         cx.notify();
                         cx.spawn(async move |this, cx| {
                             let result = task.await;
                             let _ = this.update(cx, |this, cx| {
                                 match result {
-                                    Ok(true) => { this.message = "Startup preference saved".into(); this.error = false; cx.notify(); }
-                                    Ok(false) => this.fail("Enable Sniplet in System Settings → General → Login Items.", cx),
+                                    Ok(actual) if actual == enabled => {
+                                        this.message = "Startup preference saved".into();
+                                        this.error = false;
+                                        cx.notify();
+                                    }
+                                    Ok(_) => this.fail(
+                                        if cfg!(target_os = "macos") {
+                                            "Enable Sniplet in System Settings → General → Login Items."
+                                        } else {
+                                            "Allow Sniplet to start in your system's startup settings."
+                                        },
+                                        cx,
+                                    ),
                                     Err(error) => this.fail(error, cx),
                                 }
                                 editor.update(cx, |_, cx| cx.notify());
                             });
-                        }).detach();
+                        })
+                        .detach();
                     })),
                 cx,
             )),

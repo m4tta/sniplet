@@ -15,6 +15,7 @@ mod menu_bar;
 mod quick_menu;
 mod runtime;
 mod settings_window;
+mod startup;
 mod theme;
 mod tools;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -28,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help") {
         println!(
-            "Sniplet — cross-platform screenshot editor\n\nUsage: sniplet [IMAGE | PROJECT.sniplet] [--demo] [--settings] [--smoke]\n       sniplet --self-test [OUTPUT_DIRECTORY]\n\n--demo       Open an original generated sample image\n--settings   Open the settings window\n--smoke      Open a native GPUI window and quit after 3 seconds\n--self-test  Exercise capture, annotation, PNG export, and image reload\n"
+            "Sniplet — cross-platform screenshot editor\n\nUsage: sniplet [IMAGE | PROJECT.sniplet] [--demo] [--settings] [--minimized] [--smoke]\n       sniplet --self-test [OUTPUT_DIRECTORY]\n\n--demo       Open an original generated sample image\n--settings   Open the settings window\n--minimized  Start in the tray without opening the editor\n--smoke      Open a native GPUI window and quit after 3 seconds\n--self-test  Exercise capture, annotation, PNG export, and image reload\n"
         );
         return Ok(());
     }
@@ -73,6 +74,11 @@ fn main() -> anyhow::Result<()> {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.on_reopen(runtime::reopen);
     app.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        let login_launch = macos::launched_at_login();
+        #[cfg(not(target_os = "macos"))]
+        let login_launch = false;
+        let minimized = !smoke && startup::start_minimized(&args, login_launch);
         gpui_kit::init(cx);
         if let Err(error) = cx
             .text_system()
@@ -81,6 +87,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Could not load the bundled font: {error}");
         }
         let mut options = TitleBar::window_options();
+        options.show = !minimized;
+        options.focus = !minimized;
         #[cfg(target_os = "macos")]
         if let Some(titlebar) = options.titlebar.as_mut() {
             // Native Mac buttons are 14 points high; center them on the toolbar.
@@ -145,7 +153,13 @@ fn main() -> anyhow::Result<()> {
         } else {
             runtime::install(handle, editor, &hotkeys, cx);
         }
-        cx.activate(true);
+        let _ = handle.update(cx, |_, window, cx| {
+            if minimized && runtime::has_tray(cx) {
+                runtime::hide_editor(window, cx);
+            } else {
+                runtime::show_editor(window, cx);
+            }
+        });
     });
     Ok(())
 }
