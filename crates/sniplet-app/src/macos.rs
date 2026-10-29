@@ -4,7 +4,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSCursor, NSEvent,
     NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowStyleMask,
 };
-use objc2_foundation::{NSNumber, NSPoint, ns_string};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSNumber, NSPoint, ns_string};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -177,6 +177,22 @@ pub fn show_dock_icon(window: &Window) {
     {
         NSApplication::sharedApplication(main_thread)
             .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
+}
+
+/// GPUI calls app.run inside applicationDidFinishLaunching, while this event is available.
+pub fn launched_at_login() -> bool {
+    let Some(event) = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent() else {
+        return false;
+    };
+    // Apple Event Manager constants: kAEOpenApplication, keyAEPropData,
+    // and keyAELaunchedAsLogInItem. These selectors use 32-bit FourCharCodes.
+    unsafe {
+        let event_id: u32 = msg_send![&event, eventID];
+        let property: Option<Retained<NSAppleEventDescriptor>> =
+            msg_send![&event, paramDescriptorForKeyword: u32::from_be_bytes(*b"prdt")];
+        event_id == u32::from_be_bytes(*b"oapp")
+            && property.is_some_and(|value| value.enumCodeValue() == u32::from_be_bytes(*b"lgit"))
     }
 }
 
