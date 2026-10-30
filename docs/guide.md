@@ -54,7 +54,13 @@ Right-drag or Space-drag pans. Ctrl/Cmd + wheel zooms at the pointer.
 Ctrl/Cmd + 1 fits, 0 uses actual pixels, and 2 fits the selection. Z + click
 zooms in (Alt zooms out). Tab copies the sampled color. The application menu
 auto-adjusts a raster selection to visible content; Ctrl/Cmd-click selects a monotone region.
-The application menu includes text recognition and QR decoding.
+Capture text/QR copies the recognized content and opens a centered, closable
+text area over the screenshot. You can edit the result and choose Copy text,
+or close it with Escape. For any opened image, choose the OCR tool (also in
+More tools) and drag over a region to recognize its text or QR code without
+changing the image. Ctrl/Cmd + O recognizes the current selection. The
+application menu also includes text recognition and QR decoding for the
+current image or selection.
 
 Save PNG/JPEG/WebP through the native save dialog. Ctrl/Cmd + Shift + S saves
 an editable `.sniplet` project and its `.source.png` companion; keep them together.

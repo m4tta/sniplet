@@ -37,4 +37,5 @@ objc2-service-management = { version = "0.3.2", default-features = false, featur
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+qrcode = "0.14"
 tempfile = "3"

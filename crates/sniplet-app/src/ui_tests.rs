@@ -789,11 +789,135 @@ fn old_open_and_qr_results_cannot_replace_a_new_capture(cx: &mut TestAppContext)
     .unwrap();
     cx.run_until_parked();
     assert_eq!(cx.read(|cx| editor.read(cx).status.clone()), "New capture");
+    assert!(cx.read(|cx| editor.read(cx).recognized_text.is_none()));
     assert_eq!(
         cx.read(|cx| editor.read(cx).document.as_ref().unwrap().width()),
         20
     );
     std::fs::remove_file(path).unwrap();
+}
+
+#[gpui_kit::test]
+fn recognition_previews_text_and_ocr_tool_reads_only_the_dragged_region(cx: &mut TestAppContext) {
+    use crate::editor::Command;
+
+    let (handle, editor) = editor(cx);
+    let mut image = image::RgbaImage::from_pixel(600, 300, image::Rgba([255, 255, 255, 255]));
+    for (x, text) in [(20, "Selected text"), (350, "Outside selection")] {
+        let qr = qrcode::QrCode::new(text.as_bytes())
+            .unwrap()
+            .render::<image::Luma<u8>>()
+            .min_dimensions(160, 160)
+            .build();
+        assert!(qr.width() < 220);
+        image::imageops::overlay(
+            &mut image,
+            &image::DynamicImage::ImageLuma8(qr).to_rgba8(),
+            x,
+            40,
+        );
+    }
+    let document = Document::new(image);
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            // Capture Text/QR loads its screenshot, then dispatches this same command.
+            editor.load(document, "Text/QR capture", cx);
+            editor.command(Command::Ocr, window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let input = editor
+            .read(cx)
+            .recognized_text
+            .clone()
+            .expect("text preview");
+        let text = input.read(cx).value().to_string();
+        assert!(text.contains("Selected text"), "{text}");
+        assert!(text.contains("Outside selection"), "{text}");
+        let bounds = window.find("recognized-text-dialog").bounds();
+        assert!((f32::from(bounds.center().x) - 640.0).abs() < 1.0);
+        assert!((f32::from(bounds.center().y) - 425.0).abs() < 1.0);
+
+        window.press(
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+            cx,
+        );
+        window.input("Edited text", cx);
+        window.press("enter", cx);
+        window.input("A second line", cx);
+        assert_eq!(
+            input.read(cx).value().as_str(),
+            "Edited text\nA second line"
+        );
+        window.press("right", cx);
+        assert!(window.try_find("measure-preview").is_none());
+        assert_eq!(editor.read(cx).tool, Tool::Select);
+        assert!(editor.read(cx).document.as_ref().unwrap().crop().is_none());
+        window.click("copy-recognized-text", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        assert!(editor.read(cx).status.starts_with("Text copied"));
+        window.click("close-recognized-text", cx);
+        assert!(window.try_find("recognized-text-dialog").is_none());
+        let before = editor.read(cx).export_pixels().unwrap();
+        window.click(("tool", Tool::Ocr as usize), cx);
+        assert_eq!(editor.read(cx).tool, Tool::Ocr);
+        // The fitted 600 × 300 image starts at (340, 302). Select the left QR only.
+        window.drag(point(px(350.0), px(332.0)), point(px(580.0), px(562.0)), cx);
+        assert_eq!(
+            editor.read(cx).selection,
+            Some(sniplet_core::ImageRect::new(10.0, 30.0, 230.0, 230.0))
+        );
+        let doc = editor.read(cx).document.as_ref().unwrap();
+        assert!(doc.annotations().is_empty());
+        assert!(doc.crop().is_none());
+        assert_eq!(
+            doc.render(&crate::editor::render_options()).unwrap(),
+            before
+        );
+        assert!(!doc.can_undo());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let input = editor
+            .read(cx)
+            .recognized_text
+            .as_ref()
+            .expect("region preview");
+        assert_eq!(input.read(cx).value().as_str(), "Selected text");
+        window.press("escape", cx);
+        assert!(window.try_find("recognized-text-dialog").is_none());
+        // A click without a region must not start whole-image OCR.
+        window.drag(point(px(420.0), px(400.0)), point(px(420.0), px(400.0)), cx);
+        assert!(editor.read(cx).selection.is_none());
+        assert!(editor.read(cx).recognized_text.is_none());
+        assert_ne!(editor.read(cx).status, "Recognizing text…");
+        editor.update(cx, |editor, cx| {
+            editor.command(Command::Qr, window, cx);
+            editor.load(
+                Document::new(image::RgbaImage::from_pixel(20, 20, image::Rgba([255; 4]))),
+                "New capture",
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert!(editor.read(cx).recognized_text.is_none());
+        assert_eq!(editor.read(cx).status, "New capture");
+    });
 }
 
 #[gpui_kit::test]

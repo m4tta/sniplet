@@ -19,10 +19,11 @@ pub enum Tool {
     Redact,
     Erase,
     Zoom,
+    Ocr,
 }
 
 impl Tool {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Select,
         Self::Arrow,
         Self::Text,
@@ -39,6 +40,7 @@ impl Tool {
         Self::Redact,
         Self::Erase,
         Self::Zoom,
+        Self::Ocr,
     ];
 
     pub fn label(self) -> &'static str {
@@ -59,6 +61,7 @@ impl Tool {
             Self::Redact => "Redact",
             Self::Erase => "Erase",
             Self::Zoom => "Magnifier",
+            Self::Ocr => "OCR",
         }
     }
 
@@ -80,7 +83,8 @@ impl Tool {
             | Self::Pixelate
             | Self::Redact
             | Self::Erase
-            | Self::Zoom => None,
+            | Self::Zoom
+            | Self::Ocr => None,
         }
     }
 
@@ -115,6 +119,7 @@ impl Tool {
             Self::Redact => "square-dashed-bottom",
             Self::Erase => "eraser",
             Self::Zoom => "zoom-in",
+            Self::Ocr => "scan-text",
         }
     }
 
@@ -187,7 +192,7 @@ impl Tool {
                     source: Some(source),
                 }
             }
-            Self::Select => return None,
+            Self::Select | Self::Ocr => return None,
         })
     }
 }

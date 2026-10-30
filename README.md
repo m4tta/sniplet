@@ -68,6 +68,9 @@ where you can mark it up and then copy, save, pin, or upload it.
 
 You can change any of these in **Settings → Hotkeys**.
 
+Text/QR capture opens an editable text preview over the screenshot. Use the
+editor's **OCR** tool to drag over text or a QR code in any opened image.
+
 <div align="center">
 <img src="docs/screenshots/settings.png" width="560" alt="The Sniplet settings window showing appearance and window screenshot background options">
 </div>
