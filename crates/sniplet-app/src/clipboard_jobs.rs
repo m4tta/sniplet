@@ -14,6 +14,11 @@ pub(crate) enum Source {
     Recognize { document: Document, qr_only: bool },
 }
 
+pub(crate) enum Copied {
+    Image,
+    Text(String),
+}
+
 #[derive(Default)]
 struct CopyOrder {
     next: AtomicU64,
@@ -49,7 +54,7 @@ static ORDER: CopyOrder = CopyOrder {
 };
 
 /// Prepare and write on a worker. An old render cannot replace a newer copy.
-pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<usize>>> {
+pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<Copied>>> {
     let request = ORDER.request();
     cx.background_executor().spawn(async move {
         let source = match source {
@@ -67,6 +72,9 @@ pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<usize
                 } else {
                     sniplet_platform::recognize_text(&image, &Default::default())?
                 };
+                if text.trim().is_empty() {
+                    anyhow::bail!("No text found in the selected image");
+                }
                 Source::Text(text)
             }
             other => other,
@@ -81,16 +89,15 @@ pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<usize
             match source {
                 Source::Original(document) => {
                     clipboard.set_image(document.original())?;
-                    Ok(0)
+                    Ok(Copied::Image)
                 }
                 Source::Rendered(_) => {
                     clipboard.set_image(rendered.as_ref().unwrap())?;
-                    Ok(0)
+                    Ok(Copied::Image)
                 }
                 Source::Text(text) => {
-                    let count = text.chars().count();
-                    clipboard.set_text(text)?;
-                    Ok(count)
+                    clipboard.set_text(text.clone())?;
+                    Ok(Copied::Text(text))
                 }
                 Source::Recognize { .. } => unreachable!(),
             }
