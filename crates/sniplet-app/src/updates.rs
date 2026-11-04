@@ -33,8 +33,6 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 /// A release found by a check.
 pub(crate) struct Release {
     version: String,
-    build_number: u64,
-    channel: ReleaseChannel,
     size: u64,
     /// Absent for test doubles, which cannot build a signed platform release.
     package: Option<UpdateRelease>,
@@ -44,8 +42,6 @@ impl From<UpdateRelease> for Release {
     fn from(package: UpdateRelease) -> Self {
         Self {
             version: package.version.clone(),
-            build_number: package.build_number,
-            channel: package.channel,
             size: package.size,
             package: Some(package),
         }
@@ -438,13 +434,13 @@ impl Editor {
         }
         let (title, description, icon, failed) = match &self.updates.phase {
             Phase::Ready(release) => (
-                format!("Sniplet {} is ready", release_label(release)),
+                format!("Sniplet {} is ready", release.version),
                 "Sniplet restarts. Your screenshot and edits come back.".to_owned(),
                 "download",
                 false,
             ),
             Phase::Installing(release) => (
-                format!("Installing Sniplet {}…", release_label(release)),
+                format!("Installing Sniplet {}…", release.version),
                 "Sniplet restarts when it is done.".to_owned(),
                 "download",
                 false,
@@ -529,7 +525,7 @@ impl Editor {
             Phase::Ready(release)
             | Phase::InstallFailed(release, _)
             | Phase::RestartFailed(release, _) => {
-                Some(format!("Update to Sniplet {}", release_label(release)))
+                Some(format!("Update to Sniplet {}", release.version))
             }
             _ => None,
         }
@@ -583,7 +579,7 @@ pub(crate) fn settings_section(editor: &Entity<Editor>, cx: &App) -> AnyElement 
     let busy = updates.busy();
     let (title, description, icon, failed): (String, String, &str, bool) = match &phase {
         Phase::Idle => (
-            format!("Sniplet {}", build_label(&updates.current, channel)),
+            format!("Sniplet {}", updates.current.version),
             format!("{current}{last_check}"),
             "refresh-cw",
             false,
@@ -601,13 +597,13 @@ pub(crate) fn settings_section(editor: &Entity<Editor>, cx: &App) -> AnyElement 
             false,
         ),
         Phase::Available(release) => (
-            format!("Sniplet {} is available", release_label(release)),
+            format!("Sniplet {} is available", release.version),
             format!("{current} Size: {}.{last_check}", size_label(release.size)),
             "download",
             false,
         ),
         Phase::Downloading(release) => (
-            format!("Downloading {}…", release_label(release)),
+            format!("Downloading {}…", release.version),
             format!(
                 "Size: {}. You can use Sniplet while you wait.",
                 size_label(release.size)
@@ -616,13 +612,13 @@ pub(crate) fn settings_section(editor: &Entity<Editor>, cx: &App) -> AnyElement 
             false,
         ),
         Phase::Ready(release) => (
-            format!("Sniplet {} is ready", release_label(release)),
+            format!("Sniplet {} is ready", release.version),
             "Sniplet restarts. Your screenshot and edits come back.".into(),
             "circle-check",
             false,
         ),
         Phase::Installing(release) => (
-            format!("Installing {}…", release_label(release)),
+            format!("Installing {}…", release.version),
             "Sniplet restarts when it is done.".into(),
             "download",
             false,
@@ -809,23 +805,6 @@ fn status_icon(name: &'static str, failed: bool, cx: &App) -> Div {
         .child(tool_icon(name).size(px(16.0)))
 }
 
-fn build_label(build: &BuildIdentity, channel: ReleaseChannel) -> String {
-    match channel {
-        ReleaseChannel::Stable => build.version.clone(),
-        ReleaseChannel::Nightly => format!("{} (build {})", build.version, build.build_number),
-    }
-}
-
-fn release_label(release: &Release) -> String {
-    match release.channel {
-        ReleaseChannel::Stable => release.version.clone(),
-        ReleaseChannel::Nightly => format!(
-            "{} Nightly (build {})",
-            release.version, release.build_number
-        ),
-    }
-}
-
 fn size_label(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
@@ -927,10 +906,8 @@ mod tests {
             Ok(Some(Release {
                 version: match channel {
                     ReleaseChannel::Stable => "9.0.0".into(),
-                    ReleaseChannel::Nightly => "9.1.0".into(),
+                    ReleaseChannel::Nightly => "9.1.0-nightly.20261104.1".into(),
                 },
-                build_number: 42,
-                channel,
                 size: 6_400_000,
                 package: None,
             }))
@@ -1056,7 +1033,7 @@ mod tests {
         let Phase::Available(release) = cx.read(|cx| editor.read(cx).updates.phase.clone()) else {
             panic!("the Nightly check must show its release");
         };
-        assert_eq!(release.channel, ReleaseChannel::Nightly);
+        assert_eq!(release.version, "9.1.0-nightly.20261104.1");
         settings
             .update(cx, |_, window, cx| {
                 window.click("update-download", cx);
@@ -1069,7 +1046,7 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(log(&fake), ["download 9.1.0"]);
+        assert_eq!(log(&fake), ["download 9.1.0-nightly.20261104.1"]);
         assert!(cx.read(|cx| matches!(editor.read(cx).updates.phase, Phase::Ready(_))));
         assert_eq!(
             SettingsStore::at(&path).load().unwrap().update_channel,
@@ -1091,7 +1068,7 @@ mod tests {
         let Phase::Available(release) = cx.read(|cx| editor.read(cx).updates.phase.clone()) else {
             panic!("a channel change must replace the ready Nightly update");
         };
-        assert_eq!(release.channel, ReleaseChannel::Stable);
+        assert_eq!(release.version, "9.0.0");
         handle
             .update(cx, |_, window, cx| {
                 window.render_frame(cx);

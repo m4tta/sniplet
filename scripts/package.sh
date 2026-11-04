@@ -42,12 +42,15 @@ fi
 target_dir=$(cargo metadata --format-version 1 --no-deps --locked \
     | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 host_target=$(rustc -vV | sed -n 's/^host: //p')
-app_version=$(awk '
+# The Release workflow sets SNIPLET_VERSION. macOS wants only numbers here, so a
+# nightly `0.2.1-nightly.20261104.17` shows as `0.2.1`.
+app_version=${SNIPLET_VERSION:-$(awk '
     /^\[/ { in_package = ($0 == "[workspace.package]") }
     in_package && /^version = / {
         sub(/^version = "/, ""); sub(/".*$/, ""); print
     }
-' Cargo.toml)
+' Cargo.toml)}
+app_version=${app_version%%-*}
 
 if [ -z "$target_dir" ] || [ -z "$host_target" ] || [ -z "$app_version" ]; then
     echo "could not determine Cargo target directory, Rust host target, or app version" >&2

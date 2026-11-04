@@ -1,0 +1,191 @@
+name: Release
+
+# Nightly: a check every 2 hours builds main when it has new commits and the
+# newest nightly is at least 6 hours old. Run the workflow by hand to build one now.
+# Stable: run the workflow by hand with channel "stable". It rebuilds the newest
+# nightly that passed. `scripts/release.py plan` makes these decisions.
+# Releases go to GitHub Releases. See docs/releases.md.
+on:
+  schedule:
+    # Not at minute zero, when GitHub delays scheduled runs the most.
+    - cron: '8 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      version:
+        description: 'Stable only: version, for example 0.3.0. Empty means the version that the newest nightly previews.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One queue for both channels. A nightly that started while a stable builds
+# would get a version below that stable but newer code. `queue: max` keeps
+# every waiting run, so a nightly check never replaces a waiting stable run.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # pushes the nightly tag
+      actions: read # stable promotion checks that the nightly's run passed
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      skip: ${{ steps.plan.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # all tags and history
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - id: plan
+        env:
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release.py plan
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      # Read by crates/sniplet-platform/build.rs and scripts/package.sh.
+      SNIPLET_VERSION: ${{ needs.plan.outputs.version }}
+      SNIPLET_BUILD_SHA: ${{ needs.plan.outputs.sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+          - target: macos-x64
+            runner: macos-15-intel
+          - target: windows-x64
+            runner: windows-2025
+          - target: linux-x64
+            runner: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gcc g++ clang cmake pkg-config libclang-dev \
+            libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxrandr-dev \
+            libdbus-1-dev libpipewire-0.3-dev libegl-dev libgbm-dev \
+            libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
+      - name: Check Metal compiler
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      - name: Build application
+        run: cargo build -p sniplet-app --release --locked
+
+      # A fixed self-signed identity keeps the macOS Screen Recording permission
+      # across updates. Without the secrets, packages use ad hoc signing.
+      - name: Import macOS signing identity
+        if: runner.os == 'macOS'
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then
+            echo "::warning::MACOS_SIGNING_P12 is not set. Using ad hoc signing."
+            echo "SNIPLET_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "Sniplet Self-Signed" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
+          echo "SNIPLET_SIGNING_IDENTITY=Sniplet Self-Signed" >> "$GITHUB_ENV"
+
+      - name: Package application
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/release.py package "$TARGET" --version "$SNIPLET_VERSION" --sha "$SNIPLET_BUILD_SHA"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist-release/assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  # Publishes after every OS builds. A stable tag goes up with its release.
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist-release/assets
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
+        run: |
+          python -m pip install -r scripts/requirements-release.txt
+          python scripts/release.py publish --version "$VERSION" --sha "$SHA"
+      - name: Report download link
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: printf '[Download %s](https://github.com/%s/releases/tag/v%s)\n' "$VERSION" "$GITHUB_REPOSITORY" "$VERSION" >> "$GITHUB_STEP_SUMMARY"

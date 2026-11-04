@@ -1,144 +1,101 @@
 # Sniplet releases
 
-The three release workflows have manual triggers only. They do not run on a
-schedule, a push, or a new tag. The existing CI workflow still checks pushes
-and pull requests.
+`.github/workflows/release.yml` builds, signs, and publishes each release to
+[GitHub Releases](https://github.com/m4tta/sniplet/releases). The app updates
+itself from there.
 
-The workflow files must be on `main` before the Run workflow buttons appear.
-See [GitHub's manual workflow instructions](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
-Keep the workflow branch set to `main`. Write access to the repository is
-required. The workflows use GitHub's supplied token; no extra release token
-is required.
+## Channels
 
-## Set the next version
+| Channel | Trigger | Version |
+| --- | --- | --- |
+| nightly | A check every 2 hours. It builds `main` if `main` has commits after the newest nightly, and that nightly is at least 6 hours old. Or run **Actions → Release → Run workflow** by hand. | `0.2.1-nightly.20261104.17` |
+| stable | Run **Release** by hand with channel **stable**. | `0.2.1` |
 
-Open **Actions → Bump Version → Run workflow**.
+`python scripts/release.py plan` makes these decisions. Git tags hold the
+version, not `Cargo.toml`:
 
-| Input | Effect |
-| --- | --- |
-| `patch` | `0.1.0` becomes `0.1.1` |
-| `minor` | `0.1.1` becomes `0.2.0` |
-| `major` | `0.2.0` becomes `1.0.0` |
-| `set` | Uses the exact version input, such as `0.3.0` |
+- **Nightly:** the newest stable tag plus one patch, then the UTC date and the
+  workflow run number. After `v0.2.0`, nightlies are `0.2.1-nightly.*`. Each
+  nightly is newer than the newest stable and older than the next stable. Each
+  nightly run pushes its tag before it builds, so a failed build does not run
+  again until there are new commits and 6 hours have passed.
+- **Stable:** finds the newest nightly whose run passed, and rebuilds that
+  nightly's commit. Stable ships only code that nightly users already ran. The
+  version is the nightly's base (`0.2.1-nightly.*` becomes `0.2.1`). For a minor
+  or major release, type a version such as `0.3.0` in the **version** field.
+  The `v0.2.1` tag goes up with the release, after all four builds pass.
 
-The new version must be greater than the current version. Use three numeric
-parts without a `v` prefix or build suffix. The exact version field is used
-only when `set` is selected.
+The version in `Cargo.toml` is used only for local builds.
 
-The version is stored in `[workspace.package]` in `Cargo.toml`. All three crates
-inherit it. The workflow updates the workspace package entries in `Cargo.lock`
-and commits both files to `main`. It does not start a nightly build. If another
-commit reaches `main` during the run, the push stops; run the workflow again.
-Branch rules that prevent direct pushes will also stop this step.
+Releases run one at a time, in one queue. A nightly check never replaces a
+stable run that waits.
 
-For a local change, use Python 3.11 or later:
+If one build fails, use **Re-run failed jobs**. It keeps the same version. Do
+not use **Re-run all jobs** on a nightly: the nightly tag already exists, so the
+plan fails. Start a new run instead.
 
-```sh
-python3 scripts/release.py bump patch
-python3 scripts/release.py bump set --version 0.3.0
-```
+## Downloads
 
-Commit the changed `Cargo.toml` and `Cargo.lock` before building a release.
-
-## Build a nightly
-
-Open **Actions → Build Nightly → Run workflow**. Enter `main`, another branch,
-a tag, or a full commit SHA in the `ref` field. The source must contain the
-release scripts. The workflow resolves that source to one full commit before
-it starts the builds.
-
-All nightly tags include the first seven characters of the source SHA. For
-example, version `0.2.0` at commit `a1b2c3d…` produces `v0.2.0-a1b2c3d`.
-The app's internal version remains `0.2.0`, so its packages can be promoted
-without a rebuild or a change to signed files.
-
-Four jobs run in parallel. Each job checks the code, runs the workspace tests,
-builds an optimized application, and makes its package. Cargo caches are
-separate for each target. Format checking runs once on Linux. Completed archives
-are uploaded without a second compression pass.
+Each release has these files (a nightly uses its full version in the names):
 
 | Download | Contents |
 | --- | --- |
-| `Sniplet-0.2.0-a1b2c3d-macos-arm64.dmg` | Mac Apple Silicon drag-to-Applications disk image |
-| `Sniplet-0.2.0-a1b2c3d-macos-x64.dmg` | Mac Intel drag-to-Applications disk image |
-| `Sniplet-0.2.0-a1b2c3d-macos-arm64.zip` | Mac Apple Silicon `.app` |
-| `Sniplet-0.2.0-a1b2c3d-macos-x64.zip` | Mac Intel `.app` |
-| `Sniplet-0.2.0-a1b2c3d-windows-x64.zip` | Portable Windows executable and support files |
-| `Sniplet-0.2.0-a1b2c3d-linux-x64.tar.gz` | Linux executable, desktop entry, icons, and support files |
+| `Sniplet-0.2.1-macos-arm64.dmg` | Mac Apple Silicon drag-to-Applications disk image |
+| `Sniplet-0.2.1-macos-x64.dmg` | Mac Intel drag-to-Applications disk image |
+| `Sniplet-0.2.1-macos-arm64.zip` | Mac Apple Silicon `.app`, for in-app updates |
+| `Sniplet-0.2.1-macos-x64.zip` | Mac Intel `.app`, for in-app updates |
+| `Sniplet-0.2.1-windows-x64.zip` | Portable Windows executable and support files |
+| `Sniplet-0.2.1-linux-x64.tar.gz` | Linux executable, desktop entry, icons, and support files |
 | `SHA256SUMS` | SHA-256 checksums for all six packages |
-| `release.json` | Version, build number, channel, source SHA, package sizes, and checksums |
-| `release.json.sig` | Free Ed25519 signature for the exact manifest bytes |
+| `release.json` | Version, channel, source commit, package sizes, and checksums |
+| `release.json.sig` | Ed25519 signature over the exact `release.json` bytes |
 
-On Mac, download the DMG for your processor, open it, and drag Sniplet to the
-Applications shortcut. Eject the disk image, then open Sniplet from Applications.
-The ZIP packages remain available for in-app updates. Each DMG contains the
-same signed `.app` as its matching ZIP. Packaging mounts the image read-only,
-checks the app signature and executable, then ejects it before upload.
+On Mac, open the DMG for your processor and drag Sniplet to the Applications
+shortcut. Eject the disk image, then open Sniplet from Applications.
 
-The signed manifest keeps the four update archives in `assets` and puts the
-two DMGs in `installers`. Existing updater builds continue to read `assets`.
-Stable promotion copies all six package files without rebuilding them.
-Older releases without DMGs can still be verified and promoted.
+The publish job waits for all four builds. It uploads every file into a draft,
+checks each size and checksum on GitHub, and only then publishes. A nightly is a
+GitHub prerelease. A stable release becomes **Latest**. A rerun after an
+interrupted upload resumes the draft. A published release is never changed.
 
-The publisher waits for all four jobs to pass. It uploads and verifies all files
-in a draft, then publishes the nightly as a GitHub prerelease. Nightlies do not
-replace the Latest stable release. Packages live in GitHub Releases; temporary
-Actions artifacts expire after seven days.
+## How the app updates
 
-## Repeat a build
+General settings has the channel choice, automatic checks, and a manual check
+button. The app starts on Stable.
 
-- The same version at a different commit produces a different nightly tag.
-- The same version and commit reuse the published nightly and skip the builds.
-- An interrupted upload leaves a draft. Use Re-run failed jobs to retry the
-  publisher, or start another manual run to rebuild and complete that draft.
-- A short SHA collision stops the run. An existing tag cannot be moved to
-  another commit.
-- Published packages are never replaced by these workflows.
+- **Stable** reads GitHub's Latest release.
+- **Nightly** reads the newest `vX.Y.Z-nightly.*` prerelease.
 
-## Promote a stable release
+The app checks the Ed25519 signature on `release.json` with the public key in
+`assets/update-public-key.hex`. Then it checks the package size and SHA-256
+checksum. Automatic checks download a verified update in the background.
+Installation waits for **Restart & update**.
 
-Test the nightly packages on the target systems first. Then open
-**Actions → Promote Stable → Run workflow** and enter its exact nightly tag,
-such as `v0.2.0-a1b2c3d`.
+The app never installs an older version:
 
-Promotion checks the nightly's tag, full source SHA, platform package set,
-sizes, and checksums. It copies the same package bytes to a new release and
-removes the SHA suffix from download names. The stable tag is `v0.2.0` at the
-nightly's source commit. The app's numeric version stays the same.
+- Stable to Nightly: the app gets the newest nightly, because it is newer.
+- Nightly to Stable: the app keeps its nightly until a newer stable release is
+  available. Because of the version rule above, that is the next stable release.
 
-The nightly remains available. GitHub selects Latest from stable releases by
-its [version/date rule](https://docs.github.com/en/rest/releases/releases#update-a-release); promoting an older version does not request that it
-replace a newer Latest release. Repeating the same promotion reuses the existing
-stable release. Promoting another commit to an existing stable version stops
-with an error.
+Before replacement, the app saves the current screenshot and edits to a
+recovery project beside its settings. The new process waits for the old process
+to exit, then restores the project. Recovery keeps the screenshot, crop,
+backdrop, and annotations. It does not keep undo history. Windows replaces its
+portable executable. Mac and Linux replace the complete portable app bundle. A
+read-only installation cannot update itself.
 
-## Signing and platform limits
+Builds before this version format (`0.2.0`, and nightlies tagged
+`v0.2.1-<commit>`) cannot read the new releases. Install a new build by hand
+once.
 
-In-app updates use `self_update` for archive extraction and replacement. They
-check a pinned Ed25519 public key before they trust the release manifest. They
-then check the package size and SHA-256 checksum before installation. An unsigned
-release is available for manual download only.
+## Keys and secrets
 
-The app starts on Stable. General settings has the channel choice, automatic
-checks, and the manual check button. Automatic checks download verified updates
-in the background. Installation always waits for the user's restart action.
-Nightly builds include the Actions run ID
-as their build number. This permits updates between commits with the same
-numeric version. Promotion keeps this build number and the package bytes. It
-signs a new manifest for Stable. Changing to Stable never installs an older
-version automatically; the app waits for a newer Stable version.
+| GitHub secret | Use |
+| --- | --- |
+| `UPDATER_SIGNING_KEY` | Ed25519 private key (PEM) that signs `release.json`. Only the publish job gets it. |
+| `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD` | Optional. A self-signed "Sniplet Self-Signed" code signing certificate (base64 `.p12`). |
 
-The user selects Download, then Restart & update. Before replacement, the app
-saves the current screenshot and edits to a recovery project beside its settings.
-The next process restores this project. Installation does not change user settings.
-Windows replaces its portable executable. Mac and Linux replace the complete
-portable app bundle. A read-only installation cannot update itself.
-The new process waits for the old process to exit before it restores work and
-registers global shortcuts. Recovery files stay on disk until the new editor
-window opens. Recovery keeps the screenshot, crop, backdrop, and annotations;
-it does not keep undo history.
-
-### Update key setup
+### Update key
 
 Install the release tool dependency:
 
@@ -153,43 +110,60 @@ python3 scripts/update_signing.py init --install-github-secret
 ```
 
 This creates a private key at `~/.sniplet-release/update-signing.pem`, writes
-`assets/update-public-key.hex`, and sets the repository's `UPDATER_SIGNING_KEY`
-Actions secret through `gh`. The private key stays outside the repository.
-Back it up in a secure location. Do not generate another key for each release.
-Existing apps trust the public key that was compiled into them. A key change
-needs a planned migration or a manual app installation.
+`assets/update-public-key.hex`, and sets the `UPDATER_SIGNING_KEY` secret
+through `gh`. Do not make a new key for each release. Installed apps trust the
+public key that was compiled into them. If the key is lost, users must install
+a new build by hand.
 
-To create a verified backup outside the checkout, use a separate disk or a
-secure mounted backup location:
+To make a verified backup outside the checkout:
 
 ```sh
 python3 scripts/update_signing.py backup --destination /secure-backup/sniplet-update.pem
 ```
 
-The command limits file access to the current user (and SYSTEM on Windows).
-It refuses to overwrite a file or put the backup in this repository. Keep an
-offline or off-site copy as well for protection against loss of the computer.
+The command limits file access to the current user (and SYSTEM on Windows). It
+refuses to overwrite a file or to put the backup in this repository. Keep an
+offline copy too.
 
-Only the publish jobs receive the signing secret. Build jobs do not need it.
-The signature is free and does not need an Apple or Windows certificate.
+### Mac signing identity
 
-Mac packages use ad hoc signing and are not notarized. macOS can require manual
-approval before opening them or a new Screen Recording grant after an update.
-The workflow has no Apple account credentials and does not use the local
-development certificate. Public Developer ID signing and notarization need a
-separate setup.
+Without the Mac secrets, packages use ad hoc signing. Each update then has a new
+code identity, and macOS can ask for the Screen Recording permission again. A
+fixed self-signed identity keeps the permission across updates. It does not need
+an Apple developer account. Make it once:
 
-Windows packages are portable ZIP files without an installer or Authenticode
-signature. Linux packages are built on Ubuntu 24.04 and need compatible system
-libraries, including the graphics and capture libraries listed in the README.
-They are not AppImages or distribution packages.
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -subj "/CN=Sniplet Self-Signed" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning" \
+  -keyout sniplet-signing.key -out sniplet-signing.crt
+openssl pkcs12 -export -legacy -name "Sniplet Self-Signed" \
+  -inkey sniplet-signing.key -in sniplet-signing.crt -out sniplet-signing.p12
+base64 < sniplet-signing.p12 | gh secret set MACOS_SIGNING_P12
+gh secret set MACOS_SIGNING_P12_PASSWORD
+```
 
-Local release checks:
+Keep the `.p12` and its password outside the repository, with an offline copy.
+If the identity changes, macOS asks for the permission again one time.
+
+## Platform limits
+
+Releases are not signed by Apple or Microsoft.
+
+- macOS: packages are not notarized. Gatekeeper blocks the first launch. Open
+  **System Settings → Privacy & Security**, then select **Open Anyway**.
+- Windows: packages are portable ZIP files without an installer or Authenticode
+  signature. SmartScreen can warn on first launch.
+- Linux: packages are built on Ubuntu 24.04 and need compatible system
+  libraries, including the graphics and capture libraries listed in the README.
+  They are not AppImages or distribution packages.
+
+## Local checks
 
 ```sh
 python3 -m pip install -r scripts/requirements-release.txt
 python3 -m unittest discover -s scripts -p test_release.py
-cargo metadata --format-version 1 --no-deps --locked
 ```
 
 These checks do not publish a release or start a workflow.

@@ -1,12 +1,24 @@
 name: CI
 
+# Checks PRs and pushes to main. Docs-only changes skip it.
+# Release builds live in release.yml.
 on:
-  push:
   pull_request:
-  workflow_dispatch:
+    paths-ignore: &docs
+      - 'docs/**'
+      - '**.md'
+      - '.github/workflows/release.yml'
+  push:
+    branches: [main]
+    paths-ignore: *docs
 
 permissions:
   contents: read
+
+# A new push to a PR cancels that PR's older run. Pushes to main each run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

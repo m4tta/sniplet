@@ -169,12 +169,12 @@ Local signing is for development; it does not notarize a public release.
 
 ## GitHub releases
 
-Use **Actions → Bump Version**, **Build Nightly**, or **Promote Stable**.
-These release workflows run only when you select **Run workflow**. Nightly
-builds run in parallel for Mac Apple Silicon, Mac Intel, Windows x64, and
-Linux x64. Stable promotion copies the tested packages without rebuilding.
-See [the release instructions](releases.md) for version inputs, downloads,
-repeat runs, and signing limits.
+The **Release** workflow builds a nightly from `main` every few hours when
+`main` has new commits. Run it by hand with channel **stable** to rebuild the
+newest passing nightly as a stable release. Builds run in parallel for Mac Apple
+Silicon, Mac Intel, Windows x64, and Linux x64. See
+[the release instructions](releases.md) for versions, downloads, repeat runs,
+and signing.
 
 ## Testing on a Mac
 
