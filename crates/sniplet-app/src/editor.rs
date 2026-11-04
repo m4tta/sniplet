@@ -21,12 +21,17 @@ use sniplet_platform::{Clipboard, Settings, SettingsStore};
 use crate::{
     capture,
     quick_menu::{self, Action},
-    tools::Tool,
+    tools::{HideStyle, Size, Sizes, Tool},
 };
 
 pub const FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
 pub(crate) const BAR: f32 = 54.0;
-const ARROW_WIDTH: f32 = 10.0;
+/// Canvas height kept clear below the image at fit zoom, for the tool dock.
+const DOCK_SPACE: f32 = 80.0;
+/// Gap between the dock and the bottom of the canvas.
+const DOCK_BOTTOM: f32 = 16.0;
+/// The dock's height: a 36 px button, 5 px padding, and a 1 px border on each side.
+const DOCK_HEIGHT: f32 = 48.0;
 
 pub fn render_options() -> RenderOptions<'static> {
     RenderOptions {
@@ -53,11 +58,9 @@ pub fn display_image(mut image: image::RgbaImage) -> Arc<RenderImage> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Menu,
-    Tools,
     Text,
     Backdrop,
     Help,
-    Ruler,
 }
 
 #[derive(Clone, Copy)]
@@ -119,9 +122,10 @@ struct Drag {
     handle: Option<EditHandle>,
 }
 
-struct ArrowSizeEdit {
-    style: AnnotationStyle,
-    width: f32,
+/// A size slider drag in progress. Escape restores `before`.
+struct SizeEdit {
+    size: Size,
+    before: f32,
     grouped: bool,
 }
 
@@ -164,11 +168,14 @@ pub struct Editor {
     text_origin: ImagePoint,
     text_edit: Option<AnnotationId>,
     style: AnnotationStyle,
-    arrow_width: f32,
     arrow_variant: ArrowVariant,
-    arrow_size: Entity<SliderState>,
-    arrow_size_edit: Option<ArrowSizeEdit>,
-    drawing_width: f32,
+    hide: HideStyle,
+    sizes: Sizes,
+    /// One slider for every size. Its value is a 0–1 fraction of `Size`'s range.
+    size_slider: Entity<SliderState>,
+    size_edit: Option<SizeEdit>,
+    /// Shows the sampled color next to the pointer while Tab or C is held.
+    color_peek: bool,
     counter: u32,
     drag: Option<Drag>,
     draft: Option<Annotation>,
@@ -219,15 +226,15 @@ impl Editor {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type your annotation…"));
-        let arrow_size = cx.new(|_| {
+        let size_slider = cx.new(|_| {
             SliderState::new()
-                .min(1.0)
-                .max(30.0)
-                .step(0.25)
-                .default_value(ARROW_WIDTH)
+                .min(0.0)
+                .max(1.0)
+                .step(0.001)
+                .default_value(Size::Arrow.fraction(Size::Arrow.default_value()))
         });
-        cx.subscribe(&arrow_size, |editor, _, event, cx| {
-            editor.arrow_size_event(event, cx);
+        cx.subscribe(&size_slider, |editor, _, event, cx| {
+            editor.size_event(event, cx);
         })
         .detach();
         cx.on_app_quit(|_, cx| {
@@ -290,11 +297,12 @@ impl Editor {
                 stroke: Color::new(c.red, c.green, c.blue, c.alpha),
                 ..Default::default()
             },
-            arrow_width: ARROW_WIDTH,
             arrow_variant: ArrowVariant::Solid,
-            arrow_size,
-            arrow_size_edit: None,
-            drawing_width: AnnotationStyle::default().stroke_width,
+            hide: HideStyle::default(),
+            sizes: Sizes::default(),
+            size_slider,
+            size_edit: None,
+            color_peek: false,
             counter: 1,
             drag: None,
             draft: None,
@@ -342,7 +350,7 @@ impl Editor {
         }
         self.load_revision += 1;
         self.document_revision += 1;
-        self.finish_arrow_size_edit();
+        self.finish_size_edit();
         self.measure_scale = document
             .source_scale_factor()
             .unwrap_or(self.default_measure_scale);
@@ -373,7 +381,7 @@ impl Editor {
         if let Some(doc) = &self.document
             && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id))
         {
-            self.style = annotation.style;
+            self.style = drawing_style(self.style, annotation);
         }
         // Keep one render in progress. Input only marks the latest state dirty.
         self.preview_revision += 1;
@@ -454,20 +462,10 @@ impl Editor {
     }
 
     pub fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        self.finish_arrow_size_edit();
+        self.finish_size_edit();
         self.measure = None;
         self.measure_pending = None;
-        if tool == Tool::Ruler {
-            self.panel = Some(Panel::Ruler);
-            cx.notify();
-            return;
-        }
         self.tool = tool;
-        self.style.stroke_width = if tool == Tool::Arrow {
-            self.arrow_width
-        } else {
-            self.drawing_width
-        };
         self.selection = None;
         self.panel = None;
         self.status = tool.shortcut().map_or_else(
@@ -673,14 +671,14 @@ impl Editor {
             return;
         }
         if !pan && self.tool == Tool::Counter {
-            let id = doc.add_annotation(
-                AnnotationKind::Counter {
-                    center: p,
-                    value: self.counter,
-                    font_size: 28.0,
-                },
-                self.style,
-            );
+            let mut kind = AnnotationKind::Counter {
+                center: p,
+                value: self.counter,
+                font_size: Size::Counter.default_value(),
+            };
+            let mut style = self.style;
+            self.sizes.apply(&mut kind, &mut style);
+            let id = doc.add_annotation(kind, style);
             let _ = doc.select(Some(id));
             self.counter = (self.counter + 1).min(99);
             self.refresh(cx);
@@ -704,12 +702,9 @@ impl Editor {
         } else {
             None
         };
-        if moving.is_none() && self.tool == Tool::Arrow {
-            self.style.stroke_width = self.arrow_width;
-        }
         let mut magnifier_edit = None;
         if let Some(annotation) = moving.and_then(|id| doc.annotation(id)).cloned() {
-            self.style = annotation.style;
+            self.style = drawing_style(self.style, &annotation);
             magnifier_edit = annotation
                 .kind
                 .magnifier_part_at(p, 6.0 / self.transform.zoom())
@@ -863,9 +858,12 @@ impl Editor {
                     &drag.points,
                     "",
                     self.counter,
+                    self.hide,
                     drag.constrain,
                 )
                 .map(|mut kind| {
+                    let mut style = self.style;
+                    self.sizes.apply(&mut kind, &mut style);
                     if let AnnotationKind::Arrow { variant, .. } = &mut kind {
                         *variant = self.arrow_variant;
                     }
@@ -890,7 +888,7 @@ impl Editor {
                     Annotation {
                         id: AnnotationId(0),
                         kind,
-                        style: self.style,
+                        style,
                     }
                 });
         }
@@ -955,14 +953,13 @@ impl Editor {
         let command = modifiers.control || modifiers.platform;
         if key == "escape" {
             cx.stop_active_drag(window);
-            if let Some(edit) = self.arrow_size_edit.take() {
+            if let Some(edit) = self.size_edit.take() {
                 if edit.grouped
                     && let Some(doc) = &mut self.document
                 {
                     let _ = doc.cancel_group();
                 }
-                self.style = edit.style;
-                self.arrow_width = edit.width;
+                self.sizes.set(edit.size, edit.before);
             }
             if let Some(drag) = self.drag.take()
                 && drag.moving.is_some()
@@ -1139,6 +1136,7 @@ impl Editor {
                         self.sampled = color;
                     }
                     self.copy_color(cx);
+                    self.color_peek = true;
                     None
                 }
                 "space" => {
@@ -1155,6 +1153,7 @@ impl Editor {
                     {
                         self.sampled = color;
                         self.copy_color(cx);
+                        self.color_peek = true;
                     }
                     None
                 }
@@ -1184,7 +1183,7 @@ impl Editor {
                     None
                 }
                 "b" => {
-                    self.cycle_blur_family(cx);
+                    self.cycle_hide(cx);
                     None
                 }
                 _ => {
@@ -1260,6 +1259,9 @@ impl Editor {
         }
         if key == "z" {
             self.quick_zoom = false;
+        }
+        if matches!(key, "tab" | "c") {
+            self.color_peek = false;
         }
         cx.notify();
     }
@@ -1454,7 +1456,7 @@ impl Editor {
                     AnnotationKind::Text { font_size, .. } => Some(font_size),
                     _ => None,
                 })
-                .unwrap_or(24.0);
+                .unwrap_or(self.sizes.get(Size::Text));
             let kind = AnnotationKind::Text {
                 origin: self.text_origin,
                 text,
@@ -1476,7 +1478,7 @@ impl Editor {
         if self.updates.installing() {
             return;
         }
-        self.finish_arrow_size_edit();
+        self.finish_size_edit();
         self.panel = None;
         self.measure = None;
         self.measure_pending = None;
@@ -2009,33 +2011,54 @@ impl Editor {
         .detach();
     }
 
-    fn arrow_size_event(&mut self, event: &SliderEvent, cx: &mut Context<Self>) {
-        match event {
-            SliderEvent::Change(value) => {
-                if self.arrow_size_edit.is_none() {
-                    let grouped = self.document.as_mut().is_some_and(|doc| {
-                        let arrow = doc
-                            .selected()
-                            .and_then(|id| doc.annotation(id))
-                            .is_some_and(|annotation| {
-                                matches!(annotation.kind, AnnotationKind::Arrow { .. })
-                            });
-                        arrow && doc.begin_group().is_ok()
-                    });
-                    self.arrow_size_edit = Some(ArrowSizeEdit {
-                        style: self.style,
-                        width: self.arrow_width,
-                        grouped,
-                    });
-                }
-                self.change_style(None, Some(value.end().clamp(1.0, 30.0)), None, cx);
-            }
-            SliderEvent::Release(_) => self.finish_arrow_size_edit(),
+    fn selected_annotation(&self) -> Option<&Annotation> {
+        let doc = self.document.as_ref()?;
+        doc.selected().and_then(|id| doc.annotation(id))
+    }
+
+    /// The size the slider edits: the selected annotation's, else the current tool's.
+    fn size_target(&self) -> Option<Size> {
+        match self.selected_annotation() {
+            Some(annotation) => Size::for_kind(&annotation.kind),
+            None => Size::for_tool(self.tool, self.hide),
         }
     }
 
-    fn finish_arrow_size_edit(&mut self) {
-        if let Some(edit) = self.arrow_size_edit.take()
+    fn size_value(&self, size: Size) -> f32 {
+        self.selected_annotation()
+            .filter(|annotation| Size::for_kind(&annotation.kind) == Some(size))
+            .map_or(self.sizes.get(size), |annotation| {
+                size.get(&annotation.kind, &annotation.style)
+            })
+    }
+
+    fn size_event(&mut self, event: &SliderEvent, cx: &mut Context<Self>) {
+        let Some(size) = self.size_target() else {
+            return;
+        };
+        match event {
+            SliderEvent::Change(value) => {
+                if self.size_edit.is_none() {
+                    // One drag is one undo step for a selected annotation.
+                    let grouped = self.selected_annotation().is_some()
+                        && self
+                            .document
+                            .as_mut()
+                            .is_some_and(|doc| doc.begin_group().is_ok());
+                    self.size_edit = Some(SizeEdit {
+                        size,
+                        before: self.sizes.get(size),
+                        grouped,
+                    });
+                }
+                self.set_size(size, size.value_at(value.end()), cx);
+            }
+            SliderEvent::Release(_) => self.finish_size_edit(),
+        }
+    }
+
+    fn finish_size_edit(&mut self) {
+        if let Some(edit) = self.size_edit.take()
             && edit.grouped
             && let Some(doc) = &mut self.document
         {
@@ -2043,8 +2066,22 @@ impl Editor {
         }
     }
 
+    /// Sets the size for new annotations, and for the selected one when it has this size.
+    fn set_size(&mut self, size: Size, value: f32, cx: &mut Context<Self>) {
+        self.sizes.set(size, value);
+        if let Some(doc) = &mut self.document
+            && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
+            && Size::for_kind(&annotation.kind) == Some(size)
+        {
+            let (mut kind, mut style) = (annotation.kind, annotation.style);
+            size.set(&mut kind, &mut style, value);
+            let _ = doc.update_annotation(annotation.id, kind, style);
+        }
+        self.refresh(cx);
+    }
+
     fn change_arrow_variant(&mut self, variant: ArrowVariant, cx: &mut Context<Self>) {
-        self.finish_arrow_size_edit();
+        self.finish_size_edit();
         self.arrow_variant = variant;
         if let Some(doc) = &mut self.document
             && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
@@ -2061,31 +2098,10 @@ impl Editor {
         self.refresh(cx);
     }
 
-    fn change_style(
-        &mut self,
-        color: Option<Color>,
-        width: Option<f32>,
-        fill: Option<bool>,
-        cx: &mut Context<Self>,
-    ) {
+    fn change_style(&mut self, color: Option<Color>, fill: Option<bool>, cx: &mut Context<Self>) {
         if let Some(color) = color {
             self.style.stroke = color;
             self.style.fill = self.style.fill.map(|_| color);
-        }
-        if let Some(width) = width {
-            self.style.stroke_width = width;
-            let arrow = self
-                .document
-                .as_ref()
-                .and_then(|doc| doc.selected().and_then(|id| doc.annotation(id)))
-                .map_or(self.tool == Tool::Arrow, |annotation| {
-                    matches!(annotation.kind, AnnotationKind::Arrow { .. })
-                });
-            if arrow {
-                self.arrow_width = width;
-            } else {
-                self.drawing_width = width;
-            }
         }
         if let Some(fill) = fill {
             self.style.fill = fill.then_some(self.style.stroke);
@@ -2098,102 +2114,41 @@ impl Editor {
         self.refresh(cx);
     }
 
-    fn cycle_blur_family(&mut self, cx: &mut Context<Self>) {
-        let selected = self.document.as_ref().and_then(|doc| {
-            doc.selected().and_then(|id| doc.annotation(id)).and_then(
-                |annotation| match &annotation.kind {
-                    AnnotationKind::Blur { .. } => Some(Tool::Blur),
-                    AnnotationKind::Pixelate { .. } => Some(Tool::Pixelate),
-                    AnnotationKind::RemoveFill { .. } => Some(Tool::Erase),
-                    AnnotationKind::Redaction { .. } => Some(Tool::Redact),
-                    _ => None,
-                },
-            )
-        });
-        let tool = match self.tool {
-            Tool::Blur => Tool::Pixelate,
-            Tool::Pixelate => Tool::Erase,
-            Tool::Erase => Tool::Redact,
-            Tool::Redact => Tool::Blur,
-            _ => selected.unwrap_or(Tool::Blur),
+    /// B selects Hide. Each press while Hide is active moves to the next style.
+    fn cycle_hide(&mut self, cx: &mut Context<Self>) {
+        let style = if self.tool == Tool::Hide {
+            self.hide.next()
+        } else {
+            self.selected_annotation()
+                .and_then(|annotation| HideStyle::of(&annotation.kind))
+                .map_or(self.hide, |(style, _)| style)
         };
-        self.set_blur_family(tool, cx);
+        self.set_hide(style, cx);
     }
 
-    fn set_blur_family(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        self.tool = tool;
+    /// Selects Hide with `style`, and converts a selected hiding annotation to it.
+    fn set_hide(&mut self, style: HideStyle, cx: &mut Context<Self>) {
+        self.finish_size_edit();
+        self.tool = Tool::Hide;
+        self.hide = style;
         self.selection = None;
         self.panel = None;
-        self.status = tool.label().to_owned();
+        self.status = format!("Hide · {}", style.label());
         if let Some(doc) = &mut self.document
             && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
         {
-            let source_tool = match &annotation.kind {
-                AnnotationKind::Blur { .. } => Some(Tool::Blur),
-                AnnotationKind::Pixelate { .. } => Some(Tool::Pixelate),
-                AnnotationKind::RemoveFill { .. } => Some(Tool::Erase),
-                AnnotationKind::Redaction { .. } => Some(Tool::Redact),
-                _ => None,
-            };
-            let rect = match &annotation.kind {
-                AnnotationKind::Blur { rect, .. }
-                | AnnotationKind::Pixelate { rect, .. }
-                | AnnotationKind::RemoveFill { rect, .. }
-                | AnnotationKind::Redaction { rect } => Some(*rect),
-                _ => None,
-            };
-            if source_tool.is_none() {
-                let _ = doc.select(None);
+            match HideStyle::of(&annotation.kind) {
+                Some((current, rect)) if current != style => {
+                    let mut kind = style.kind(rect);
+                    let mut annotation_style = annotation.style;
+                    self.sizes.apply(&mut kind, &mut annotation_style);
+                    let _ = doc.update_annotation(annotation.id, kind, annotation_style);
+                }
+                Some(_) => {}
+                None => {
+                    let _ = doc.select(None);
+                }
             }
-            if let Some(rect) = rect
-                && source_tool != Some(tool)
-            {
-                let kind = match tool {
-                    Tool::Blur => AnnotationKind::Blur {
-                        rect,
-                        radius: match &annotation.kind {
-                            AnnotationKind::Blur { radius, .. } => *radius,
-                            _ => 8.0,
-                        },
-                    },
-                    Tool::Pixelate => AnnotationKind::Pixelate {
-                        rect,
-                        block_size: match &annotation.kind {
-                            AnnotationKind::Pixelate { block_size, .. } => *block_size,
-                            _ => 12,
-                        },
-                    },
-                    Tool::Erase => AnnotationKind::RemoveFill {
-                        rect,
-                        sample: match &annotation.kind {
-                            AnnotationKind::RemoveFill { sample, .. } => *sample,
-                            _ => None,
-                        },
-                    },
-                    Tool::Redact => AnnotationKind::Redaction { rect },
-                    _ => return,
-                };
-                let _ = doc.update_annotation(annotation.id, kind, annotation.style);
-            }
-        }
-        self.refresh(cx);
-    }
-
-    fn adjust_text_size(&mut self, delta: f32, cx: &mut Context<Self>) {
-        if let Some(doc) = &mut self.document
-            && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
-            && let AnnotationKind::Text {
-                origin,
-                text,
-                font_size,
-            } = annotation.kind
-        {
-            let kind = AnnotationKind::Text {
-                origin,
-                text,
-                font_size: (font_size + delta).clamp(6.0, 192.0),
-            };
-            let _ = doc.update_annotation(annotation.id, kind, annotation.style);
         }
         self.refresh(cx);
     }
@@ -2219,45 +2174,6 @@ impl Editor {
         }
         if let Some(next_counter) = next_counter {
             self.counter = next_counter;
-        }
-        self.refresh(cx);
-    }
-
-    fn adjust_magnifier_zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
-        if let Some(doc) = &mut self.document
-            && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
-            && let AnnotationKind::Magnifier { rect, zoom, source } = annotation.kind
-        {
-            let kind = AnnotationKind::Magnifier {
-                rect,
-                zoom: (zoom + delta).clamp(1.0, 16.0),
-                source,
-            };
-            let _ = doc.update_annotation(annotation.id, kind, annotation.style);
-        }
-        self.refresh(cx);
-    }
-
-    fn adjust_spotlight_dim(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let current = self
-            .document
-            .as_ref()
-            .and_then(|doc| doc.selected().and_then(|id| doc.annotation(id)))
-            .filter(|annotation| matches!(&annotation.kind, AnnotationKind::Spotlight { .. }))
-            .and_then(|annotation| annotation.style.fill)
-            .or(self.style.fill)
-            .map(|color| ((color.a as f32 / 25.0).round() as i32).clamp(1, 9))
-            .unwrap_or(6);
-        let level = (current + delta).clamp(1, 9);
-        let fill = Color::new(0, 0, 0, (level * 25) as u8);
-        self.style.fill = Some(fill);
-        if let Some(doc) = &mut self.document
-            && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
-            && matches!(&annotation.kind, AnnotationKind::Spotlight { .. })
-        {
-            let mut style = annotation.style;
-            style.fill = Some(fill);
-            let _ = doc.update_annotation(annotation.id, annotation.kind, style);
         }
         self.refresh(cx);
     }
@@ -2291,7 +2207,7 @@ impl Editor {
                 .right(px(5.0))
                 .size(px(7.0))
                 .rounded_full()
-                .bg(rgb(0x0a84ff));
+                .bg(rgb(crate::theme::ACCENT));
             #[cfg(feature = "ui-tests")]
             let dot = {
                 use gpui_kit::test::TestSupportExt;
@@ -2359,50 +2275,7 @@ impl Editor {
         }
     }
 
-    fn menu_row(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        shortcut: &'static str,
-        command: Command,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(
-                Button::new(id)
-                    .ghost()
-                    .label(label)
-                    .w(px(225.0))
-                    .on_click(cx.listener(move |this, _, w, cx| this.command(command, w, cx))),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(shortcut),
-            )
-    }
-
-    fn arrow_properties(&self) -> Option<(f32, ArrowVariant)> {
-        let selected = self
-            .document
-            .as_ref()
-            .and_then(|doc| doc.selected().and_then(|id| doc.annotation(id)));
-        match selected {
-            Some(Annotation {
-                kind: AnnotationKind::Arrow { variant, .. },
-                style,
-                ..
-            }) => Some((style.stroke_width, *variant)),
-            None if self.tool == Tool::Arrow => Some((self.arrow_width, self.arrow_variant)),
-            _ => None,
-        }
-    }
-
-    fn properties(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn color_swatches(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = [
             Color::new(255, 0, 0, 255),
             Color::new(255, 153, 0, 255),
@@ -2413,87 +2286,36 @@ impl Editor {
             Color::WHITE,
             Color::BLACK,
         ];
-        let selected = self
-            .document
-            .as_ref()
-            .and_then(|doc| doc.selected().and_then(|id| doc.annotation(id)).cloned());
-        let arrow = self.arrow_properties();
-        let family = selected
-            .as_ref()
-            .and_then(|annotation| match &annotation.kind {
-                AnnotationKind::Blur { .. } => Some(Tool::Blur),
-                AnnotationKind::Pixelate { .. } => Some(Tool::Pixelate),
-                AnnotationKind::RemoveFill { .. } => Some(Tool::Erase),
-                AnnotationKind::Redaction { .. } => Some(Tool::Redact),
-                _ => None,
-            })
-            .or(match self.tool {
-                Tool::Blur | Tool::Pixelate | Tool::Erase | Tool::Redact => Some(self.tool),
-                _ => None,
-            });
-        let text_size = selected
-            .as_ref()
-            .and_then(|annotation| match &annotation.kind {
-                AnnotationKind::Text { font_size, .. } => Some(*font_size),
-                _ => None,
-            });
-        let counter_value = selected
-            .as_ref()
-            .and_then(|annotation| match &annotation.kind {
-                AnnotationKind::Counter { value, .. } => Some(*value),
-                _ => None,
-            });
-        let magnifier_zoom = selected
-            .as_ref()
-            .and_then(|annotation| match &annotation.kind {
-                AnnotationKind::Magnifier { zoom, .. } => Some(*zoom),
-                _ => None,
-            });
-        let spotlight_selected = selected
-            .as_ref()
-            .is_some_and(|annotation| matches!(&annotation.kind, AnnotationKind::Spotlight { .. }));
-        let spotlight_level = (spotlight_selected || self.tool == Tool::Spotlight).then(|| {
-            let fill = selected
-                .as_ref()
-                .filter(|annotation| matches!(&annotation.kind, AnnotationKind::Spotlight { .. }))
-                .and_then(|annotation| annotation.style.fill)
-                .or(self.style.fill);
-            fill.map(|color| ((color.a as f32 / 25.0).round() as i32).clamp(1, 9))
-                .unwrap_or(6)
-        });
-
-        let mut properties = div()
-            .occlude()
-            .absolute()
-            .top(px(12.0))
-            .right(px(16.0))
+        div()
             .flex()
             .items_center()
-            .gap_2()
-            .p_2()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .bg(cx.theme().popover.opacity(0.95))
-            .text_color(cx.theme().popover_foreground)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .shadow_sm()
+            .gap_1()
             .children(colors.into_iter().enumerate().map(|(index, color)| {
+                // The selected color gets a ring with a gap, so it stays
+                // visible on swatches that match the panel or the accent.
                 let color_button = div()
                     .id(("color", index))
-                    .size(px(21.0))
-                    .rounded_md()
-                    .bg(color_ui(color))
-                    .border_1()
+                    .size(px(27.0))
+                    .p(px(2.0))
+                    .rounded_lg()
+                    .border_2()
                     .border_color(if self.style.stroke == color {
                         cx.theme().foreground
                     } else {
-                        cx.theme().border
+                        gpui_kit::transparent_black()
                     })
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded_md()
+                            .bg(color_ui(color))
+                            .border_1()
+                            .border_color(cx.theme().border),
+                    )
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.change_style(Some(color), None, None, cx)
-                    }));
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.change_style(Some(color), None, cx)),
+                    );
                 #[cfg(feature = "ui-tests")]
                 let color_button = {
                     use gpui_kit::test::TestSupportExt;
@@ -2501,18 +2323,102 @@ impl Editor {
                 };
                 color_button
             }))
-            .child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border));
+    }
 
-        if let Some((width, active)) = arrow {
-            let mut variants = div().flex().gap(px(1.0)).rounded_md().bg(cx.theme().accent);
+    /// A row of buttons where the selected one is filled with the accent color.
+    fn segment(cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .gap(px(1.0))
+            .p(px(2.0))
+            .rounded_md()
+            .bg(cx.theme().foreground.opacity(0.06))
+    }
+
+    /// The properties popover above the dock, for the selected annotation or the
+    /// current tool. `None` when there is nothing to edit.
+    fn properties(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let selected = self.selected_annotation().cloned();
+        let subject = selected
+            .as_ref()
+            .map_or(self.tool, |annotation| Tool::of_kind(&annotation.kind));
+        let mut sections: Vec<AnyElement> = vec![];
+
+        if !matches!(
+            subject,
+            Tool::Select | Tool::Hide | Tool::Spotlight | Tool::Ruler
+        ) {
+            sections.push(self.color_swatches(cx).into_any_element());
+        }
+
+        if subject == Tool::Hide {
+            let active = selected
+                .as_ref()
+                .and_then(|annotation| HideStyle::of(&annotation.kind))
+                .map_or(self.hide, |(style, _)| style);
+            let mut styles = Self::segment(cx);
+            for style in HideStyle::ALL {
+                let on = active == style;
+                styles = styles.child(
+                    Button::new(("hide-style", style as usize))
+                        .ghost()
+                        .compact()
+                        .icon(tool_icon(style.icon()))
+                        .label(style.label())
+                        .selected(on)
+                        .when(on, |button| {
+                            button
+                                .bg(rgb(crate::theme::ACCENT))
+                                .text_color(rgb(0xffffff))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_hide(style, cx))),
+                );
+            }
+            sections.push(styles.into_any_element());
+        }
+
+        if let Some(size) = self.size_target() {
+            sections.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(size.label()),
+                    )
+                    .child(crate::arrow_palette::size_slider(
+                        &self.size_slider,
+                        size.label(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id("size-value")
+                            .min_w(px(42.0))
+                            .text_xs()
+                            .child(size.format(self.size_value(size))),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if subject == Tool::Arrow {
+            let active = match selected.as_ref().map(|annotation| &annotation.kind) {
+                Some(AnnotationKind::Arrow { variant, .. }) => *variant,
+                _ => self.arrow_variant,
+            };
+            let mut variants = Self::segment(cx);
             for (variant, label) in [
                 (ArrowVariant::Solid, "Solid arrow"),
                 (ArrowVariant::HandDrawn, "Hand drawn arrow"),
                 (ArrowVariant::Thin, "Thin arrow"),
                 (ArrowVariant::DoubleEnded, "Double ended arrow"),
             ] {
-                let selected = active == variant;
-                let color: Hsla = if selected {
+                let on = active == variant;
+                let color: Hsla = if on {
                     rgb(0xffffff).into()
                 } else {
                     cx.theme().foreground
@@ -2521,192 +2427,258 @@ impl Editor {
                     Button::new(("arrow-variant", variant as usize))
                         .ghost()
                         .compact()
-                        .selected(selected)
-                        .toggled(selected)
+                        .selected(on)
+                        .toggled(on)
                         .tooltip(label)
                         .w(px(34.0))
-                        .h(px(32.0))
+                        .h(px(30.0))
                         .px_1()
-                        .when(selected, |button| button.bg(rgb(0x007aff)))
+                        .when(on, |button| button.bg(rgb(crate::theme::ACCENT)))
                         .child(crate::arrow_palette::variant_icon(variant, color))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.change_arrow_variant(variant, cx)
                         })),
                 );
             }
-            properties = properties
-                .child(crate::arrow_palette::size_slider(&self.arrow_size, cx))
-                .child(
-                    div()
-                        .id("arrow-size-value")
-                        .w(px(34.0))
-                        .text_xs()
-                        .child(format!("{width:.2}")),
-                )
-                .child(variants);
-        } else {
-            properties = properties
-                .children([2.0_f32, 4.0, 8.0].into_iter().map(|width| {
-                    Button::new(("width", width as usize))
-                        .ghost()
-                        .label(format!("{width:.0}"))
-                        .selected(self.style.stroke_width == width)
-                        .w(px(40.0))
-                        .px_2()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change_style(None, Some(width), None, cx)
-                        }))
-                }))
-                .child(
-                    Button::new("fill")
-                        .ghost()
-                        .icon(tool_icon("paint-bucket"))
-                        .tooltip("Toggle fill")
-                        .selected(self.style.fill.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.change_style(None, None, Some(this.style.fill.is_none()), cx)
-                        })),
-                );
+            sections.push(variants.into_any_element());
         }
 
-        if let Some(active) = family {
-            properties = properties.child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border));
-            for (id, label, tool) in [
-                ("family-blur", "Blur", Tool::Blur),
-                ("family-pixelate", "Pixelate", Tool::Pixelate),
-                ("family-erase", "Erase", Tool::Erase),
-                ("family-redact", "Redact", Tool::Redact),
-            ] {
-                properties = properties.child(
-                    Button::new(id)
-                        .ghost()
-                        .label(label)
-                        .selected(active == tool)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.set_blur_family(tool, cx)),
-                        ),
-                );
+        if matches!(subject, Tool::Rectangle | Tool::Ellipse) {
+            sections.push(
+                Button::new("fill")
+                    .ghost()
+                    .icon(tool_icon("paint-bucket"))
+                    .tooltip("Toggle fill")
+                    .selected(self.style.fill.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.change_style(None, Some(this.style.fill.is_none()), cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(AnnotationKind::Counter { value, .. }) =
+            selected.as_ref().map(|annotation| &annotation.kind)
+        {
+            sections.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Number"),
+                    )
+                    .child(
+                        Button::new("counter-value-down")
+                            .ghost()
+                            .compact()
+                            .icon(tool_icon("minus"))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.adjust_counter_value(-1, cx)),
+                            ),
+                    )
+                    .child(div().min_w(px(18.0)).text_sm().child(value.to_string()))
+                    .child(
+                        Button::new("counter-value-up")
+                            .ghost()
+                            .compact()
+                            .icon(tool_icon("plus"))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.adjust_counter_value(1, cx)),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if subject == Tool::Ruler {
+            sections.push(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Hold 1 for width or 2 for height. Shift includes outer edges.")
+                    .into_any_element(),
+            );
+            let control = Button::new("measure-units")
+                .ghost()
+                .compact()
+                .label(if self.physical_units {
+                    "Physical pixels"
+                } else {
+                    "Points"
+                })
+                .tooltip("Switch between points and physical pixels")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.physical_units = !this.physical_units;
+                    let outer = this.measure.as_ref().is_some_and(|m| m.outer);
+                    this.update_measure(this.cursor, outer);
+                    cx.notify();
+                }));
+            sections.push(control.into_any_element());
+        }
+
+        if sections.is_empty() {
+            return None;
+        }
+        let mut panel = div()
+            .id("properties")
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_lg()
+            .shadow_lg();
+        for (index, section) in sections.into_iter().enumerate() {
+            if index > 0 {
+                panel = panel.child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border));
             }
+            panel = panel.child(section);
         }
-
-        if let Some(font_size) = text_size {
-            properties = properties
-                .child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border))
-                .child(
-                    Button::new("text-size-down")
-                        .ghost()
-                        .label("−")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_text_size(-2.0, cx))),
-                )
-                .child(div().text_sm().child(format!("{font_size:.0} pt")))
-                .child(
-                    Button::new("text-size-up")
-                        .ghost()
-                        .label("+")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_text_size(2.0, cx))),
-                );
-        }
-
-        if let Some(value) = counter_value {
-            properties = properties
-                .child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border))
-                .child(
-                    Button::new("counter-value-down")
-                        .ghost()
-                        .label("−")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_counter_value(-1, cx))),
-                )
-                .child(div().text_sm().child(value.to_string()))
-                .child(
-                    Button::new("counter-value-up")
-                        .ghost()
-                        .label("+")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_counter_value(1, cx))),
-                );
-        }
-
-        if let Some(zoom) = magnifier_zoom {
-            properties = properties
-                .child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border))
-                .child(
-                    Button::new("magnifier-zoom-down")
-                        .ghost()
-                        .label("−")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.adjust_magnifier_zoom(-1.0, cx)),
-                        ),
-                )
-                .child(div().text_sm().child(format!("{zoom:.1}×")))
-                .child(
-                    Button::new("magnifier-zoom-up")
-                        .ghost()
-                        .label("+")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.adjust_magnifier_zoom(1.0, cx)),
-                        ),
-                );
-        }
-
-        if let Some(level) = spotlight_level {
-            properties = properties
-                .child(div().w(px(1.0)).h(px(22.0)).bg(cx.theme().border))
-                .child(
-                    Button::new("spotlight-dim-down")
-                        .ghost()
-                        .label("−")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_spotlight_dim(-1, cx))),
-                )
-                .child(div().text_sm().child(format!("Dim {level}")))
-                .child(
-                    Button::new("spotlight-dim-up")
-                        .ghost()
-                        .label("+")
-                        .on_click(cx.listener(|this, _, _, cx| this.adjust_spotlight_dim(1, cx))),
-                );
-        }
-
-        properties
+        Some(panel)
     }
 
-    fn measure_units(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The image size in the current units, such as "1392 × 722 pt".
+    fn image_size_label(&self) -> String {
         let units = if self.physical_units {
             1.0
         } else {
             self.measure_scale
         };
-        let label = format!(
+        format!(
             "{:.0} × {:.0} {}",
             self.image_size.0 as f32 / units,
             self.image_size.1 as f32 / units,
             if self.physical_units { "px" } else { "pt" }
-        );
-        let control = div()
-            .id("measure-units")
+        )
+    }
+
+    /// The main action, filled with the accent color. The theme's primary
+    /// button is neutral, so this button sets its own colors.
+    fn render_copy_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent: Hsla = rgb(crate::theme::ACCENT).into();
+        let button = div()
+            .id("copy")
             .flex()
-            .flex_col()
+            .items_center()
+            .gap_2()
+            .h(px(32.0))
             .px_3()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .child(label)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Image size"),
-            )
+            .ml_1()
+            .rounded_md()
+            .bg(accent)
+            .hover(move |style| style.bg(accent.opacity(0.85)))
+            .text_color(rgb(0xffffff))
+            .font_weight(FontWeight::SEMIBOLD)
             .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.physical_units = !this.physical_units;
-                let outer = this.measure.as_ref().is_some_and(|m| m.outer);
-                this.update_measure(this.cursor, outer);
-                cx.notify();
-            }));
+            .child(tool_icon("copy").size(px(17.0)))
+            .child("Copy")
+            .tooltip(|window, cx| {
+                component::tooltip::Tooltip::new("Copy image · Ctrl/Cmd C").build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, w, cx| this.command(Command::Copy, w, cx)));
         #[cfg(feature = "ui-tests")]
-        let control = {
+        let button = {
             use gpui_kit::test::TestSupportExt;
-            control.test_support()
+            button.test_support()
         };
-        control
+        button
+    }
+
+    /// Every tool, in a dock at the bottom center of the canvas.
+    fn render_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dock = div()
+            .id("tool-dock")
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .flex()
+            .gap(px(2.0))
+            .p(px(5.0))
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(14.0))
+            .shadow_lg()
+            .children(Tool::ALL.map(|tool| {
+                Button::new(("tool", tool as usize))
+                    .ghost()
+                    .icon(tool_icon(tool.icon()))
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .selected(self.tool == tool)
+                    .tooltip(tool.shortcut().map_or_else(
+                        || tool.label().to_owned(),
+                        |key| format!("{} · {key}", tool.label()),
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_tool(tool, cx)))
+            }));
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(DOCK_BOTTOM))
+            .flex()
+            .justify_center()
+            .child(dock)
+    }
+
+    /// The sampled color next to the pointer, shown while Tab or C is held.
+    fn render_color_peek(
+        &self,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.color_peek {
+            return None;
+        }
+        // The label opens below and right of the pointer, and flips to the
+        // other side near the canvas edges so it is never clipped.
+        let point = self.canvas_point(self.cursor);
+        let (label_width, label_height) = (110.0, 30.0);
+        let x = if point.x + 18.0 + label_width > width {
+            point.x - 12.0 - label_width
+        } else {
+            point.x + 18.0
+        };
+        let y = if point.y + 18.0 + label_height > height {
+            point.y - 12.0 - label_height
+        } else {
+            point.y + 18.0
+        };
+        Some(
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .child(
+                    div()
+                        .size(px(14.0))
+                        .rounded_full()
+                        .bg(color_ui(self.sampled))
+                        .border_1()
+                        .border_color(cx.theme().border),
+                )
+                .child(self.sampled.format(ColorFormat::HexRgb)),
+        )
     }
 
     fn render_image_drag(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2777,11 +2749,9 @@ impl Editor {
         };
         let title = match panel {
             Panel::Menu => return div().into_any_element(),
-            Panel::Tools => "Tools",
             Panel::Text => "Text annotation",
             Panel::Backdrop => "Backdrop",
             Panel::Help => "Keyboard shortcuts",
-            Panel::Ruler => "Use the keyboard",
         };
         let mut body = div()
             .id("floating-panel")
@@ -2818,32 +2788,6 @@ impl Editor {
         );
         match panel {
             Panel::Menu => {}
-            Panel::Ruler => {
-                body = body.child("Hold 1 or Left/Right to measure the width. Hold 2 or Up/Down to measure the height. Move the pointer to the area or gap.")
-                    .child("Hold Shift to include the outer edges. Use the wheel to adjust sensitivity. Click to place the measurement on the image.")
-                    .child("Click the image size to switch between points and physical pixels.");
-            }
-            Panel::Tools => {
-                body = body.child(self.menu_row(
-                    "add-capture",
-                    "Add capture",
-                    "Ctrl/Cmd A",
-                    Command::AddCapture,
-                    cx,
-                ));
-                for tool in Tool::ALL {
-                    body = body.child(
-                        Button::new(("more-tool", tool as usize))
-                            .ghost()
-                            .icon(tool_icon(tool.icon()))
-                            .label(format!("{}    {}", tool.label(), tool.key()))
-                            .selected(self.tool == tool)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.select_tool(tool, cx)),
-                            ),
-                    );
-                }
-            }
             Panel::Text => {
                 body = body
                     .child(Input::new(&self.input).id("annotation-text"))
@@ -2975,8 +2919,10 @@ impl Editor {
                 for text in [
                     "V Select / Crop    Enter Apply crop",
                     "A Arrow · drag its middle handle to bend",
-                    "O Oval    L Line    C Counter / average color",
-                    "B Blur / Pixelate / Erase / Redact    H Highlighter    S Spotlight",
+                    "T Text    R Rectangle    O Oval    L Line",
+                    "C Counter / average color",
+                    "B Hide · press again for Blur, Pixelate, Erase, Redact",
+                    "H Highlighter    S Spotlight",
                     "Z + click Quick zoom    Alt Zoom out",
                     "Shift Constrain shapes / angles",
                     "Space + drag or right-drag Pan",
@@ -3109,28 +3055,33 @@ impl Render for Editor {
                 .map(|(bounds, image)| (bounds, display_image(image)));
         }
         self.prepare_preview(window, cx);
-        if let Some((width, _)) = self.arrow_properties()
-            && self.arrow_size.read(cx).value().end() != width
+        if let Some(size) = self.size_target()
+            && self.size_edit.is_none()
         {
-            self.arrow_size
-                .update(cx, |slider, cx| slider.set_value(width, window, cx));
+            let fraction = size.fraction(self.size_value(size));
+            if self.size_slider.read(cx).value().end() != fraction {
+                self.size_slider
+                    .update(cx, |slider, cx| slider.set_value(fraction, window, cx));
+            }
         }
         let size = window.viewport_size();
         let width = f32::from(size.width);
         let height = f32::from(size.height) - BAR;
         if self.fit && self.image_size.0 > 0 {
-            let zoom = ((width - 48.0) / self.image_size.0 as f32)
-                .min((height - 48.0) / self.image_size.1 as f32)
+            let (image_width, image_height) = (self.image_size.0 as f32, self.image_size.1 as f32);
+            // Fit between a 24 px top margin and the dock. Center the image when
+            // it has room, and otherwise keep its bottom clear of the dock.
+            let zoom = ((width - 48.0) / image_width)
+                .min((height - 24.0 - DOCK_SPACE) / image_height)
                 .clamp(0.01, 1.0);
+            let top = ((height - image_height * zoom) / 2.0)
+                .min(height - DOCK_SPACE - image_height * zoom);
             self.transform = ViewportTransform::new(
                 zoom,
-                ImagePoint::new(
-                    (width - self.image_size.0 as f32 * zoom) / 2.0,
-                    (height - self.image_size.1 as f32 * zoom) / 2.0,
-                ),
+                ImagePoint::new((width - image_width * zoom) / 2.0, top),
             );
         }
-        let mut bar = div()
+        let bar = div()
             .id("editor-toolbar")
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3139,80 +3090,10 @@ impl Render for Editor {
             .gap(px(2.0))
             .h(px(BAR))
             .w_full()
+            .pr_2()
             .bg(cx.theme().title_bar)
-            .text_color(cx.theme().foreground);
-        bar = bar
+            .text_color(cx.theme().foreground)
             .child(self.render_app_menu(cx))
-            .child(self.toolbar_button(
-                "copy",
-                "copy",
-                "Copy image · Ctrl/Cmd C",
-                Command::Copy,
-                cx,
-            ))
-            .child(self.toolbar_button(
-                "save",
-                "save",
-                "Save image · Ctrl/Cmd S",
-                Command::Save,
-                cx,
-            ))
-            .child(self.toolbar_button("pin", "pin", "Pin image on screen", Command::Pin, cx))
-            .child(self.render_image_drag(cx))
-            .child(div().w(px(1.0)).h(px(24.0)).mx_2().bg(cx.theme().border));
-        let primary = [
-            Tool::Select,
-            Tool::Arrow,
-            Tool::Text,
-            Tool::Ruler,
-            Tool::Rectangle,
-            Tool::Freehand,
-            Tool::Zoom,
-        ];
-        let visible = (((width - 740.0) / 36.0).floor() as usize).clamp(3, 12);
-        let tools: Vec<_> = primary
-            .into_iter()
-            .chain(Tool::ALL.into_iter().filter(|tool| !primary.contains(tool)))
-            .take(visible)
-            .collect();
-        for tool in tools {
-            if tool == Tool::Freehand {
-                bar = bar.child(
-                    Button::new("backdrop")
-                        .ghost()
-                        .icon(tool_icon("layers"))
-                        .tooltip("Backdrop")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.panel = Some(Panel::Backdrop);
-                            cx.notify();
-                        })),
-                );
-            }
-            bar = bar.child(
-                Button::new(("tool", tool as usize))
-                    .ghost()
-                    .icon(tool_icon(tool.icon()))
-                    .w(px(34.0))
-                    .h(px(36.0))
-                    .selected(self.tool == tool)
-                    .tooltip(tool.shortcut().map_or_else(
-                        || tool.label().to_owned(),
-                        |key| format!("{} · {key}", tool.label()),
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_tool(tool, cx))),
-            );
-        }
-        bar = bar
-            .child(
-                Button::new("more-tools")
-                    .ghost()
-                    .icon(tool_icon("ellipsis"))
-                    .tooltip("More tools")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.panel = Some(Panel::Tools);
-                        cx.notify();
-                    })),
-            )
             .child(
                 div()
                     .flex_1()
@@ -3221,42 +3102,33 @@ impl Render for Editor {
                     .on_mouse_down(MouseButton::Left, |_, w, _| w.start_window_move()),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .border_l_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded_full()
-                            .bg(color_ui(self.sampled))
-                            .border_1()
-                            .border_color(cx.theme().border),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(self.sampled.format(ColorFormat::HexRgb))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Tab to copy"),
-                            ),
-                    ),
-            )
-            .child(self.measure_units(cx))
-            .child(
                 Button::new("zoom-fit")
                     .ghost()
                     .label(format!("{:.0}%", self.transform.zoom() * 100.0))
-                    .tooltip("Fit image · Ctrl/Cmd 1")
+                    .tooltip(format!("{} · Fit · Ctrl/Cmd 1", self.image_size_label()))
                     .on_click(cx.listener(|this, _, w, cx| this.command(Command::Fit, w, cx))),
-            );
+            )
+            .child(div().w(px(1.0)).h(px(24.0)).mx_2().bg(cx.theme().border))
+            .child(
+                Button::new("backdrop")
+                    .ghost()
+                    .icon(tool_icon("layers"))
+                    .label("Backdrop")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Backdrop);
+                        cx.notify();
+                    })),
+            )
+            .child(self.render_image_drag(cx))
+            .child(self.toolbar_button("pin", "pin", "Pin image on screen", Command::Pin, cx))
+            .child(self.toolbar_button(
+                "save",
+                "save",
+                "Save image · Ctrl/Cmd S",
+                Command::Save,
+                cx,
+            ))
+            .child(self.render_copy_button(cx));
         let mut canvas = div()
             .id("editor-canvas")
             .relative()
@@ -3378,7 +3250,7 @@ impl Render for Editor {
                     .w(px(w.max(1.0)))
                     .h(px(h.max(1.0)))
                     .border_1()
-                    .border_color(rgb(0x007aff));
+                    .border_color(rgb(crate::theme::ACCENT));
                 for (x, y) in [
                     (0.0, 0.0),
                     (w / 2.0, 0.0),
@@ -3424,14 +3296,21 @@ impl Render for Editor {
                         )),
                 );
             }
-            if self.tool != Tool::Select
-                || self
-                    .document
-                    .as_ref()
-                    .is_some_and(|doc| doc.selected().is_some())
-            {
-                canvas = canvas.child(self.properties(cx));
+            if let Some(properties) = self.properties(cx) {
+                canvas = canvas.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(DOCK_BOTTOM + DOCK_HEIGHT + 10.0))
+                        .flex()
+                        .justify_center()
+                        .child(properties),
+                );
             }
+            canvas = canvas
+                .child(self.render_dock(cx))
+                .children(self.render_color_peek(width, height, cx));
         } else {
             canvas = canvas.child(
                 div()
@@ -3484,7 +3363,7 @@ impl Render for Editor {
             div()
                 .absolute()
                 .left(px(12.0))
-                .bottom(px(12.0))
+                .top(px(12.0))
                 .max_w(px(width - 24.0))
                 .px_3()
                 .py_1()
@@ -3586,6 +3465,18 @@ fn resize_from_handle(rect: ImageRect, handle: usize, p: ImagePoint, constrain: 
     }
     ImageRect::new(l, t, r - l, b - t)
 }
+/// The style for new annotations after `annotation` is selected. A spotlight's
+/// fill is its dim, not a shape fill, so the current fill stays.
+fn drawing_style(current: AnnotationStyle, annotation: &Annotation) -> AnnotationStyle {
+    match annotation.kind {
+        AnnotationKind::Spotlight { .. } => AnnotationStyle {
+            fill: current.fill,
+            ..annotation.style
+        },
+        _ => annotation.style,
+    }
+}
+
 fn hex_color(rgb: u32) -> Color {
     Color::new((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
 }

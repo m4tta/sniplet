@@ -96,6 +96,7 @@ pub(crate) const EDITOR: Layout = Layout {
             Command::AutoAdjust,
         ),
         run("Reset Crop", "crop", Command::ResetCrop),
+        run("Add Capture", "image-plus", Command::AddCapture),
         run("Upload Image", "cloud-upload", Command::Upload),
     ],
     footer: &[

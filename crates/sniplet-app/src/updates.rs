@@ -459,7 +459,7 @@ impl Editor {
             .occlude()
             .absolute()
             .right(px(12.0))
-            .bottom(px(12.0))
+            .top(px(12.0))
             .w(px(440.0))
             .p_3()
             .flex()
@@ -791,7 +791,7 @@ fn status_icon(name: &'static str, failed: bool, cx: &App) -> Div {
     } else if name == "circle-check" {
         cx.theme().success
     } else {
-        rgb(0x0a84ff).into()
+        rgb(crate::theme::ACCENT).into()
     };
     div()
         .size(px(30.0))

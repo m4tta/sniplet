@@ -10,11 +10,15 @@ use sniplet_core::ArrowVariant;
 const TRACK_WIDTH: f32 = 140.0;
 const THUMB_SIZE: f32 = 18.0;
 
-/// The compact tapered size control used by the arrow palette.
+/// The compact tapered size control shared by every tool in the properties popover.
 ///
 /// `Slider`, `SliderTrack`, `SliderIndicator`, and `SliderThumb` own all pointer
 /// interaction. This function only supplies their layout and presentation.
-pub(crate) fn size_slider(state: &Entity<SliderState>, cx: &App) -> impl IntoElement {
+pub(crate) fn size_slider(
+    state: &Entity<SliderState>,
+    label: &'static str,
+    cx: &App,
+) -> impl IntoElement {
     let percentage = state.read(cx).percentage().end;
     let percentage = if percentage.is_finite() {
         percentage.clamp(0.0, 1.0)
@@ -25,11 +29,11 @@ pub(crate) fn size_slider(state: &Entity<SliderState>, cx: &App) -> impl IntoEle
     let thumb_border = cx.theme().border;
 
     div()
-        .id("arrow-size-slider")
+        .id("size-slider")
         .test_support()
-        .accessibility_id("arrow-size-slider")
+        .accessibility_id("size-slider")
         .role(Role::Slider)
-        .aria_label("Arrow size")
+        .aria_label(label)
         .w(px(TRACK_WIDTH + THUMB_SIZE))
         .h(px(32.0))
         .px(px(THUMB_SIZE / 2.0))
@@ -53,7 +57,7 @@ pub(crate) fn size_slider(state: &Entity<SliderState>, cx: &App) -> impl IntoEle
                                 .h(px(THUMB_SIZE))
                                 .child(
                                     div()
-                                        .id("arrow-size-track")
+                                        .id("size-track")
                                         .test_support()
                                         .absolute()
                                         .size_full()
@@ -185,7 +189,7 @@ mod tests {
 
     impl Render for Harness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            size_slider(&self.state, cx)
+            size_slider(&self.state, "Size", cx)
         }
     }
 
@@ -210,9 +214,9 @@ mod tests {
 
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            let track = window.find("arrow-size-track").bounds();
+            let track = window.find("size-track").bounds();
             window.click_at(
-                "arrow-size-track",
+                "size-track",
                 point(track.size.width / 2.0, track.size.height / 2.0),
                 cx,
             );
