@@ -35,18 +35,19 @@ impl ReleaseChannel {
     }
 }
 
+/// The app version: `0.2.1` for stable, `0.2.1-nightly.20261104.17` for nightly.
+pub const VERSION: &str = env!("SNIPLET_VERSION");
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildIdentity {
     pub version: String,
     pub sha: String,
-    pub build_number: u64,
 }
 
 pub fn current_build() -> BuildIdentity {
     BuildIdentity {
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: VERSION.into(),
         sha: env!("SNIPLET_BUILD_SHA").into(),
-        build_number: env!("SNIPLET_BUILD_NUMBER").parse().unwrap_or(0),
     }
 }
 
@@ -103,9 +104,7 @@ pub fn wait_for_parent(process_id: u32) -> Result<()> {
 pub struct UpdateRelease {
     pub version: String,
     pub sha: String,
-    pub build_number: u64,
     pub tag: String,
-    pub channel: ReleaseChannel,
     pub size: u64,
     asset_name: String,
     sha256: String,
@@ -124,7 +123,6 @@ struct Manifest {
     sha: String,
     channel: ReleaseChannel,
     tag: String,
-    build_number: u64,
     assets: Vec<Asset>,
 }
 
@@ -138,7 +136,6 @@ struct Asset {
 
 #[derive(Deserialize)]
 struct GitHubRelease {
-    id: u64,
     tag_name: String,
     draft: bool,
     prerelease: bool,
@@ -200,6 +197,21 @@ fn verify_manifest(bytes: &[u8], signature: &[u8], key: &str) -> Result<Manifest
     serde_json::from_slice(bytes).context("Invalid update manifest")
 }
 
+/// The channel a version belongs to: `X.Y.Z` is stable, `X.Y.Z-nightly.<date>.<run>` is nightly.
+fn version_channel(version: &semver::Version) -> Option<ReleaseChannel> {
+    let pre: Vec<_> = version.pre.as_str().split('.').collect();
+    match pre.as_slice() {
+        _ if !version.build.is_empty() => None,
+        [""] => Some(ReleaseChannel::Stable),
+        ["nightly", date, run]
+            if date.len() == 8 && [date, run].iter().all(|p| p.parse::<u64>().is_ok()) =>
+        {
+            Some(ReleaseChannel::Nightly)
+        }
+        _ => None,
+    }
+}
+
 fn select_manifest(
     manifest: Manifest,
     tag: &str,
@@ -209,13 +221,16 @@ fn select_manifest(
     extension: &str,
 ) -> Result<Option<UpdateRelease>> {
     let version = semver::Version::parse(&manifest.version)?;
+    // A channel change must never install an older version. Each nightly sorts after
+    // the newest stable and before the next one, so Nightly to Stable waits for that.
+    // This check comes first, so older releases with other manifest formats are skipped.
+    if version <= semver::Version::parse(&current.version)? {
+        return Ok(None);
+    }
+    ensure!(manifest.schema == 3, "Unsupported update manifest");
     ensure!(
-        version.pre.is_empty() && version.build.is_empty(),
+        version_channel(&version) == Some(channel),
         "Invalid release version"
-    );
-    ensure!(
-        manifest.schema == 2 && manifest.build_number > 0,
-        "Unsupported update manifest"
     );
     ensure!(
         manifest.sha.len() == 40
@@ -225,12 +240,10 @@ fn select_manifest(
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "Invalid release commit"
     );
-    let expected_tag = match channel {
-        ReleaseChannel::Stable => format!("v{}", manifest.version),
-        ReleaseChannel::Nightly => format!("v{}-{}", manifest.version, &manifest.sha[..7]),
-    };
     ensure!(
-        manifest.channel == channel && manifest.tag == tag && tag == expected_tag,
+        manifest.channel == channel
+            && manifest.tag == tag
+            && tag == format!("v{}", manifest.version),
         "The update channel does not match its signature"
     );
     let asset = manifest
@@ -248,7 +261,7 @@ fn select_manifest(
         "Duplicate update package"
     );
     ensure!(
-        asset.name == format!("Sniplet-{}-{target}{extension}", &tag[1..]),
+        asset.name == format!("Sniplet-{}-{target}{extension}", manifest.version),
         "Unexpected update package name"
     );
     ensure!(
@@ -259,22 +272,10 @@ fn select_manifest(
         asset.sha256.len() == 64 && hex::decode(&asset.sha256).is_ok(),
         "Invalid update checksum"
     );
-    let current_version = semver::Version::parse(&current.version)?;
-    // A channel change must never silently install an older version. A nightly
-    // may become a stable release without replacing identical package bytes.
-    let newer = version > current_version
-        || (version == current_version
-            && manifest.sha != current.sha
-            && manifest.build_number > current.build_number);
-    if !newer {
-        return Ok(None);
-    }
     Ok(Some(UpdateRelease {
         version: manifest.version,
         sha: manifest.sha,
-        build_number: manifest.build_number,
         tag: manifest.tag,
-        channel,
         size: asset.size,
         asset_name: asset.name.clone(),
         sha256: asset.sha256.clone(),
@@ -295,14 +296,17 @@ pub fn check(channel: ReleaseChannel, current: &BuildIdentity) -> Result<Option<
         ReleaseChannel::Nightly => {
             let releases: Vec<GitHubRelease> =
                 serde_json::from_slice(&fetch(&format!("{api}?per_page=100"), 2 * 1024 * 1024)?)?;
+            // Older nightlies used other tag formats; only `vX.Y.Z-nightly.*` can update.
             releases
                 .into_iter()
-                .filter(|r| {
-                    !r.draft
-                        && r.prerelease
-                        && r.assets.iter().any(|a| a.name == "release.json.sig")
+                .filter(|r| !r.draft && r.prerelease)
+                .filter_map(|r| {
+                    let version = semver::Version::parse(r.tag_name.strip_prefix('v')?).ok()?;
+                    (version_channel(&version) == Some(ReleaseChannel::Nightly))
+                        .then_some((version, r))
                 })
-                .max_by_key(|r| r.id)
+                .max_by(|a, b| a.0.cmp(&b.0))
+                .map(|(_, r)| r)
         }
     };
     let Some(release) = release else {
@@ -464,24 +468,38 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    fn payload(channel: ReleaseChannel, number: u64) -> Vec<u8> {
-        let sha = "abcdef0123456789abcdef0123456789abcdef01";
-        let tag = if channel == ReleaseChannel::Nightly {
-            "v0.2.0-abcdef0"
+    fn payload(version: &str) -> Vec<u8> {
+        let channel = if version.contains('-') {
+            ReleaseChannel::Nightly
         } else {
-            "v0.2.0"
+            ReleaseChannel::Stable
         };
-        serde_json::to_vec(&serde_json::json!({"schema":2,"version":"0.2.0","sha":sha,
-            "build_number":number,"channel":channel,"tag":tag,"assets":[{
-            "target":"windows-x64","name":format!("Sniplet-{}-windows-x64.zip", &tag[1..]),
+        serde_json::to_vec(&serde_json::json!({"schema":3,"version":version,
+            "sha":"abcdef0123456789abcdef0123456789abcdef01","channel":channel,
+            "tag":format!("v{version}"),"assets":[{"target":"windows-x64",
+            "name":format!("Sniplet-{version}-windows-x64.zip"),
             "sha256":"00".repeat(32),"size":100}]}))
         .unwrap()
+    }
+
+    fn select(
+        version: &str,
+        channel: ReleaseChannel,
+        current: &str,
+    ) -> Result<Option<UpdateRelease>> {
+        let manifest: Manifest = serde_json::from_slice(&payload(version)).unwrap();
+        let current = BuildIdentity {
+            version: current.into(),
+            sha: "local".into(),
+        };
+        let tag = manifest.tag.clone();
+        select_manifest(manifest, &tag, channel, &current, "windows-x64", ".zip")
     }
 
     #[test]
     fn signature_rejects_changed_manifest_and_wrong_key() {
         let key = SigningKey::from_bytes(&[7; 32]);
-        let bytes = payload(ReleaseChannel::Stable, 10);
+        let bytes = payload("0.2.0");
         let signature = hex::encode(key.sign(&bytes).to_bytes());
         let public = hex::encode(key.verifying_key().to_bytes());
         assert!(verify_manifest(&bytes, signature.as_bytes(), &public).is_ok());
@@ -499,59 +517,59 @@ mod tests {
     }
 
     #[test]
-    fn nightly_order_uses_build_number_and_stable_never_downgrades() {
-        let mut current = BuildIdentity {
-            version: "0.2.0".into(),
-            sha: "other".into(),
-            build_number: 9,
+    fn versions_order_nightlies_between_stables_and_never_downgrade() {
+        use ReleaseChannel::{Nightly, Stable};
+        let newer =
+            |version, channel, current| select(version, channel, current).unwrap().is_some();
+        assert!(newer("0.2.1-nightly.20261104.17", Nightly, "0.2.0"));
+        assert!(newer(
+            "0.2.1-nightly.20261104.18",
+            Nightly,
+            "0.2.1-nightly.20261104.17"
+        ));
+        assert!(newer(
+            "0.2.1-nightly.20261105.1",
+            Nightly,
+            "0.2.1-nightly.20261104.17"
+        ));
+        assert!(!newer(
+            "0.2.1-nightly.20261104.17",
+            Nightly,
+            "0.2.1-nightly.20261104.17"
+        ));
+        // Nightly to Stable waits for the stable release after the installed nightly.
+        assert!(newer("0.2.1", Stable, "0.2.1-nightly.20261104.17"));
+        assert!(!newer("0.2.0", Stable, "0.2.1-nightly.20261104.17"));
+        // Stable to Nightly gets the newest nightly, because it is newer.
+        assert!(newer("0.2.2-nightly.20261106.20", Nightly, "0.2.1"));
+        assert!(!newer("0.2.1", Stable, "0.2.1"));
+        // An older release in the previous manifest format is skipped, not an error.
+        let mut old: Manifest = serde_json::from_slice(&payload("0.2.0")).unwrap();
+        old.schema = 2;
+        let current = BuildIdentity {
+            version: "0.2.1-nightly.20261104.17".into(),
+            sha: "local".into(),
         };
-        let select = |channel, number, current: &BuildIdentity| {
-            let manifest: Manifest = serde_json::from_slice(&payload(channel, number)).unwrap();
-            let tag = manifest.tag.clone();
-            select_manifest(manifest, &tag, channel, current, "windows-x64", ".zip").unwrap()
-        };
-        assert!(select(ReleaseChannel::Nightly, 10, &current).is_some());
-        assert!(select(ReleaseChannel::Nightly, 8, &current).is_none());
-        assert!(select(ReleaseChannel::Stable, 10, &current).is_some());
-        current.sha = "abcdef0123456789abcdef0123456789abcdef01".into();
-        assert!(select(ReleaseChannel::Stable, 10, &current).is_none());
-        current.version = "0.3.0".into();
-        assert!(select(ReleaseChannel::Stable, 10, &current).is_none());
+        let selected = select_manifest(old, "v0.2.0", Stable, &current, "windows-x64", ".zip");
+        assert!(selected.unwrap().is_none());
     }
 
     #[test]
     fn signed_manifest_cannot_change_channel_or_escape_package_path() {
+        use ReleaseChannel::{Nightly, Stable};
+        assert!(select("0.2.0", Nightly, "0.1.0").is_err());
+        assert!(select("0.2.1-nightly.20261104.17", Stable, "0.1.0").is_err());
+        for version in ["0.2.1-a1b2c3d", "0.2.1-nightly.1.2", "0.2.1+build"] {
+            assert!(select(version, Nightly, "0.1.0").is_err(), "{version}");
+        }
+        let mut manifest: Manifest = serde_json::from_slice(&payload("0.2.0")).unwrap();
+        manifest.assets[0].name = "../Sniplet.exe".into();
         let current = BuildIdentity {
             version: "0.1.0".into(),
-            sha: "".into(),
-            build_number: 0,
+            sha: "local".into(),
         };
-        let manifest: Manifest =
-            serde_json::from_slice(&payload(ReleaseChannel::Stable, 10)).unwrap();
         assert!(
-            select_manifest(
-                manifest,
-                "v0.2.0",
-                ReleaseChannel::Nightly,
-                &current,
-                "windows-x64",
-                ".zip"
-            )
-            .is_err()
-        );
-        let mut manifest: Manifest =
-            serde_json::from_slice(&payload(ReleaseChannel::Stable, 10)).unwrap();
-        manifest.assets[0].name = "../Sniplet.exe".into();
-        assert!(
-            select_manifest(
-                manifest,
-                "v0.2.0",
-                ReleaseChannel::Stable,
-                &current,
-                "windows-x64",
-                ".zip"
-            )
-            .is_err()
+            select_manifest(manifest, "v0.2.0", Stable, &current, "windows-x64", ".zip").is_err()
         );
     }
 
@@ -563,9 +581,7 @@ mod tests {
         let release = UpdateRelease {
             version: "0.2.0".into(),
             sha: String::new(),
-            build_number: 1,
             tag: String::new(),
-            channel: ReleaseChannel::Stable,
             size: 4,
             asset_name: String::new(),
             sha256: hex::encode(Sha256::digest(b"good")),
@@ -600,9 +616,7 @@ mod tests {
             let release = UpdateRelease {
                 version: "0.2.0".into(),
                 sha: String::new(),
-                build_number: 1,
                 tag: String::new(),
-                channel: ReleaseChannel::Stable,
                 size: bytes.len() as u64,
                 asset_name: "fixture.zip".into(),
                 sha256: hex::encode(Sha256::digest(&bytes)),
@@ -687,9 +701,7 @@ mod tests {
             let release = UpdateRelease {
                 version: "0.2.0".into(),
                 sha: String::new(),
-                build_number: 1,
                 tag: String::new(),
-                channel: ReleaseChannel::Stable,
                 size: bytes.len() as u64,
                 asset_name: "fixture.zip".into(),
                 sha256: hex::encode(Sha256::digest(&bytes)),

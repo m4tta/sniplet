@@ -917,7 +917,7 @@ impl Render for SettingsWindow {
                     .py_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(concat!("Sniplet ", env!("CARGO_PKG_VERSION"))),
+                    .child(format!("Sniplet {}", sniplet_platform::updates::VERSION)),
             );
         let registration_error = if self.page == Page::Hotkeys && !self.error {
             self.editor.read(cx).hotkey_error.clone()
