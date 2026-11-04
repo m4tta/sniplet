@@ -4,7 +4,7 @@ use gpui_kit::{
     component::{
         ActiveTheme, Selectable, TitleBar,
         button::{Button, ButtonVariants},
-        input::{Input, InputState},
+        input::{Input, InputEvent, InputState},
         slider::Slider,
         switch::Switch,
     },
@@ -103,6 +103,11 @@ pub(crate) fn open(
     })
 }
 
+/// Text fields on auto-saving pages save when the user presses Enter or leaves the field.
+fn commits(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
+}
+
 impl SettingsWindow {
     fn new(
         editor: Entity<Editor>,
@@ -162,6 +167,12 @@ impl SettingsWindow {
         let scroll_limit = cx.new(|cx| {
             InputState::new(window, cx).default_value(settings.scroll_max_frames.to_string())
         });
+        cx.subscribe(&scroll_limit, |this, _, event, cx| {
+            if commits(event) {
+                this.save_scroll_limit(cx);
+            }
+        })
+        .detach();
         let scroll_speed = cx.new(|_| {
             SliderState::new()
                 .min(100.0)
@@ -198,6 +209,12 @@ impl SettingsWindow {
         let background_color = cx.new(|cx| {
             InputState::new(window, cx).default_value(color_hex(settings.window_capture.color))
         });
+        cx.subscribe(&background_color, |this, _, event, cx| {
+            if commits(event) {
+                this.save_background_color(cx);
+            }
+        })
+        .detach();
         let background_previews = background_previews(settings.window_capture.color);
         let theme = cx.observe_window_appearance(window, |this, window, cx| {
             let preference = this.editor.read(cx).settings.theme;
@@ -342,9 +359,33 @@ impl SettingsWindow {
             return;
         }
         let color = u32::from_str_radix(value, 16).unwrap();
-        self.change(cx, |settings| {
-            settings.window_capture.color = [(color >> 16) as u8, (color >> 8) as u8, color as u8];
-        });
+        let color = [(color >> 16) as u8, (color >> 8) as u8, color as u8];
+        if self.editor.read(cx).settings.window_capture.color == color {
+            self.clear_error(cx);
+            return;
+        }
+        self.change(cx, |settings| settings.window_capture.color = color);
+    }
+
+    fn save_scroll_limit(&mut self, cx: &mut Context<Self>) {
+        match self.scroll_limit.read(cx).value().trim().parse::<usize>() {
+            Ok(value) if self.editor.read(cx).settings.scroll_max_frames == value => {
+                self.clear_error(cx)
+            }
+            Ok(value) if (2..=200).contains(&value) => {
+                self.change(cx, |settings| settings.scroll_max_frames = value)
+            }
+            _ => self.fail("Enter a capture limit between 2 and 200 frames.", cx),
+        }
+    }
+
+    /// Removes a validation error after the user restores the saved value.
+    fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error {
+            self.message.clear();
+            self.error = false;
+            cx.notify();
+        }
     }
 
     fn window_background(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -384,7 +425,7 @@ impl SettingsWindow {
                                     .overflow_hidden()
                                     .border_2()
                                     .border_color(if style.background == background {
-                                        rgb(0x0a84ff).into()
+                                        rgb(crate::theme::ACCENT).into()
                                     } else {
                                         cx.theme().border
                                     })
@@ -420,9 +461,7 @@ impl SettingsWindow {
                     div().flex().items_center().gap_2()
                         .child(div().size(px(22.0)).rounded(px(5.0)).border_1().border_color(cx.theme().border)
                             .bg(rgb((u32::from(style.color[0]) << 16) | (u32::from(style.color[1]) << 8) | u32::from(style.color[2]))))
-                        .child(Input::new(&self.background_color).id("window-background-color").w(px(100.0)))
-                        .child(Button::new("save-background-color").label("Apply")
-                            .on_click(cx.listener(|this, _, _, cx| this.save_background_color(cx)))), cx))
+                        .child(Input::new(&self.background_color).id("window-background-color").w(px(100.0))), cx))
             })
             .when(style.background == WindowBackground::Wallpaper, |card| {
                 card.child(divider(cx))
@@ -736,29 +775,9 @@ impl SettingsWindow {
                     .child(row(
                         "Capture limit",
                         "Maximum frames captured in one session (2–200).",
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Input::new(&self.scroll_limit)
-                                    .id("scroll-limit")
-                                    .w(px(75.0)),
-                            )
-                            .child(Button::new("save-scroll-limit").label("Apply").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    let value = this.scroll_limit.read(cx).value().parse::<usize>();
-                                    match value {
-                                        Ok(value) if (2..=200).contains(&value) => {
-                                            this.change(cx, |s| s.scroll_max_frames = value)
-                                        }
-                                        _ => this.fail(
-                                            "Enter a capture limit between 2 and 200 frames.",
-                                            cx,
-                                        ),
-                                    }
-                                }),
-                            )),
+                        Input::new(&self.scroll_limit)
+                            .id("scroll-limit")
+                            .w(px(75.0)),
                         cx,
                     ))
                     .child(divider(cx))
@@ -896,17 +915,36 @@ impl Render for SettingsWindow {
                 .into_iter()
                 .enumerate()
                 .map(|(index, page)| {
-                    Button::new(("settings-nav", index))
-                        .ghost()
-                        .label(page.title())
-                        .icon(tool_icon(page.icon()))
-                        .selected(self.page == page)
-                        .when(self.page == page, |button| {
-                            button.bg(rgb(0x0a84ff)).text_color(rgb(0xffffff))
-                        })
+                    // Left-aligned rows. The selected row gets a neutral fill
+                    // and an accent icon, so the page content stays the focus.
+                    let selected = self.page == page;
+                    let hover = cx.theme().foreground.opacity(0.06);
+                    div()
+                        .id(("settings-nav", index))
+                        .test_support()
+                        .flex()
+                        .items_center()
+                        .gap_3()
                         .w_full()
-                        .h(px(40.0))
-                        .justify_start()
+                        .h(px(36.0))
+                        .px_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .when(selected, |row| {
+                            row.bg(cx.theme().foreground.opacity(0.1))
+                                .font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .child(
+                            tool_icon(page.icon())
+                                .size(px(17.0))
+                                .text_color(if selected {
+                                    rgb(crate::theme::ACCENT).into()
+                                } else {
+                                    cx.theme().muted_foreground
+                                }),
+                        )
+                        .child(page.title())
                         .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
                 }),
             )
@@ -1262,6 +1300,27 @@ mod tests {
     use sniplet_platform::SettingsStore;
     use std::prelude::v1::test;
 
+    /// Types `value` into a settings text field and presses Enter. Input events
+    /// reach subscribers after the update ends, so this runs as its own update.
+    fn enter(
+        cx: &mut TestAppContext,
+        handle: AnyWindowHandle,
+        input: &Entity<InputState>,
+        value: &str,
+    ) {
+        handle
+            .update(cx, |_, window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_value(value, window, cx);
+                    cx.emit(InputEvent::PressEnter {
+                        secondary: false,
+                        shift: false,
+                    });
+                });
+            })
+            .unwrap();
+    }
+
     fn fixture(
         cx: &mut TestAppContext,
         page: Page,
@@ -1389,27 +1448,25 @@ mod tests {
                     assert_eq!(editor.read(cx).settings.window_capture.background, mode);
                     assert!(window.find(id).bounds().right() <= window.viewport_size().width);
                 }
-                entity
-                    .read(cx)
-                    .background_color
-                    .clone()
-                    .update(cx, |input, cx| input.set_value("invalid", window, cx));
+            })
+            .unwrap();
+        let color = cx.read(|cx| entity.read(cx).background_color.clone());
+        enter(cx, handle, &color, "invalid");
+        cx.read(|cx| {
+            assert!(entity.read(cx).error);
+            assert_eq!(
+                editor.read(cx).settings.window_capture.color,
+                [242, 242, 247]
+            );
+        });
+        enter(cx, handle, &color, "#123456");
+        cx.read(|cx| {
+            assert!(!entity.read(cx).error);
+            assert_eq!(editor.read(cx).settings.window_capture.color, [18, 52, 86]);
+        });
+        handle
+            .update(cx, |_, window, cx| {
                 window.render_frame(cx);
-                window.click("save-background-color", cx);
-                assert!(entity.read(cx).error);
-                assert_eq!(
-                    editor.read(cx).settings.window_capture.color,
-                    [242, 242, 247]
-                );
-                entity
-                    .read(cx)
-                    .background_color
-                    .clone()
-                    .update(cx, |input, cx| input.set_value("#123456", window, cx));
-                window.render_frame(cx);
-                window.click("save-background-color", cx);
-                assert!(!entity.read(cx).error);
-                assert_eq!(editor.read(cx).settings.window_capture.color, [18, 52, 86]);
                 window.click_at("window-padding", point(px(140.0), px(12.0)), cx);
             })
             .unwrap();
@@ -1762,27 +1819,17 @@ mod tests {
     ) {
         let (handle, entity, editor, path) = fixture(cx, Page::Advanced);
         let store = SettingsStore::at(&path);
+        let limit = cx.read(|cx| entity.read(cx).scroll_limit.clone());
+        for invalid in ["0", "201", "NaN"] {
+            enter(cx, handle, &limit, invalid);
+            assert!(cx.read(|cx| entity.read(cx).error));
+            assert!(!path.exists());
+        }
+        enter(cx, handle, &limit, "80");
+        assert_eq!(cx.read(|cx| editor.read(cx).settings.scroll_max_frames), 80);
         handle
             .update(cx, |_, window, cx| {
-                for invalid in ["0", "201", "NaN"] {
-                    entity
-                        .read(cx)
-                        .scroll_limit
-                        .clone()
-                        .update(cx, |input, cx| input.set_value(invalid, window, cx));
-                    window.render_frame(cx);
-                    window.click("save-scroll-limit", cx);
-                    assert!(entity.read(cx).error);
-                    assert!(!path.exists());
-                }
-                entity
-                    .read(cx)
-                    .scroll_limit
-                    .clone()
-                    .update(cx, |input, cx| input.set_value("80", window, cx));
                 window.render_frame(cx);
-                window.click("save-scroll-limit", cx);
-                assert_eq!(editor.read(cx).settings.scroll_max_frames, 80);
                 window.click_at("scroll-speed", point(px(200.0), px(12.0)), cx);
             })
             .unwrap();

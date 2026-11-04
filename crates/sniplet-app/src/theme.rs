@@ -4,6 +4,10 @@ use gpui_kit::{
 };
 use sniplet_platform::ThemePreference;
 
+/// Sniplet's accent blue for selected and active states. The gpui-kit theme
+/// palette is neutral, so every accent in the app uses this one value.
+pub(crate) const ACCENT: u32 = 0x0a84ff;
+
 pub(crate) fn apply(preference: ThemePreference, window: &mut Window, cx: &mut App) {
     Theme::change(mode(preference, window.appearance()), Some(window), cx);
 }

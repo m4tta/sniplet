@@ -1,4 +1,7 @@
-use crate::{editor::Editor, tools::Tool};
+use crate::{
+    editor::Editor,
+    tools::{HideStyle, Size, Tool},
+};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AppContext, Bounds, Entity, InputEvent, TestAppContext, WindowBounds, WindowOptions, point, px,
@@ -153,9 +156,8 @@ fn measurement_keys_shift_wheel_and_units_apply_to_the_placed_ruler(cx: &mut Tes
         });
         window.render_frame(cx);
         window.click(("tool", Tool::Ruler as usize), cx);
-        assert!(entity.read(cx).panel == Some(crate::editor::Panel::Ruler));
-        assert_eq!(entity.read(cx).tool, Tool::Select);
-        window.click("close-panel", cx);
+        assert_eq!(entity.read(cx).tool, Tool::Ruler);
+        assert!(window.find("measure-units").visible());
         let inside = point(px(580.0), px(390.0));
         pointer_move(window, inside, cx);
         measure_key_down(window, "2", cx);
@@ -392,24 +394,21 @@ fn appearance_choices_apply_immediately_and_preserve_capture(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn narrow_toolbar_keeps_export_and_overflow_controls_visible(cx: &mut TestAppContext) {
+fn narrow_window_keeps_export_controls_and_every_dock_tool_visible(cx: &mut TestAppContext) {
     let (handle, _) = editor_at_size(cx, 900.0, 560.0);
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        for id in ["copy", "save", "pin", "more-tools", "zoom-fit"] {
-            let button = window.find(id);
+        let ids = ["copy", "save", "pin", "backdrop", "zoom-fit"].map(Into::into);
+        let tools = Tool::ALL.map(|tool| ("tool", tool as usize).into());
+        for id in ids.into_iter().chain(tools) {
+            let id: gpui_kit::ElementId = id;
+            let button = window.find(id.clone());
             assert!(button.visible(), "{id} should remain visible");
             assert!(
                 button.bounds().right() <= px(900.0),
                 "{id} should fit inside the window"
             );
         }
-        window.click("more-tools", cx);
-        assert!(
-            window
-                .find(("more-tool", Tool::Rectangle as usize))
-                .visible()
-        );
     })
     .unwrap();
 }
@@ -513,9 +512,9 @@ fn arrow_key_draws_bold_arrow_with_three_handles_and_remembers_its_width(cx: &mu
             assert_eq!(handle.bounds().size, size(px(8.0), px(8.0)));
         }
         assert!(window.try_find(("arrow-handle", 3usize)).is_none());
-        let track = window.find("arrow-size-track").bounds();
+        let track = window.find("size-track").bounds();
         window.click_at(
-            "arrow-size-track",
+            "size-track",
             point(track.size.width * (13.0 / 29.0), track.size.height / 2.0),
             cx,
         );
@@ -1057,7 +1056,7 @@ fn arrow_variants_preserve_geometry_export_and_remain_editable(cx: &mut TestAppC
 }
 
 fn slider_position(window: &gpui_kit::Window, value: f32) -> gpui_kit::Point<gpui_kit::Pixels> {
-    let track = window.find("arrow-size-track").bounds();
+    let track = window.find("size-track").bounds();
     point(
         track.left() + track.size.width * ((value - 1.0) / 29.0),
         track.center().y,
@@ -1245,14 +1244,14 @@ fn arrow_palette_fits_minimum_window_in_both_themes_and_reaches_full_size_range(
                 assert!(button.bounds().right() <= px(900.0));
                 assert!(button.bounds().left() >= px(0.0));
             }
-            assert!(window.find("arrow-size-slider").visible());
+            assert!(window.find("size-slider").visible());
             window.drag(point(px(290.0), px(190.0)), point(px(590.0), px(400.0)), cx);
         })
         .unwrap();
         for value in [1.0, 30.0] {
             cx.update_window(handle, |_, window, cx| {
                 window.render_frame(cx);
-                let track = window.find("arrow-size-track").bounds();
+                let track = window.find("size-track").bounds();
                 let offset = point(
                     px(if value == 1.0 {
                         0.5
@@ -1261,7 +1260,7 @@ fn arrow_palette_fits_minimum_window_in_both_themes_and_reaches_full_size_range(
                     }),
                     track.size.height / 2.0,
                 );
-                window.click_at("arrow-size-track", offset, cx);
+                window.click_at("size-track", offset, cx);
             })
             .unwrap();
             cx.update_window(handle, |_, _, cx| {
@@ -1615,7 +1614,7 @@ fn blur_family_changes_preserve_bounds_and_undo(cx: &mut TestAppContext) {
             before.kind,
             sniplet_core::AnnotationKind::Blur { .. }
         ));
-        window.click("family-pixelate", cx);
+        window.click(("hide-style", HideStyle::Pixelate as usize), cx);
         let after = &editor.read(cx).document.as_ref().unwrap().annotations()[0];
         assert!(matches!(
             after.kind,
@@ -1633,34 +1632,40 @@ fn blur_family_changes_preserve_bounds_and_undo(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn text_size_buttons_render_and_undo_each_change(cx: &mut TestAppContext) {
+fn text_size_slider_renders_and_undoes_each_change(cx: &mut TestAppContext) {
     let (handle, editor) = editor(cx);
+    let text_size = |editor: &Entity<Editor>, cx: &gpui_kit::App| {
+        let doc = editor.read(cx).document.as_ref().unwrap();
+        let sniplet_core::AnnotationKind::Text { font_size, .. } = &doc.annotations()[0].kind
+        else {
+            panic!("expected text annotation")
+        };
+        *font_size
+    };
+    let initial = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("tool", Tool::Text as usize), cx);
+            window.drag(point(px(520.0), px(390.0)), point(px(520.0), px(390.0)), cx);
+            window.click("annotation-text", cx);
+            window.input("Resizable", cx);
+            window.click("add-text", cx);
+            let initial = editor.read(cx).export_pixels().unwrap();
+            click_size(window, Size::Text, 40.0, cx);
+            initial
+        })
+        .unwrap();
+    let enlarged = cx
+        .update_window(handle, |_, window, cx| {
+            let enlarged = editor.read(cx).export_pixels().unwrap();
+            assert_ne!(enlarged, initial);
+            assert_eq!(text_size(&editor, cx), 40.0);
+            click_size(window, Size::Text, 24.0, cx);
+            enlarged
+        })
+        .unwrap();
     cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-        window.click(("tool", Tool::Text as usize), cx);
-        window.drag(point(px(520.0), px(390.0)), point(px(520.0), px(390.0)), cx);
-        window.click("annotation-text", cx);
-        window.input("Resizable", cx);
-        window.click("add-text", cx);
-
-        let initial = editor.read(cx).export_pixels().unwrap();
-        window.click("text-size-up", cx);
-        let enlarged = editor.read(cx).export_pixels().unwrap();
-        assert_ne!(enlarged, initial);
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        let sniplet_core::AnnotationKind::Text { font_size, .. } = &doc.annotations()[0].kind
-        else {
-            panic!("expected text annotation")
-        };
-        assert!((*font_size - 26.0).abs() < f32::EPSILON);
-
-        window.click("text-size-down", cx);
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        let sniplet_core::AnnotationKind::Text { font_size, .. } = &doc.annotations()[0].kind
-        else {
-            panic!("expected text annotation")
-        };
-        assert!((*font_size - 24.0).abs() < f32::EPSILON);
+        assert_eq!(text_size(&editor, cx), 24.0);
         window.press("ctrl-z", cx);
         assert_eq!(editor.read(cx).export_pixels().unwrap(), enlarged);
         window.press("ctrl-z", cx);
@@ -1770,62 +1775,81 @@ fn magnifier_circles_move_and_resize_independently_with_grouped_undo(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn magnifier_and_spotlight_property_buttons_change_rendering(cx: &mut TestAppContext) {
+fn magnifier_and_spotlight_size_slider_changes_rendering(cx: &mut TestAppContext) {
     let (handle, editor) = editor(cx);
+    let zoom = |editor: &Entity<Editor>, cx: &gpui_kit::App| {
+        let doc = editor.read(cx).document.as_ref().unwrap();
+        let sniplet_core::AnnotationKind::Magnifier { zoom, .. } = &doc.annotations()[0].kind
+        else {
+            panic!("expected magnifier annotation")
+        };
+        *zoom
+    };
+    let dim = |editor: &Entity<Editor>, cx: &gpui_kit::App| {
+        editor.read(cx).document.as_ref().unwrap().annotations()[1]
+            .style
+            .fill
+    };
+    let magnified_thrice = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("tool", Tool::Zoom as usize), cx);
+            window.drag(point(px(500.0), px(350.0)), point(px(620.0), px(450.0)), cx);
+            let pixels = editor.read(cx).export_pixels().unwrap();
+            click_size(window, Size::Zoom, 4.0, cx);
+            pixels
+        })
+        .unwrap();
     cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-        window.click(("tool", Tool::Zoom as usize), cx);
-        window.drag(point(px(500.0), px(350.0)), point(px(620.0), px(450.0)), cx);
-        let magnified_thrice = editor.read(cx).export_pixels().unwrap();
-        window.click("magnifier-zoom-up", cx);
-        let magnified_four_times = editor.read(cx).export_pixels().unwrap();
-        assert_ne!(magnified_four_times, magnified_thrice);
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        let sniplet_core::AnnotationKind::Magnifier { zoom, .. } = &doc.annotations()[0].kind
-        else {
-            panic!("expected magnifier annotation")
-        };
-        assert!((*zoom - 4.0).abs() < f32::EPSILON);
-        window.click("magnifier-zoom-down", cx);
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        let sniplet_core::AnnotationKind::Magnifier { zoom, .. } = &doc.annotations()[0].kind
-        else {
-            panic!("expected magnifier annotation")
-        };
-        assert!((*zoom - 3.0).abs() < f32::EPSILON);
-
-        window.press("s", cx);
-        window.drag(point(px(540.0), px(380.0)), point(px(650.0), px(470.0)), cx);
-        for _ in 0..6 {
-            window.click("spotlight-dim-down", cx);
-        }
-        let low_dim = editor.read(cx).export_pixels().unwrap();
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        assert_eq!(
-            doc.annotations()[1].style.fill,
-            Some(sniplet_core::Color::new(0, 0, 0, 25))
-        );
-
-        for _ in 0..9 {
-            window.click("spotlight-dim-up", cx);
-        }
-        let high_dim = editor.read(cx).export_pixels().unwrap();
-        let doc = editor.read(cx).document.as_ref().unwrap();
-        assert_eq!(
-            doc.annotations()[1].style.fill,
-            Some(sniplet_core::Color::new(0, 0, 0, 225))
-        );
-        let low_corner = low_dim.get_pixel(0, 0).0[..3]
-            .iter()
-            .map(|channel| u32::from(*channel))
-            .sum::<u32>();
-        let high_corner = high_dim.get_pixel(0, 0).0[..3]
-            .iter()
-            .map(|channel| u32::from(*channel))
-            .sum::<u32>();
-        assert!(high_corner < low_corner);
+        assert_ne!(editor.read(cx).export_pixels().unwrap(), magnified_thrice);
+        assert_eq!(zoom(&editor, cx), 4.0);
+        click_size(window, Size::Zoom, 3.0, cx);
     })
     .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        assert_eq!(zoom(&editor, cx), 3.0);
+        window.press("s", cx);
+        window.drag(point(px(540.0), px(380.0)), point(px(650.0), px(470.0)), cx);
+        click_size(window, Size::Dim, 1.0, cx);
+    })
+    .unwrap();
+    let low_dim = cx
+        .update_window(handle, |_, window, cx| {
+            assert_eq!(
+                dim(&editor, cx),
+                Some(sniplet_core::Color::new(0, 0, 0, 25))
+            );
+            let pixels = editor.read(cx).export_pixels().unwrap();
+            click_size(window, Size::Dim, 9.0, cx);
+            pixels
+        })
+        .unwrap();
+    cx.update_window(handle, |_, _, cx| {
+        assert_eq!(
+            dim(&editor, cx),
+            Some(sniplet_core::Color::new(0, 0, 0, 225))
+        );
+        let high_dim = editor.read(cx).export_pixels().unwrap();
+        let corner = |image: &image::RgbaImage| {
+            image.get_pixel(0, 0).0[..3]
+                .iter()
+                .map(|channel| u32::from(*channel))
+                .sum::<u32>()
+        };
+        assert!(corner(&high_dim) < corner(&low_dim));
+    })
+    .unwrap();
+}
+
+/// Clicks the shared size slider where it sets `value`. The editor receives the
+/// slider event after the current update ends. Keep `value` away from the
+/// current value: a press on the thumb starts a drag and changes nothing.
+fn click_size(window: &mut gpui_kit::Window, size: Size, value: f32, cx: &mut gpui_kit::App) {
+    window.render_frame(cx);
+    let track = window.find("size-track").bounds();
+    let width = track.size.width.as_f32();
+    let x = (width * size.fraction(value)).clamp(0.5, width - 0.5);
+    window.click_at("size-track", point(px(x), track.size.height / 2.0), cx);
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -1853,4 +1877,28 @@ fn tray_panel_item_closes_the_panel_and_runs_its_command(cx: &mut TestAppContext
 
     assert!(!cx.windows().contains(&panel));
     cx.update(|cx| assert!(editor.read(cx).settings_window.is_some()));
+}
+
+#[gpui_kit::test]
+fn spotlight_dim_does_not_fill_the_next_shape(cx: &mut TestAppContext) {
+    let (handle, editor) = editor(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("s", cx);
+        window.drag(point(px(540.0), px(380.0)), point(px(650.0), px(470.0)), cx);
+        window.press("r", cx);
+        window.drag(point(px(470.0), px(332.0)), point(px(580.0), px(422.0)), cx);
+        // Selecting the spotlight again must not carry its dim either.
+        window.press("v", cx);
+        window.drag(point(px(640.0), px(460.0)), point(px(640.0), px(460.0)), cx);
+        let doc = editor.read(cx).document.as_ref().unwrap();
+        assert_eq!(doc.selected(), Some(doc.annotations()[0].id));
+        window.press("r", cx);
+        window.drag(point(px(700.0), px(500.0)), point(px(760.0), px(540.0)), cx);
+        let doc = editor.read(cx).document.as_ref().unwrap();
+        assert!(doc.annotations()[0].style.fill.is_some());
+        assert_eq!(doc.annotations()[1].style.fill, None);
+        assert_eq!(doc.annotations()[2].style.fill, None);
+    })
+    .unwrap();
 }
