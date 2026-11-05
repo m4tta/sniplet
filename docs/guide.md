@@ -92,7 +92,9 @@ places a new capture to the right on an expanded canvas as an editable object.
 Open the application menu → Settings, press `Ctrl/Cmd + ,`, or start with
 `sniplet --settings`. Settings open in a separate window with General, Capture,
 Shortcuts, and Save & Share tabs at the top. Every change saves when you make it,
-and a short "Saved" message confirms it. Errors show next to the setting.
+and a short "Saved" message confirms it. Errors show next to the setting. The
+upload destination is the one exception: it saves when you select **Save
+destination**, because its fields are checked together.
 General includes appearance, **Launch at startup**, keeping the editor on top,
 and updates. Capture includes the window screenshot background, automatic
 clipboard copy, hiding the editor after export, and the scrolling frame limit
