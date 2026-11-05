@@ -98,3 +98,6 @@ jobs:
           ls -l assets
           ditto -x -k assets/*.zip app
           app/Sniplet.app/Contents/MacOS/Sniplet --build-info
+      - name: Open a native window and quit
+        timeout-minutes: 2
+        run: app/Sniplet.app/Contents/MacOS/Sniplet --demo --smoke --normal-window
