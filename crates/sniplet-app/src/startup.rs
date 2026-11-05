@@ -42,24 +42,33 @@ mod windows {
     use windows_registry::{CURRENT_USER, Key};
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    // Task Manager and Settings > Apps > Startup turn an entry off here and keep its Run value.
+    const APPROVED_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     const VALUE_NAME: &str = "Sniplet";
-    // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), for an absent key or value.
+    // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), for an absent value.
     const NOT_FOUND: u32 = 0x8007_0002;
 
     pub fn enabled() -> anyhow::Result<bool> {
-        match CURRENT_USER.open(RUN_KEY) {
-            Ok(key) => registered(&key),
-            Err(error) if error.code().0 as u32 == NOT_FOUND => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        registered(
+            &CURRENT_USER.create(RUN_KEY)?,
+            &CURRENT_USER.create(APPROVED_KEY)?,
+        )
     }
 
-    fn registered(key: &Key) -> anyhow::Result<bool> {
-        match key.get_string(VALUE_NAME) {
-            Ok(command) => Ok(!command.is_empty()),
-            Err(error) if error.code().0 as u32 == NOT_FOUND => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+    fn registered(run: &Key, approved: &Key) -> anyhow::Result<bool> {
+        let command = match run.get_string(VALUE_NAME) {
+            Ok(command) => !command.is_empty(),
+            Err(error) if error.code().0 as u32 == NOT_FOUND => false,
+            Err(error) => return Err(error.into()),
+        };
+        // An odd first byte means that the user turned the entry off.
+        let off = match approved.get_value(VALUE_NAME) {
+            Ok(state) => state.first().is_some_and(|byte| byte & 1 == 1),
+            Err(error) if error.code().0 as u32 == NOT_FOUND => false,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(command && !off)
     }
 
     fn command(executable: &Path) -> anyhow::Result<String> {
@@ -75,22 +84,32 @@ mod windows {
         Ok(command)
     }
 
-    fn update(key: &Key, executable: &Path, enabled: bool) -> anyhow::Result<bool> {
-        if enabled {
-            key.set_string(VALUE_NAME, command(executable)?)?;
-        } else {
-            match key.remove_value(VALUE_NAME) {
-                Ok(()) => {}
-                Err(error) if error.code().0 as u32 == NOT_FOUND => {}
-                Err(error) => return Err(error.into()),
-            }
+    fn remove(key: &Key) -> anyhow::Result<()> {
+        match key.remove_value(VALUE_NAME) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code().0 as u32 == NOT_FOUND => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        registered(key)
+    }
+
+    fn update(run: &Key, approved: &Key, executable: &Path, enabled: bool) -> anyhow::Result<bool> {
+        if enabled {
+            run.set_string(VALUE_NAME, command(executable)?)?;
+        } else {
+            remove(run)?;
+        }
+        // The Sniplet switch replaces an earlier choice in system settings.
+        remove(approved)?;
+        registered(run, approved)
     }
 
     pub fn set_enabled(enabled: bool) -> anyhow::Result<bool> {
-        let key = CURRENT_USER.create(RUN_KEY)?;
-        update(&key, &std::env::current_exe()?, enabled)
+        update(
+            &CURRENT_USER.create(RUN_KEY)?,
+            &CURRENT_USER.create(APPROVED_KEY)?,
+            &std::env::current_exe()?,
+            enabled,
+        )
     }
 
     #[cfg(test)]
@@ -99,22 +118,36 @@ mod windows {
 
         #[test]
         fn registration_quotes_the_path_and_removes_only_its_own_value() {
-            // Exercise the real registry API without changing the user's Run key.
+            // Exercise the real registry API without changing the user's startup keys.
             let path = format!(r"Software\SnipletTests\Startup-{}", std::process::id());
-            let key = CURRENT_USER.create(&path).unwrap();
-            key.set_string("OtherApp", "keep me").unwrap();
+            let run = CURRENT_USER.create(format!(r"{path}\Run")).unwrap();
+            let approved = CURRENT_USER.create(format!(r"{path}\Approved")).unwrap();
+            run.set_string("OtherApp", "keep me").unwrap();
             let executable = Path::new(r"C:\Apps\Sniplet 测试\sniplet.exe");
-            assert!(!registered(&key).unwrap());
-            assert!(update(&key, executable, true).unwrap());
+            assert!(!registered(&run, &approved).unwrap());
+            assert!(update(&run, &approved, executable, true).unwrap());
             assert_eq!(
-                key.get_string(VALUE_NAME).unwrap(),
+                run.get_string(VALUE_NAME).unwrap(),
                 r#""C:\Apps\Sniplet 测试\sniplet.exe" --minimized"#
             );
-            assert!(update(&key, executable, true).unwrap());
-            assert!(!update(&key, executable, false).unwrap());
-            assert!(!update(&key, executable, false).unwrap());
-            assert_eq!(key.get_string("OtherApp").unwrap(), "keep me");
-            drop(key);
+            // Task Manager writes 03 to turn an entry off and 02 to turn it on again.
+            let state = |first| [first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            approved
+                .set_bytes(VALUE_NAME, windows_registry::Type::Bytes, &state(3))
+                .unwrap();
+            assert!(!registered(&run, &approved).unwrap());
+            approved
+                .set_bytes(VALUE_NAME, windows_registry::Type::Bytes, &state(2))
+                .unwrap();
+            assert!(registered(&run, &approved).unwrap());
+            approved
+                .set_bytes(VALUE_NAME, windows_registry::Type::Bytes, &state(3))
+                .unwrap();
+            assert!(update(&run, &approved, executable, true).unwrap());
+            assert!(!update(&run, &approved, executable, false).unwrap());
+            assert!(!update(&run, &approved, executable, false).unwrap());
+            assert_eq!(run.get_string("OtherApp").unwrap(), "keep me");
+            drop((run, approved));
             CURRENT_USER.remove_tree(&path).unwrap();
         }
 
