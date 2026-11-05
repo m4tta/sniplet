@@ -1,136 +1,162 @@
 <div align="center">
 
-<img src="assets/icons/sniplet-128.png" width="96" alt="Sniplet icon">
+<img src="assets/icons/sniplet-256.png" width="112" alt="Sniplet icon">
 
 # Sniplet
 
-**Capture. Annotate. Copy.**
+### Capture it. Mark it up. Share it.
 
-A fast, native screenshot tool for Windows, macOS, and Linux, written in Rust.
-
-[![CI](https://github.com/m4tta/sniplet/actions/workflows/ci.yml/badge.svg)](https://github.com/m4tta/sniplet/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-8a63ff)
-![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)
+A fast, native screenshot tool for Windows, macOS, and Linux.<br>
+Free, open source, and written in Rust.
 
 <br>
 
-<img src="docs/screenshots/editor.png" width="860" alt="The Sniplet editor with an annotated dashboard screenshot and the arrow style palette open">
+[<img src="https://img.shields.io/badge/Download_for_Windows-0a84ff?style=for-the-badge" height="34" alt="Download for Windows">](https://github.com/m4tta/sniplet/releases/latest)&nbsp;
+[<img src="https://img.shields.io/badge/Download_for_macOS-0a84ff?style=for-the-badge" height="34" alt="Download for macOS">](https://github.com/m4tta/sniplet/releases/latest)&nbsp;
+[<img src="https://img.shields.io/badge/Download_for_Linux-0a84ff?style=for-the-badge" height="34" alt="Download for Linux">](https://github.com/m4tta/sniplet/releases/latest)
+
+<br>
+
+<img src="docs/screenshots/editor.png" alt="The Sniplet editor: a dashboard screenshot with a curved arrow, numbered steps, a highlight, and blurred emails. The arrow is selected and its color, size, and style controls float above the tool dock.">
 
 </div>
 
 <br>
 
-## What it does
+<table>
+<tr>
+<td width="33%" valign="top">
 
-Press a shortcut and drag across your screen. The capture opens in the editor,
-where you can mark it up and then copy, save, pin, or upload it.
+**⚡ Instant**<br>
+One shortcut freezes the screen. Drag across it, and the editor opens with your capture.
 
-| Feature        | What you can do                                                                       |
-| -------------- | ------------------------------------------------------------------------------------- |
-| **Capture**    | Area, full screen, a single window, scrolling pages, or the last area again           |
-| **Annotate**   | Arrows, text, shapes, numbered steps, highlights, spotlight, magnifier, and freehand  |
-| **Hide**       | Blur or pixelate emails, names, and anything else you don't want to share             |
-| **Measure**    | Hold <kbd>1</kbd> or <kbd>2</kbd> to measure widths and heights in pixels or points   |
-| **Recognize**  | Copy text out of an image with OCR, or decode a QR code                               |
-| **Share**      | Copy to the clipboard, save as PNG, JPEG, or WebP, drag into another app, or upload   |
-| **Keep**       | Save an editable `.sniplet` project and continue editing it later                     |
-| **Update**     | Choose Stable or Nightly, download verified updates, and choose when to restart      |
+</td>
+<td width="33%" valign="top">
 
-## How it works
+**✏️ Always editable**<br>
+Every arrow, label, and blur stays live. Move it, restyle it, or undo it at any time.
 
-<div align="center">
-<img src="docs/screenshots/export.png" width="760" alt="An exported screenshot with a gradient backdrop, arrows, numbered steps, and blurred emails">
+</td>
+<td width="33%" valign="top">
+
+**🔒 Keep it private**<br>
+Blur, pixelate, or redact emails and names before you share.
+
+</td>
+</tr>
+</table>
+
+## Mark it up in seconds
+
+<img src="docs/screenshots/hide.png" alt="The Hide tool with Blur, Pixelate, Erase, and Redact styles and a strength slider. Customer emails in the screenshot are blurred.">
+
+Every tool lives in one dock at the bottom of the window. Pick one with a click
+or a key, and its options float right above it.
+
+| | |
+| --- | --- |
+| **Arrows and shapes** | Curved arrows, lines, rectangles, ovals, and freehand |
+| **Text and steps** | Labels and numbered counters for step-by-step guides |
+| **Focus** | Highlighter, spotlight, and a magnifier lens |
+| **Hide** | Blur, pixelate, erase, or redact anything private |
+| **Measure** | Hold <kbd>1</kbd> or <kbd>2</kbd> to measure widths and heights in pixels |
+| **Read** | Drag the OCR tool over text or a QR code to copy what it says |
+
+## Make it look good
+
+<img src="docs/screenshots/export.png" alt="An exported screenshot on a purple gradient backdrop with rounded corners and a soft shadow">
+
+Add a gradient backdrop with padding, rounded corners, and a shadow. Then copy
+it, save it as PNG, JPEG, or WebP, drag it straight into another app, pin it on
+top of your screen, or upload it.
+
+## Everything one click away
+
+<table>
+<tr>
+<td width="45%" valign="top">
+<img src="docs/screenshots/menu.png" alt="The Sniplet menu with Screen, Area, Scrolling, and Text and QR capture, plus image tools">
+</td>
+<td valign="top">
+
+Capture the **whole screen**, an **area**, a **window**, or a **scrolling page**.
+Repeat your last area, read text or a QR code from anywhere on screen, or paste
+an image from the clipboard.
+
+Sniplet waits in the system tray (or the macOS menu bar) and can start with your
+computer, so a capture is always one shortcut away.
+
+</td>
+</tr>
+</table>
+
+## Get started
+
+1. **Download** the latest release for your system:
+
+   | System | File |
+   | --- | --- |
+   | Windows | `Sniplet-…-windows-x64.zip` |
+   | macOS, Apple silicon | `Sniplet-…-macos-arm64.dmg` |
+   | macOS, Intel | `Sniplet-…-macos-x64.dmg` |
+   | Linux | `Sniplet-…-linux-x64.tar.gz` |
+
+2. **Open Sniplet.** Unzip it, or drag it to Applications on a Mac. It waits in
+   the system tray or menu bar.
+3. **Capture.** Press <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>2</kbd> and drag across the screen.
+4. **Share.** Mark it up, then press <kbd>Ctrl/Cmd</kbd> <kbd>C</kbd> to copy.
+
+On Linux, global shortcuts need an X11 session. On Wayland, start a capture from
+the Sniplet menu.
+
+<details>
+<summary><b>All shortcuts</b></summary>
+
 <br>
-<sub>The exported image: a gradient backdrop, an arrow, numbered steps, a highlight, and pixelated emails.</sub>
-</div>
+
+| Action | Shortcut |
+| --- | --- |
+| Capture an area | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>2</kbd> |
+| Capture the screen | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>1</kbd> |
+| Capture a window | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>3</kbd> |
+| Scrolling capture | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>4</kbd> |
+| Repeat the last area | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>5</kbd> |
+| Capture the active window | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>6</kbd> |
+| Read text or a QR code | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>7</kbd> |
+| Reopen the editor | <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>8</kbd> |
+
+In the editor: <kbd>V</kbd> select, <kbd>A</kbd> arrow, <kbd>R</kbd> rectangle,
+<kbd>T</kbd> text, <kbd>B</kbd> hide, <kbd>C</kbd> counter, <kbd>H</kbd> highlight.
+Change any capture shortcut in **Settings → Hotkeys**.
+
+</details>
+
+<details>
+<summary><b>Build from source</b></summary>
 
 <br>
 
-1. **Capture.** Sniplet runs in the system tray (or the macOS menu bar) and
-   listens for global shortcuts. Capturing freezes the screen, so you can choose
-   exactly what you want before anything is saved.
-2. **Edit.** Every annotation stays editable. Move, resize, restyle, or delete it
-   at any point, and undo or redo as many steps as you like. The original pixels
-   are never changed until you export.
-3. **Share.** Sniplet renders your edits into a single image. Use the whole
-   canvas or just a selection, and optionally add a padded backdrop with a shadow.
-
-### Default shortcuts
-
-| Action                      | Shortcut                                      |
-| --------------------------- | --------------------------------------------- |
-| Capture an area             | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>2</kbd> |
-| Capture the screen          | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>1</kbd> |
-| Capture a window            | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>3</kbd> |
-| Scrolling capture           | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>4</kbd> |
-| Recognize text or a QR code | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>7</kbd> |
-| Reopen the editor           | <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>8</kbd> |
-
-You can change any of these in **Settings → Hotkeys**.
-
-Text/QR capture opens an editable text preview over the screenshot. Use the
-editor's **OCR** tool to drag over text or a QR code in any opened image.
-
-<div align="center">
-<img src="docs/screenshots/settings.png" width="560" alt="The Sniplet settings window showing appearance and window screenshot background options">
-</div>
-
-### Under the hood
-
-Sniplet is a Cargo workspace with three crates:
-
-- **`sniplet-core`** holds the document model, annotations, measurement, and
-  the renderer. It has no UI or OS dependencies, so it is fully unit-tested.
-- **`sniplet-platform`** handles screen capture, the clipboard, OCR, QR
-  decoding, settings, and uploads for each operating system.
-- **`sniplet-app`** is the desktop app, built with
-  [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI
-  framework behind the Zed editor) and
-  [gpui-kit](https://github.com/longbridge/gpui-kit).
-
-## Run it locally
-
-Install [stable Rust](https://rustup.rs), then clone and run:
+Install [stable Rust](https://rustup.rs), then:
 
 ```sh
 git clone https://github.com/m4tta/sniplet.git
 cd sniplet
-cargo run --release -p sniplet-app
-```
-
-To try the editor without capturing anything, open the built-in sample or any
-image:
-
-```sh
 cargo run --release -p sniplet-app -- --demo
-cargo run --release -p sniplet-app -- path/to/image.png
 ```
 
-Each platform also needs some native tools:
+See the [guide](docs/guide.md#native-prerequisites) for the native tools each
+platform needs.
 
-- **Windows:** Visual Studio 2022 Build Tools with *Desktop development with C++*.
-- **macOS:** Xcode with the Metal toolchain. Grant Screen Recording permission
-  when asked.
-- **Linux:** a Vulkan-capable GPU, plus the development packages listed in the
-  [guide](docs/guide.md#native-prerequisites).
-
-Use `--release` for everyday use. Debug builds work, but they render large
-images noticeably slower.
+</details>
 
 ## Learn more
 
-- [User and developer guide](docs/guide.md): every tool and setting, uploads,
-  packaging, and verification
-- [Feature checklist](docs/parity.md): what's implemented and what's still open
-- [Platform testing](docs/platform-testing.md): results from real machines
-- [Releases](docs/releases.md): how nightly and stable builds are made
+[User and developer guide](docs/guide.md) ·
+[Feature checklist](docs/parity.md) ·
+[Releases](docs/releases.md) ·
+[Platform testing](docs/platform-testing.md)
 
 Sniplet is in active development. Some features are still incomplete, and not
 every platform has been fully tested yet.
 
-## License
-
-[Apache 2.0](LICENSE). The bundled Noto Sans font is under the
-[SIL Open Font License](assets/fonts/OFL.txt), and the scissors icon comes from
-[Lucide](assets/icons/LICENSE-LUCIDE).
+<sub>Apache 2.0. Noto Sans is under the [SIL Open Font License](assets/fonts/OFL.txt). Icons from [Lucide](assets/icons/LICENSE-LUCIDE).</sub>
