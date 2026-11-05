@@ -5,7 +5,7 @@ use gpui_kit::{
     component::{
         ActiveTheme, Icon, Selectable, TitleBar,
         button::{Button, ButtonVariants},
-        input::{Input, InputState},
+        input::{Input, InputState, Textarea, TextareaState},
         popover::Popover,
     },
     prelude::*,
@@ -161,6 +161,7 @@ pub struct Editor {
     pub settings_path: Option<PathBuf>,
     focus: FocusHandle,
     input: Entity<InputState>,
+    pub(crate) recognized_text: Option<Entity<TextareaState>>,
     pub(crate) settings_window: Option<(
         AnyWindowHandle,
         WeakEntity<crate::settings_window::SettingsWindow>,
@@ -185,6 +186,7 @@ pub struct Editor {
     preview_revision: u64,
     document_revision: u64,
     pub(crate) load_revision: u64,
+    recognition_revision: u64,
     settings_revision: u64,
     pub(crate) settings_save_running: bool,
     pub(crate) settings_save_result: Option<(u64, Option<String>)>,
@@ -290,6 +292,7 @@ impl Editor {
             settings_path: None,
             focus,
             input,
+            recognized_text: None,
             settings_window: None,
             text_origin: ImagePoint::default(),
             text_edit: None,
@@ -312,6 +315,7 @@ impl Editor {
             preview_revision: 0,
             document_revision: 0,
             load_revision: 0,
+            recognition_revision: 0,
             settings_revision: 0,
             settings_save_running: false,
             settings_save_result: None,
@@ -362,6 +366,7 @@ impl Editor {
         self.measure_pending = None;
         self.fit = true;
         self.panel = None;
+        self.recognized_text = None;
         self.counter = 1;
         self.last_saved = None;
         self.status = label.to_owned();
@@ -468,10 +473,14 @@ impl Editor {
         self.tool = tool;
         self.selection = None;
         self.panel = None;
-        self.status = tool.shortcut().map_or_else(
-            || tool.label().to_owned(),
-            |key| format!("{} · {key}", tool.label()),
-        );
+        self.status = if tool == Tool::Ocr {
+            "OCR · drag over text or a QR code to copy it".into()
+        } else {
+            tool.shortcut().map_or_else(
+                || tool.label().to_owned(),
+                |key| format!("{} · {key}", tool.label()),
+            )
+        };
         if let Some(doc) = &mut self.document {
             let _ = doc.select(None);
         }
@@ -831,7 +840,7 @@ impl Editor {
                     doc.move_annotation(id, ImagePoint::new(p.x - drag.last.x, p.y - drag.last.y));
             }
             drag.last = p;
-        } else if self.tool == Tool::Select {
+        } else if matches!(self.tool, Tool::Select | Tool::Ocr) {
             let end = if drag.constrain {
                 let dx = p.x - drag.start.x;
                 let dy = p.y - drag.start.y;
@@ -895,7 +904,7 @@ impl Editor {
         self.refresh(cx);
     }
 
-    fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -906,7 +915,7 @@ impl Editor {
         if let Some(doc) = &mut self.document {
             if drag.moving.is_some() {
                 let _ = doc.end_group();
-            } else if self.tool == Tool::Select {
+            } else if matches!(self.tool, Tool::Select | Tool::Ocr) {
                 self.selection = self
                     .selection
                     .map(|r| r.clipped(doc.width(), doc.height()))
@@ -917,6 +926,9 @@ impl Editor {
             }
         }
         self.refresh(cx);
+        if self.tool == Tool::Ocr && self.selection.is_some() {
+            self.recognize(false, window, cx);
+        }
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -951,6 +963,14 @@ impl Editor {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
         let command = modifiers.control || modifiers.platform;
+        if self.recognized_text.is_some() {
+            if key == "escape" {
+                self.recognized_text = None;
+                self.focus.focus(window, cx);
+                cx.notify();
+            }
+            return;
+        }
         if key == "escape" {
             cx.stop_active_drag(window);
             if let Some(edit) = self.size_edit.take() {
@@ -1941,26 +1961,36 @@ impl Editor {
         };
         self.status = "Recognizing text…".into();
         cx.notify();
-        let revision = self.preview_revision;
-        let task = crate::clipboard_jobs::copy(
-            crate::clipboard_jobs::Source::Recognize { document, qr_only },
-            cx,
-        );
+        // A new document or a newer recognition makes the result stale.
+        // Edits and clicks during recognition must not drop it.
+        self.recognition_revision += 1;
+        let revision = (self.load_revision, self.recognition_revision);
+        let task = crate::clipboard_jobs::recognize(document, qr_only, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.preview_revision != revision {
+            let _ = this.update_in(cx, |this, window, cx| {
+                if (this.load_revision, this.recognition_revision) != revision {
                     return;
                 }
                 match result {
-                    Ok(Some(count)) => {
-                        this.status = if qr_only {
-                            "QR contents copied".into()
-                        } else {
-                            format!("Text copied · {count} characters")
-                        }
+                    Ok(crate::clipboard_jobs::Recognized { text, copied }) => {
+                        let count = text.chars().count();
+                        this.status = match copied {
+                            Ok(true) if qr_only => "QR contents copied".into(),
+                            Ok(true) => format!("Text copied · {count} characters"),
+                            Ok(false) => {
+                                "Text recognized · a newer copy stays on the clipboard".into()
+                            }
+                            Err(error) => format!("Text recognized but not copied: {error}"),
+                        };
+                        let input = cx.new(|cx| TextareaState::new(window, cx));
+                        input.update(cx, |input, cx| {
+                            input.set_value(text, window, cx);
+                            input.focus(window, cx);
+                        });
+                        this.panel = None;
+                        this.recognized_text = Some(input);
                     }
-                    Ok(None) => return,
                     Err(error) => this.status = error.to_string(),
                 }
                 cx.notify();
@@ -2346,7 +2376,7 @@ impl Editor {
 
         if !matches!(
             subject,
-            Tool::Select | Tool::Hide | Tool::Spotlight | Tool::Ruler
+            Tool::Select | Tool::Hide | Tool::Spotlight | Tool::Ruler | Tool::Ocr
         ) {
             sections.push(self.color_swatches(cx).into_any_element());
         }
@@ -2949,6 +2979,129 @@ impl Editor {
             .into_any_element()
     }
 
+    fn render_recognized_text(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(input) = &self.recognized_text else {
+            return div().into_any_element();
+        };
+        let size = window.viewport_size();
+        let dialog = div()
+            .id("recognized-text-dialog")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px((f32::from(size.width) - 48.0).clamp(240.0, 680.0)))
+            .p_4()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_lg()
+            .shadow_lg()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Recognized text"),
+                    )
+                    .child(
+                        Button::new("close-recognized-text")
+                            .ghost()
+                            .icon(tool_icon("x"))
+                            .tooltip("Close · Escape")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.recognized_text = None;
+                                this.focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Edit or select the text below."),
+            )
+            .child(
+                Textarea::new(input)
+                    .aria_label("Recognized text")
+                    .w_full()
+                    .h(px((f32::from(size.height) - 240.0).clamp(100.0, 360.0))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        // A long clipboard error wraps instead of pushing the button out.
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.status.clone()),
+                    )
+                    .child(
+                        Button::new("copy-recognized-text")
+                            .flex_shrink_0()
+                            .primary()
+                            .icon(tool_icon("copy"))
+                            .label("Copy text")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let Some(input) = this.recognized_text.clone() else {
+                                    return;
+                                };
+                                let text = input.read(cx).value().to_string();
+                                let count = text.chars().count();
+                                let task = crate::clipboard_jobs::copy(
+                                    crate::clipboard_jobs::Source::Text(text),
+                                    cx,
+                                );
+                                cx.spawn_in(window, async move |this, cx| {
+                                    let result = task.await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        if this.recognized_text.as_ref() != Some(&input)
+                                            || matches!(result, Ok(None))
+                                        {
+                                            return;
+                                        }
+                                        this.result(
+                                            result.map(|_| ()),
+                                            &format!("Text copied · {count} characters"),
+                                            cx,
+                                        );
+                                    });
+                                })
+                                .detach();
+                            })),
+                    ),
+            );
+        #[cfg(feature = "ui-tests")]
+        let dialog = {
+            use gpui_kit::test::TestSupportExt;
+            dialog.test_support()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x000000).opacity(0.35))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(dialog)
+            .into_any_element()
+    }
+
     pub(crate) fn open_settings(
         &mut self,
         page: crate::settings_window::Page,
@@ -3288,7 +3441,11 @@ impl Render for Editor {
                             "{:.0} × {:.0} px{}",
                             rect.width,
                             rect.height,
-                            if self.selection.is_some() {
+                            if self.tool == Tool::Ocr && self.drag.is_some() {
+                                " · Release to recognize"
+                            } else if self.tool == Tool::Ocr {
+                                " · Ctrl/Cmd O to recognize again"
+                            } else if self.selection.is_some() {
                                 " · Enter to crop"
                             } else {
                                 ""
@@ -3376,6 +3533,7 @@ impl Render for Editor {
         canvas = canvas.children(self.render_update_notice(cx));
         canvas = canvas.child(self.render_panel(window, cx));
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -3409,6 +3567,7 @@ impl Render for Editor {
                     .child(bar),
             )
             .child(canvas)
+            .child(self.render_recognized_text(window, cx))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.paths().first() {
                     this.load_path(path.clone(), window, cx);

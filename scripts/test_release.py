@@ -130,7 +130,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_scheduled_nightly_waits_for_six_hours_and_new_commits(self):
         checkout = self.repository()
-        self.plan(checkout)
+        self.plan(checkout, 1793793600)  # 2026-11-04 12:00 UTC, the date in NIGHTLY
         created = release.release_tags(checkout)[NIGHTLY]
         schedule = {'GITHUB_EVENT_NAME': 'schedule', 'GITHUB_RUN_NUMBER': '18'}
         self.assertEqual(self.plan(checkout, created + 5 * 3600, **schedule), {'skip': True})

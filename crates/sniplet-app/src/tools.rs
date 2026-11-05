@@ -16,11 +16,12 @@ pub enum Tool {
     Spotlight,
     Zoom,
     Ruler,
+    Ocr,
 }
 
 impl Tool {
     /// Every tool, in dock order: the most used first.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Select,
         Self::Arrow,
         Self::Rectangle,
@@ -34,6 +35,7 @@ impl Tool {
         Self::Spotlight,
         Self::Zoom,
         Self::Ruler,
+        Self::Ocr,
     ];
 
     pub fn label(self) -> &'static str {
@@ -51,6 +53,7 @@ impl Tool {
             Self::Counter => "Counter",
             Self::Hide => "Hide",
             Self::Zoom => "Magnifier",
+            Self::Ocr => "OCR",
         }
     }
 
@@ -67,7 +70,7 @@ impl Tool {
             Self::Spotlight => Some("S"),
             Self::Counter => Some("C"),
             Self::Hide => Some("B"),
-            Self::Ruler | Self::Freehand | Self::Zoom => None,
+            Self::Ruler | Self::Freehand | Self::Zoom | Self::Ocr => None,
         }
     }
 
@@ -93,6 +96,7 @@ impl Tool {
             Self::Counter => "list-ordered",
             Self::Hide => "eye-off",
             Self::Zoom => "zoom-in",
+            Self::Ocr => "scan-text",
         }
     }
 
@@ -145,7 +149,7 @@ impl Tool {
                 bend: None,
                 variant: Default::default(),
             },
-            Self::Ruler | Self::Select => return None,
+            Self::Ruler | Self::Select | Self::Ocr => return None,
             Self::Line => AnnotationKind::Line { start, end },
             Self::Rectangle => AnnotationKind::Rectangle { rect },
             Self::Ellipse => AnnotationKind::Ellipse { rect },
@@ -276,7 +280,7 @@ impl Size {
                 HideStyle::Pixelate => Some(Self::Pixelate),
                 HideStyle::Erase | HideStyle::Redact => None,
             },
-            Tool::Select | Tool::Highlight | Tool::Ruler => None,
+            Tool::Select | Tool::Highlight | Tool::Ruler | Tool::Ocr => None,
         }
     }
 
