@@ -46,12 +46,22 @@ jobs:
           if ! xcrun -sdk macosx metal --version; then
             xcodebuild -downloadComponent MetalToolchain
           fi
+      - name: Confirm the linker warning text the build check looks for
+        run: |
+          cd "$RUNNER_TEMP"
+          echo 'int main(void){return 0;}' > control.c
+          clang -c -mmacosx-version-min=26.0 control.c -o control.o
+          clang -mmacosx-version-min=15.0 control.o -o control 2>&1 | tee control.log
+          grep -i "built for newer" control.log
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - name: Build application
+        env:
+          # rustc hides deployment mismatch warnings under the allow-by-default linker-info lint.
+          RUSTFLAGS: -Wlinker-info
         run: |
           cargo build -p sniplet-app --release --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
           test "${PIPESTATUS[0]}" -eq 0
-          if grep -i "built for newer macOS version" "$RUNNER_TEMP/build.log"; then
+          if grep -i "built for newer" "$RUNNER_TEMP/build.log"; then
             echo "::error::An object targets a macOS version above 15.0"
             exit 1
           fi
