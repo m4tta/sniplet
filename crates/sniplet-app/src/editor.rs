@@ -1959,24 +1959,26 @@ impl Editor {
         };
         self.status = "Recognizing text…".into();
         cx.notify();
-        let revision = self.preview_revision;
-        let task = crate::clipboard_jobs::copy(
-            crate::clipboard_jobs::Source::Recognize { document, qr_only },
-            cx,
-        );
+        // Only a new document makes the result stale. Edits and clicks during
+        // recognition must not drop it.
+        let revision = self.load_revision;
+        let task = crate::clipboard_jobs::recognize(document, qr_only, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.preview_revision != revision {
+                if this.load_revision != revision {
                     return;
                 }
                 match result {
-                    Ok(Some(crate::clipboard_jobs::Copied::Text(text))) => {
+                    Ok(crate::clipboard_jobs::Recognized { text, copied }) => {
                         let count = text.chars().count();
-                        this.status = if qr_only {
-                            "QR contents copied".into()
-                        } else {
-                            format!("Text copied · {count} characters")
+                        this.status = match copied {
+                            Ok(true) if qr_only => "QR contents copied".into(),
+                            Ok(true) => format!("Text copied · {count} characters"),
+                            Ok(false) => {
+                                "Text recognized · a newer copy stays on the clipboard".into()
+                            }
+                            Err(error) => format!("Text recognized but not copied: {error}"),
                         };
                         let input = cx.new(|cx| TextareaState::new(window, cx));
                         input.update(cx, |input, cx| {
@@ -1986,7 +1988,6 @@ impl Editor {
                         this.panel = None;
                         this.recognized_text = Some(input);
                     }
-                    Ok(None | Some(crate::clipboard_jobs::Copied::Image)) => return,
                     Err(error) => this.status = error.to_string(),
                 }
                 cx.notify();
@@ -3019,7 +3020,7 @@ impl Editor {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Copied to clipboard. Edit or select the text below."),
+                    .child("Edit or select the text below."),
             )
             .child(
                 Textarea::new(input)
