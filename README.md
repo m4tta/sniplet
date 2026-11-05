@@ -40,7 +40,7 @@ Every arrow, label, and blur stays live. Move it, restyle it, or undo it at any 
 <td width="33%" valign="top">
 
 **🔒 Keep it private**<br>
-Blur, pixelate, or redact emails and names before anything leaves your screen.
+Blur, pixelate, or redact emails and names before you share.
 
 </td>
 </tr>
@@ -101,8 +101,13 @@ computer, so a capture is always one shortcut away.
    | macOS, Intel | `Sniplet-…-macos-x64.dmg` |
    | Linux | `Sniplet-…-linux-x64.tar.gz` |
 
-2. **Capture.** Press <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>2</kbd> and drag across the screen.
-3. **Share.** Mark it up, then press <kbd>Ctrl/Cmd</kbd> <kbd>C</kbd> to copy.
+2. **Open Sniplet.** Unzip it, or drag it to Applications on a Mac. It waits in
+   the system tray or menu bar.
+3. **Capture.** Press <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>2</kbd> and drag across the screen.
+4. **Share.** Mark it up, then press <kbd>Ctrl/Cmd</kbd> <kbd>C</kbd> to copy.
+
+On Linux, global shortcuts need an X11 session. On Wayland, start a capture from
+the Sniplet menu.
 
 <details>
 <summary><b>All shortcuts</b></summary>
