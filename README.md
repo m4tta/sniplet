@@ -127,7 +127,7 @@ the Sniplet menu.
 
 In the editor: <kbd>V</kbd> select, <kbd>A</kbd> arrow, <kbd>R</kbd> rectangle,
 <kbd>T</kbd> text, <kbd>B</kbd> hide, <kbd>C</kbd> counter, <kbd>H</kbd> highlight.
-Change any capture shortcut in **Settings → Hotkeys**.
+Change any capture shortcut in **Settings → Shortcuts**.
 
 </details>
 

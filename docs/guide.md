@@ -90,12 +90,15 @@ places a new capture to the right on an expanded canvas as an editable object.
 ## Upload and preferences
 
 Open the application menu → Settings, press `Ctrl/Cmd + ,`, or start with
-`sniplet --settings`. Settings open in a separate window with General, Hotkeys,
-Uploading, and Advanced pages in the sidebar. General includes appearance,
-the screenshots folder, image format, 1× saving for Retina captures, automatic
-clipboard copy, and hiding the editor after export. Saving at 1× keeps the
-editable capture and clipboard at full resolution. Advanced includes the
-scrolling frame limit, scrolling speed, editor behavior, and **Launch at startup**.
+`sniplet --settings`. Settings open in a separate window with General, Capture,
+Shortcuts, and Save & Share tabs at the top. Every change saves when you make it,
+and a short "Saved" message confirms it. Errors show next to the setting.
+General includes appearance, **Launch at startup**, keeping the editor on top,
+and updates. Capture includes the window screenshot background, automatic
+clipboard copy, hiding the editor after export, and the scrolling frame limit
+and speed. Save & Share includes the screenshots folder, image format, 1× saving
+for Retina captures, and the upload destination. Saving at 1× keeps the
+editable capture and clipboard at full resolution.
 Turn on Launch at startup to start Sniplet in the tray when you sign in.
 The editor stays closed until you use a capture shortcut or open it from the tray.
 Turn the switch off to remove startup registration. A manual launch opens the editor.
@@ -105,11 +108,13 @@ unavailable, Sniplet opens the editor so that you can still use the app.
 Windows uses the current user's Run registry entry. Linux uses an XDG autostart
 entry. macOS uses Login Items and requires a packaged app; the system can ask
 you to approve it. Keep the app in a fixed location after you enable startup.
-Shortcut changes apply immediately after saving. The macOS menu bar also offers
+In Shortcuts, click a shortcut and press the new keys. Esc cancels, and Backspace
+turns the shortcut off. Global shortcuts pause while a shortcut field records, and a
+combination that another shortcut uses is refused. Changes apply immediately. The macOS menu bar also offers
 upward scrolling capture under More. Upload is disabled until a destination is configured.
-General → Window screenshot background offers Wallpaper, Transparent, Solid color,
+Capture → Window screenshot background offers Wallpaper, Transparent, Solid color,
 and Trim shadow. Padded modes add a soft shadow and 0–120 points of padding
-(32 by default), scaled for the capture's display. Choose a background hex color,
+(32 by default), scaled for the capture's display. Choose a preset color or a hex color,
 use the desktop wallpaper, or choose an image. Wallpaper images are center-cropped
 to fill the frame. If the wallpaper cannot be read, Sniplet uses the chosen solid
 color and reports this in the editor. Trim shadow keeps the exact native window
@@ -124,8 +129,9 @@ cursor and camera marker. Windows and Linux hide the editor; macOS also allows
 capturing the editor itself. Point at a visible window to highlight it, then click
 to capture it. Escape or right-click cancels
 without reopening the editor.
-Settings → Uploading accepts a signed PUT URL and an optional public image URL,
-or an S3-compatible destination. Use the application menu → Upload image to
+Settings → Save & Share → Upload accepts a signed PUT URL and an optional public
+image URL, or an S3-compatible destination. For S3, the page shows whether the
+AWS credentials are set in the environment. Use the application menu → Upload image to
 upload the current image and copy its link. Saving a destination makes no network request.
 
 S3-compatible uploads can also be configured in the settings file:

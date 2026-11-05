@@ -75,6 +75,12 @@ pub struct UploadedImage {
     pub key: String,
 }
 
+/// Reports whether S3 uploads can read credentials from the environment.
+/// Reads only environment variables, never the network.
+pub fn s3_credentials_available() -> bool {
+    Auth::from_env().is_ok()
+}
+
 /// Encode and upload an RGBA image as PNG.
 ///
 /// This function is the only operation that performs network I/O. Constructing
