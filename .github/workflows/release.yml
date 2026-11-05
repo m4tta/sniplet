@@ -72,12 +72,15 @@ jobs:
       # Read by crates/sniplet-platform/build.rs and scripts/package.sh.
       SNIPLET_VERSION: ${{ needs.plan.outputs.version }}
       SNIPLET_BUILD_SHA: ${{ needs.plan.outputs.sha }}
+      # Matches LSMinimumSystemVersion in scripts/package.sh, so Rust and C/C++
+      # code built with a newer runner SDK still runs on that macOS version.
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: macos-arm64
-            runner: macos-15
+            runner: macos-26
           - target: macos-x64
             runner: macos-15-intel
           - target: windows-x64
