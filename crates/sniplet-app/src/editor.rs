@@ -3038,13 +3038,17 @@ impl Editor {
                     .justify_between()
                     .gap_3()
                     .child(
+                        // A long clipboard error wraps instead of pushing the button out.
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(self.status.clone()),
                     )
                     .child(
                         Button::new("copy-recognized-text")
+                            .flex_shrink_0()
                             .primary()
                             .icon(tool_icon("copy"))
                             .label("Copy text")
