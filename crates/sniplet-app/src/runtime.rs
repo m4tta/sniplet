@@ -125,15 +125,13 @@ pub fn parse_hotkey(text: &str) -> Result<HotKey, String> {
     HotKey::from_str(&text).map_err(|error| error.to_string())
 }
 
-pub fn validate_hotkeys(values: &[String]) -> Result<(), String> {
-    let mut ids = std::collections::HashSet::new();
-    for value in values.iter().filter(|value| !value.is_empty()) {
-        let key = parse_hotkey(value).map_err(|error| format!("Invalid shortcut: {error}"))?;
-        if !ids.insert(key.id()) {
-            return Err(format!("Shortcut {value} is assigned more than once"));
-        }
-    }
-    Ok(())
+/// Returns the index of another shortcut that is the same key combination as
+/// `values[index]`. Aliases such as Ctrl and Control count as the same keys.
+pub fn conflicting_hotkey(values: &[&str], index: usize) -> Result<Option<usize>, String> {
+    let id = parse_hotkey(values[index])?.id();
+    Ok(values.iter().enumerate().position(|(other, text)| {
+        other != index && !text.is_empty() && parse_hotkey(text).is_ok_and(|key| key.id() == id)
+    }))
 }
 
 fn capture_bindings(settings: &sniplet_platform::HotkeySettings) -> [(&str, Command); 8] {
@@ -358,9 +356,12 @@ pub fn install(
                 .timer(Duration::from_millis(60))
                 .await;
             cx.update(|cx| {
-                let hotkeys = &editor.read(cx).settings.hotkeys;
-                if *hotkeys != current_hotkeys {
-                    let hotkeys = hotkeys.clone();
+                let state = editor.read(cx);
+                let mut hotkeys = state.settings.hotkeys.clone();
+                if state.hotkeys_paused {
+                    hotkeys.slots_mut().into_iter().for_each(String::clear);
+                }
+                if hotkeys != current_hotkeys {
                     let manager = cx.global::<Services>().manager.as_ref();
                     if let Some(manager) = manager {
                         for (key, _) in &registered {
@@ -706,12 +707,17 @@ mod tests {
 
     #[test]
     fn shortcuts_reject_alias_collisions_and_allow_disabled_bindings() {
-        assert!(validate_hotkeys(&[String::new(), "Ctrl+Shift+1".into()]).is_ok());
-        assert!(validate_hotkeys(&["Ctrl+Shift+1".into(), "Control+Shift+1".into()]).is_err());
-        assert!(validate_hotkeys(&["ThisIsNotAKey".into()]).is_err());
+        assert_eq!(conflicting_hotkey(&["", "Ctrl+Shift+1"], 1), Ok(None));
+        assert_eq!(
+            conflicting_hotkey(&["Ctrl+Shift+1", "Control+Shift+1"], 1),
+            Ok(Some(0))
+        );
+        assert!(conflicting_hotkey(&["ThisIsNotAKey"], 0).is_err());
         let settings = sniplet_platform::HotkeySettings::default();
-        let values = capture_bindings(&settings).map(|(text, _)| text.to_owned());
-        assert!(validate_hotkeys(&values).is_ok());
+        let values = capture_bindings(&settings).map(|(text, _)| text);
+        for index in 0..values.len() {
+            assert_eq!(conflicting_hotkey(&values, index), Ok(None));
+        }
     }
 
     fn escape_registration(id: u64) -> EscapeRegistration {

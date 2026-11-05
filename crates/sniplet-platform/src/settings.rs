@@ -82,6 +82,37 @@ impl Default for HotkeySettings {
     }
 }
 
+impl HotkeySettings {
+    /// Every shortcut in a fixed order, so settings UI and tests can address one by index.
+    pub fn slots(&self) -> [&str; 8] {
+        [
+            &self.capture_area,
+            &self.capture_screen,
+            &self.capture_window,
+            &self.scrolling_capture,
+            &self.repeat_area,
+            &self.active_window,
+            &self.capture_ocr,
+            &self.show_editor,
+        ]
+        .map(String::as_str)
+    }
+
+    /// Mutable form of [`Self::slots`], in the same order.
+    pub fn slots_mut(&mut self) -> [&mut String; 8] {
+        [
+            &mut self.capture_area,
+            &mut self.capture_screen,
+            &mut self.capture_window,
+            &mut self.scrolling_capture,
+            &mut self.repeat_area,
+            &mut self.active_window,
+            &mut self.capture_ocr,
+            &mut self.show_editor,
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {

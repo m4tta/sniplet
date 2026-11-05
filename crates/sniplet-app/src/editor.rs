@@ -154,6 +154,8 @@ pub struct Editor {
     pub status: String,
     pub settings: Settings,
     pub(crate) hotkey_error: Option<String>,
+    /// True while Settings records a new shortcut, so the OS does not take the keypress.
+    pub(crate) hotkeys_paused: bool,
     pub monitor_index: usize,
     pub panel: Option<Panel>,
     _theme_subscription: Subscription,
@@ -276,6 +278,7 @@ impl Editor {
             status: "Ready".into(),
             settings,
             hotkey_error: None,
+            hotkeys_paused: false,
             monitor_index: if cfg!(test) {
                 0
             } else {
@@ -2001,7 +2004,7 @@ impl Editor {
 
     fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(config) = self.settings.cloud_upload.clone() else {
-            self.open_settings(crate::settings_window::Page::Uploading, window, cx);
+            self.open_settings(crate::settings_window::Page::Share, window, cx);
             return;
         };
         let document = match self.export_document() {

@@ -44,7 +44,7 @@ pub use scroll::{
 pub use settings::{
     AnnotationColor, ExportFormat, HotkeySettings, Settings, SettingsStore, ThemePreference,
 };
-pub use upload::{CloudUploadConfig, UploadedImage, upload_image};
+pub use upload::{CloudUploadConfig, UploadedImage, s3_credentials_available, upload_image};
 pub use window_background::{
     WindowBackground, WindowCaptureStyle, compose_window_capture, load_wallpaper_image,
 };

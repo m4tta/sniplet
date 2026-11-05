@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use gpui_kit::{
     base::Disableable,
     base::slider::{SliderEvent, SliderState},
     component::{
-        ActiveTheme, Selectable, TitleBar,
+        ActiveTheme, Selectable, Sizable, TitleBar,
         button::{Button, ButtonVariants},
         input::{Input, InputEvent, InputState},
         slider::Slider,
@@ -18,39 +20,80 @@ use sniplet_platform::{
 
 use crate::editor::{Editor, tool_icon};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Settings pages in tab order. `page as usize` is part of the tab and content element IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     General,
-    Hotkeys,
-    Uploading,
-    Advanced,
+    Capture,
+    Shortcuts,
+    Share,
 }
 
 impl Page {
+    const ALL: [Self; 4] = [Self::General, Self::Capture, Self::Shortcuts, Self::Share];
+
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Hotkeys => "Hotkeys",
-            Self::Uploading => "Uploading",
-            Self::Advanced => "Advanced",
+            Self::Capture => "Capture",
+            Self::Shortcuts => "Shortcuts",
+            Self::Share => "Save & Share",
         }
     }
+
     fn icon(self) -> &'static str {
         match self {
             Self::General => "settings",
-            Self::Hotkeys => "keyboard",
-            Self::Uploading => "cloud-upload",
-            Self::Advanced => "sliders-horizontal",
+            Self::Capture => "scan",
+            Self::Shortcuts => "keyboard",
+            Self::Share => "cloud-upload",
         }
     }
-    fn description(self) -> &'static str {
-        match self {
-            Self::General => "Appearance, saving, and capture behavior.",
-            Self::Hotkeys => "Customize your capture shortcuts.",
-            Self::Uploading => "Configure a destination for sharing screenshots.",
-            Self::Advanced => "Scrolling capture and editor behavior.",
-        }
-    }
+}
+
+/// Shortcut rows by group. Each index points into `HotkeySettings::slots`.
+const SHORTCUT_GROUPS: [(&str, &[(usize, &str)]); 3] = [
+    (
+        "Capture",
+        &[
+            (0, "Capture area"),
+            (1, "Capture screen"),
+            (2, "Capture window"),
+            (3, "Scrolling capture"),
+            (6, "Capture text / QR"),
+        ],
+    ),
+    (
+        "Repeat",
+        &[(4, "Repeat last area"), (5, "Capture active window")],
+    ),
+    ("App", &[(7, "Reopen editor")]),
+];
+
+/// Preset window backgrounds. The hex field still accepts any color.
+const SWATCHES: [[u8; 3]; 6] = [
+    [0xF2, 0xF2, 0xF7],
+    [0xFF, 0xFF, 0xFF],
+    [0x1C, 0x1C, 0x1E],
+    [0xE8, 0xF0, 0xFE],
+    [0xFD, 0xF2, 0xE9],
+    [0x0A, 0x84, 0xFF],
+];
+
+/// A control that owns a validation message. A notice without one shows as a toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Startup,
+    BackgroundColor,
+    Wallpaper,
+    Hotkey(usize),
+    Upload,
+}
+
+struct Notice {
+    text: String,
+    error: bool,
+    field: Option<Field>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,19 +106,21 @@ pub(crate) struct SettingsWindow {
     editor: Entity<Editor>,
     page: Page,
     focus: FocusHandle,
-    hotkeys: [Entity<InputState>; 8],
+    /// The shortcut slot that is waiting for a key combination.
+    recording: Option<usize>,
+    live_modifiers: Modifiers,
     upload: [Entity<InputState>; 7],
     upload_kind: UploadKind,
-    scroll_limit: Entity<InputState>,
+    /// Shows the destination form. It can be open before a destination is saved.
+    upload_open: bool,
     scroll_speed: Entity<SliderState>,
     window_padding: Entity<SliderState>,
     background_color: Entity<InputState>,
     background_previews: [std::sync::Arc<RenderImage>; 4],
-    message: String,
+    notice: Option<Notice>,
+    notice_generation: u64,
     settings_save_revision: u64,
-    error: bool,
-    _theme: Subscription,
-    _editor: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 pub(crate) fn open(
@@ -92,10 +137,10 @@ pub(crate) fn open(
     }
     options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
         parent.display(cx).map(|display| display.id()),
-        size(px(900.0), px(710.0)),
+        size(px(680.0), px(720.0)),
         cx,
     )));
-    options.window_min_size = Some(size(px(760.0), px(580.0)));
+    options.window_min_size = Some(size(px(560.0), px(480.0)));
     options.app_id = Some(sniplet_platform::APP_ID.into());
     gpui_kit::open_window(options, cx, move |window, cx| {
         window.set_window_title("Sniplet Settings");
@@ -103,7 +148,7 @@ pub(crate) fn open(
     })
 }
 
-/// Text fields on auto-saving pages save when the user presses Enter or leaves the field.
+/// Text fields save when the user presses Enter or leaves the field.
 fn commits(event: &InputEvent) -> bool {
     matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
 }
@@ -118,16 +163,9 @@ impl SettingsWindow {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let hotkeys = hotkey_values(&settings.hotkeys).map(|value| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(value)
-                    .placeholder("Disabled")
-            })
-        });
         let mut upload_values = std::array::from_fn::<_, 7, _>(|_| String::new());
         let mut upload_kind = UploadKind::SignedUrl;
-        match settings.cloud_upload {
+        match settings.cloud_upload.clone() {
             Some(CloudUploadConfig::PresignedPut { url, public_url }) => {
                 upload_values[0] = url;
                 upload_values[1] = public_url.unwrap_or_default();
@@ -153,7 +191,7 @@ impl SettingsWindow {
             "https://… public image link",
             "screenshots",
             "us-east-1",
-            "https://… S3 endpoint",
+            "Leave empty for Amazon S3",
             "sniplet/",
             "https://… public base URL",
         ];
@@ -164,15 +202,6 @@ impl SettingsWindow {
                     .placeholder(placeholders[index])
             })
         });
-        let scroll_limit = cx.new(|cx| {
-            InputState::new(window, cx).default_value(settings.scroll_max_frames.to_string())
-        });
-        cx.subscribe(&scroll_limit, |this, _, event, cx| {
-            if commits(event) {
-                this.save_scroll_limit(cx);
-            }
-        })
-        .detach();
         let scroll_speed = cx.new(|_| {
             SliderState::new()
                 .min(100.0)
@@ -180,15 +209,6 @@ impl SettingsWindow {
                 .step(50.0)
                 .default_value((800 - settings.scroll_settle_ms.clamp(100, 700)) as f32)
         });
-        cx.subscribe(&scroll_speed, |this, _, event, cx| {
-            if let SliderEvent::Release(value) = event {
-                let milliseconds = 800 - value.end() as u64;
-                this.change(cx, |settings| settings.scroll_settle_ms = milliseconds);
-            } else {
-                cx.notify();
-            }
-        })
-        .detach();
         let window_padding = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -196,85 +216,148 @@ impl SettingsWindow {
                 .step(4.0)
                 .default_value(settings.window_capture.padding.min(120) as f32)
         });
-        cx.subscribe(&window_padding, |this, _, event, cx| {
-            if let SliderEvent::Release(value) = event {
-                this.change(cx, |settings| {
-                    settings.window_capture.padding = value.end() as u32
-                });
-            } else {
-                cx.notify();
-            }
-        })
-        .detach();
         let background_color = cx.new(|cx| {
             InputState::new(window, cx).default_value(color_hex(settings.window_capture.color))
         });
-        cx.subscribe(&background_color, |this, _, event, cx| {
-            if commits(event) {
-                this.save_background_color(cx);
-            }
-        })
-        .detach();
-        let background_previews = background_previews(settings.window_capture.color);
-        let theme = cx.observe_window_appearance(window, |this, window, cx| {
-            let preference = this.editor.read(cx).settings.theme;
-            if preference == ThemePreference::System {
-                crate::theme::apply(preference, window, cx);
-            }
-        });
-        let editor_subscription = cx.observe(&editor, |this: &mut Self, editor, cx| {
-            if let Some((revision, error)) = &editor.read(cx).settings_save_result
-                && *revision != this.settings_save_revision
-            {
-                this.settings_save_revision = *revision;
-                this.message = error.clone().unwrap_or_else(|| "Settings saved".into());
-                this.error = error.is_some();
-            }
-            cx.notify();
-        });
+        let subscriptions = vec![
+            cx.subscribe(&scroll_speed, |this, _, event, cx| {
+                if let SliderEvent::Release(value) = event {
+                    let milliseconds = 800 - value.end() as u64;
+                    this.change(cx, |settings| settings.scroll_settle_ms = milliseconds);
+                } else {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&window_padding, |this, _, event, cx| {
+                if let SliderEvent::Release(value) = event {
+                    this.change(cx, |settings| {
+                        settings.window_capture.padding = value.end() as u32
+                    });
+                } else {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&background_color, |this, _, event, cx| {
+                if commits(event) {
+                    this.save_background_color(cx);
+                }
+            }),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                let preference = this.editor.read(cx).settings.theme;
+                if preference == ThemePreference::System {
+                    crate::theme::apply(preference, window, cx);
+                }
+            }),
+            // Leaving the window ends recording, so global shortcuts work again.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.stop_recording(cx);
+                }
+            }),
+            cx.observe(&editor, |this: &mut Self, editor, cx| {
+                if let Some((revision, error)) = editor.read(cx).settings_save_result.clone()
+                    && revision != this.settings_save_revision
+                {
+                    this.settings_save_revision = revision;
+                    let failed = error.is_some();
+                    this.show(error.unwrap_or_else(|| "Saved".into()), failed, None, cx);
+                }
+                cx.notify();
+            }),
+            cx.on_release(|this, cx| {
+                this.editor
+                    .update(cx, |editor, _| editor.hotkeys_paused = false)
+            }),
+        ];
         Self {
             editor,
             page,
             focus,
-            hotkeys,
+            recording: None,
+            live_modifiers: Modifiers::default(),
             upload,
             upload_kind,
-            scroll_limit,
+            upload_open: settings.cloud_upload.is_some(),
             scroll_speed,
             window_padding,
             background_color,
-            background_previews,
-            message: String::new(),
+            background_previews: background_previews(settings.window_capture.color),
+            notice: None,
+            notice_generation: 0,
             settings_save_revision: 0,
-            error: false,
-            _theme: theme,
-            _editor: editor_subscription,
+            _subscriptions: subscriptions,
         }
     }
 
     pub(crate) fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
-        self.message.clear();
-        self.error = false;
+        self.stop_recording(cx);
+        self.clear_notice(cx);
         cx.notify();
     }
 
+    /// Applies one settings change and saves it in the background. The save
+    /// result comes back through the editor observer as a toast.
     fn change(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Settings)) {
+        self.stop_recording(cx);
         self.editor.update(cx, |editor, cx| {
             change(&mut editor.settings);
             editor.persist_settings(cx);
         });
-        self.message.clear();
-        self.error = false;
+        self.clear_notice(cx);
         self.background_previews =
             background_previews(self.editor.read(cx).settings.window_capture.color);
         cx.notify();
     }
 
-    fn fail(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.message = message.into();
-        self.error = true;
+    /// Shows a message. Success messages hide after a short time; errors stay
+    /// until the next change.
+    fn show(
+        &mut self,
+        text: impl Into<String>,
+        error: bool,
+        field: Option<Field>,
+        cx: &mut Context<Self>,
+    ) {
+        self.notice_generation += 1;
+        self.notice = Some(Notice {
+            text: text.into(),
+            error,
+            field,
+        });
+        if !error {
+            let generation = self.notice_generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1600))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.notice_generation == generation {
+                        this.clear_notice(cx);
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    fn fail(&mut self, text: impl Into<String>, field: Option<Field>, cx: &mut Context<Self>) {
+        self.show(text, true, field, cx);
+    }
+
+    fn clear_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.take().is_some() {
+            self.notice_generation += 1;
+            cx.notify();
+        }
+    }
+
+    fn field_error(&self, field: Field) -> Option<SharedString> {
+        self.notice
+            .as_ref()
+            .filter(|notice| notice.error && notice.field == Some(field))
+            .map(|notice| notice.text.clone().into())
     }
 
     fn toggle(
@@ -315,7 +398,7 @@ impl SettingsWindow {
                 }
             }
             Ok(Err(error)) => {
-                let _ = this.update(cx, |this, cx| this.fail(error.to_string(), cx));
+                let _ = this.update(cx, |this, cx| this.fail(error.to_string(), None, cx));
             }
             _ => {}
         })
@@ -343,11 +426,49 @@ impl SettingsWindow {
                     Ok(path) => this.change(cx, |settings| {
                         settings.window_capture.wallpaper = Some(path)
                     }),
-                    Err(error) => this.fail(error, cx),
+                    Err(error) => this.fail(error, Some(Field::Wallpaper), cx),
                 });
             }
         })
         .detach();
+    }
+
+    fn set_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let task = crate::runtime::change_startup(enabled, cx);
+        let editor = self.editor.clone();
+        self.clear_notice(cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(actual) if actual == enabled => this.show("Saved", false, None, cx),
+                    Ok(_) => this.fail(
+                        if cfg!(target_os = "macos") {
+                            "Turn on Sniplet in System Settings → General → Login Items."
+                        } else {
+                            "Allow Sniplet to start in your system's startup settings."
+                        },
+                        Some(Field::Startup),
+                        cx,
+                    ),
+                    Err(error) => this.fail(error, Some(Field::Startup), cx),
+                }
+                editor.update(cx, |_, cx| cx.notify());
+            });
+        })
+        .detach();
+    }
+
+    fn set_background_color(
+        &mut self,
+        color: [u8; 3],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.background_color.update(cx, |input, cx| {
+            input.set_value(color_hex(color), window, cx)
+        });
+        self.change(cx, |settings| settings.window_capture.color = color);
     }
 
     fn save_background_color(&mut self, cx: &mut Context<Self>) {
@@ -355,37 +476,201 @@ impl SettingsWindow {
         let value = value.trim();
         let value = value.strip_prefix('#').unwrap_or(value);
         if value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            self.fail("Use a six-digit hex color, such as #F2F2F7.", cx);
+            self.fail(
+                "Use a six-digit hex color, such as #F2F2F7.",
+                Some(Field::BackgroundColor),
+                cx,
+            );
             return;
         }
         let color = u32::from_str_radix(value, 16).unwrap();
         let color = [(color >> 16) as u8, (color >> 8) as u8, color as u8];
         if self.editor.read(cx).settings.window_capture.color == color {
-            self.clear_error(cx);
+            self.clear_notice(cx);
             return;
         }
         self.change(cx, |settings| settings.window_capture.color = color);
     }
 
-    fn save_scroll_limit(&mut self, cx: &mut Context<Self>) {
-        match self.scroll_limit.read(cx).value().trim().parse::<usize>() {
-            Ok(value) if self.editor.read(cx).settings.scroll_max_frames == value => {
-                self.clear_error(cx)
-            }
-            Ok(value) if (2..=200).contains(&value) => {
-                self.change(cx, |settings| settings.scroll_max_frames = value)
-            }
-            _ => self.fail("Enter a capture limit between 2 and 200 frames.", cx),
+    fn start_recording(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.recording = Some(index);
+        self.live_modifiers = Modifiers::default();
+        self.clear_notice(cx);
+        // The root takes focus so the key reaches `record_key`, not a text field.
+        self.focus.focus(window, cx);
+        self.editor
+            .update(cx, |editor, _| editor.hotkeys_paused = true);
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
+            self.editor
+                .update(cx, |editor, _| editor.hotkeys_paused = false);
+            cx.notify();
         }
     }
 
-    /// Removes a validation error after the user restores the saved value.
-    fn clear_error(&mut self, cx: &mut Context<Self>) {
-        if self.error {
-            self.message.clear();
-            self.error = false;
+    /// Handles a key press while a shortcut field is recording.
+    fn record_key(&mut self, index: usize, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let plain = !keystroke.modifiers.modified();
+        match keystroke.key.as_str() {
+            "escape" if plain => return self.stop_recording(cx),
+            "backspace" | "delete" if plain => return self.set_hotkey(index, String::new(), cx),
+            "shift" | "control" | "ctrl" | "alt" | "platform" | "cmd" | "super" | "win"
+            | "function" | "fn" | "capslock" => return,
+            _ => {}
+        }
+        match hotkey_text(keystroke) {
+            Ok(text) => self.set_hotkey(index, text, cx),
+            Err(message) => self.fail(message, Some(Field::Hotkey(index)), cx),
+        }
+    }
+
+    /// Saves one shortcut, or explains why it cannot be used. An empty value turns it off.
+    fn set_hotkey(&mut self, index: usize, value: String, cx: &mut Context<Self>) {
+        let mut hotkeys = self.editor.read(cx).settings.hotkeys.clone();
+        *hotkeys.slots_mut()[index] = value.clone();
+        if !value.is_empty() {
+            let conflict = crate::runtime::conflicting_hotkey(&hotkeys.slots(), index);
+            let message = match conflict {
+                Ok(None) => None,
+                Ok(Some(other)) => Some(format!(
+                    "{} is already used by {}.",
+                    shortcut_label(&value),
+                    shortcut_name(other)
+                )),
+                Err(_) => Some("That key can't be used in a shortcut.".to_owned()),
+            };
+            if let Some(message) = message {
+                self.stop_recording(cx);
+                self.fail(message, Some(Field::Hotkey(index)), cx);
+                return;
+            }
+        }
+        self.change(cx, |settings| settings.hotkeys = hotkeys);
+    }
+
+    fn set_upload_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.upload_open = open;
+        if !open && self.editor.read(cx).settings.cloud_upload.is_some() {
+            self.change(cx, |settings| settings.cloud_upload = None);
+        } else {
+            self.clear_notice(cx);
             cx.notify();
         }
+    }
+
+    fn save_upload(&mut self, cx: &mut Context<Self>) {
+        let values = self
+            .upload
+            .each_ref()
+            .map(|input| input.read(cx).value().trim().to_owned());
+        let config = match self.upload_kind {
+            UploadKind::SignedUrl => CloudUploadConfig::PresignedPut {
+                url: values[0].clone(),
+                public_url: optional(&values[1]),
+            },
+            UploadKind::S3 => CloudUploadConfig::S3 {
+                bucket: values[2].clone(),
+                region: values[3].clone(),
+                endpoint: optional(&values[4]),
+                key_prefix: values[5].clone(),
+                public_base_url: optional(&values[6]),
+            },
+        };
+        if let Err(error) = config.validate() {
+            self.fail(error.to_string(), Some(Field::Upload), cx);
+            return;
+        }
+        self.change(cx, |settings| settings.cloud_upload = Some(config));
+    }
+
+    fn general(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = self.editor.read(cx).settings.clone();
+        let appearance = div().flex().flex_wrap().gap_3().children(
+            [
+                ("theme-system", "System", ThemePreference::System),
+                ("theme-light", "Light", ThemePreference::Light),
+                ("theme-dark", "Dark", ThemePreference::Dark),
+            ]
+            .map(|(id, label, preference)| {
+                Button::new(id)
+                    .ghost()
+                    .selected(settings.theme == preference)
+                    .w(px(132.0))
+                    .h(px(106.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(appearance_preview(preference))
+                            .child(div().text_sm().child(label)),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.change(cx, |settings| settings.theme = preference);
+                        crate::theme::apply(preference, window, cx);
+                    }))
+            }),
+        );
+        let (startup_on, startup_busy) = crate::runtime::startup_state(cx);
+        let about = div()
+            .flex()
+            .justify_center()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("Sniplet {}", sniplet_platform::updates::VERSION))
+            .child("·")
+            .child(
+                Button::new("reveal-settings")
+                    .ghost()
+                    .small()
+                    .label("Show settings file")
+                    .on_click(|_, _, cx| {
+                        if let Ok(store) = sniplet_platform::SettingsStore::for_app() {
+                            cx.reveal_path(store.path());
+                        }
+                    }),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(section("Appearance", card(cx).p_3().child(appearance), cx))
+            .child(section(
+                "App",
+                card(cx)
+                    .child(row_with_error(
+                        "Launch at startup",
+                        "Start in the tray when you sign in. The editor stays closed.",
+                        self.field_error(Field::Startup),
+                        Switch::new("launch-at-startup")
+                            .checked(startup_on)
+                            .disabled(startup_busy)
+                            .accessibility_label("Launch at startup")
+                            .on_click(cx.listener(|this, enabled: &bool, _, cx| {
+                                this.set_startup(*enabled, cx)
+                            })),
+                        cx,
+                    ))
+                    .child(divider(cx))
+                    .child(self.toggle(
+                        "always-on-top",
+                        "Keep editor on top",
+                        "Takes effect after restarting Sniplet.",
+                        settings.always_on_top,
+                        |s, v| s.always_on_top = v,
+                        cx,
+                    )),
+                cx,
+            ))
+            .child(crate::updates::settings_section(&self.editor, cx))
+            .child(about)
+            .into_any_element()
     }
 
     fn window_background(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -444,72 +729,425 @@ impl SettingsWindow {
                     }))
             }),
         );
-        section("Window screenshot background", card(cx)
-            .child(div().p_3().child(choices))
-            .child(div().px_4().pb_3().child(note(
-                "Applied to window captures. Padded modes add a soft shadow; Trim shadow keeps the window's exact size.", cx)))
-            .when(style.background != WindowBackground::TrimShadow, |card| {
-                card.child(divider(cx)).child(row("Padding", "Space around the window at 1× resolution.",
-                    div().flex().items_center().gap_3()
-                        .child(div().id("window-padding").test_support().w(px(168.0)).h(px(24.0)).flex().items_center().child(Slider::new(&self.window_padding)))
-                        .child(div().w(px(44.0)).text_sm().child(format!("{} pt", self.window_padding.read(cx).value().end() as u32))), cx))
-            })
-            .when(matches!(style.background, WindowBackground::Solid | WindowBackground::Wallpaper), |card| {
-                card.child(divider(cx)).child(row(
-                    if style.background == WindowBackground::Wallpaper { "Fallback color" } else { "Background color" },
-                    if style.background == WindowBackground::Wallpaper { "Used if the wallpaper image is unavailable." } else { "A solid color behind the window and its shadow." },
-                    div().flex().items_center().gap_2()
-                        .child(div().size(px(22.0)).rounded(px(5.0)).border_1().border_color(cx.theme().border)
-                            .bg(rgb((u32::from(style.color[0]) << 16) | (u32::from(style.color[1]) << 8) | u32::from(style.color[2]))))
-                        .child(Input::new(&self.background_color).id("window-background-color").w(px(100.0))), cx))
-            })
-            .when(style.background == WindowBackground::Wallpaper, |card| {
-                card.child(divider(cx))
-                    .child(row("Wallpaper image", "Use your desktop wallpaper or choose an image.",
-                        div().flex().gap_2()
-                            .child(Button::new("choose-wallpaper").label("Choose…")
-                                .on_click(cx.listener(|this, _, window, cx| this.choose_wallpaper(window, cx))))
-                            .child(Button::new("desktop-wallpaper").ghost().label("Use desktop")
-                                .disabled(style.wallpaper.is_none())
-                                .on_click(cx.listener(|this, _, _, cx| this.change(cx, |settings| settings.window_capture.wallpaper = None)))), cx))
-                    .child(div().px_4().pb_3().text_xs().text_color(cx.theme().muted_foreground).truncate()
-                        .child(style.wallpaper.as_ref().map_or_else(|| "Desktop wallpaper".into(), |path| path.display().to_string())))
-            }), cx).into_any_element()
+        let swatches = div()
+            .flex()
+            .items_center()
+            .children(SWATCHES.into_iter().enumerate().map(|(index, color)| {
+                let selected = style.color == color;
+                div()
+                    .id(("swatch", index))
+                    .test_support()
+                    .size(px(28.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if selected {
+                        rgb(crate::theme::ACCENT).into()
+                    } else {
+                        cx.theme().transparent
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(20.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(rgb(color_value(color))),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_background_color(color, window, cx)
+                    }))
+            }));
+        let wallpaper = style.background == WindowBackground::Wallpaper;
+        section(
+            "Window screenshot background",
+            card(cx)
+                .child(div().p_3().child(choices))
+                .child(div().px_4().pb_3().child(note(
+                    "Applied to window captures. Padded modes add a soft shadow. Trim shadow keeps the window's exact size.",
+                    cx,
+                )))
+                .when(style.background != WindowBackground::TrimShadow, |card| {
+                    card.child(divider(cx)).child(row(
+                        "Padding",
+                        "Space around the window at 1× resolution.",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("window-padding")
+                                    .test_support()
+                                    .w(px(150.0))
+                                    .h(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .child(Slider::new(&self.window_padding)),
+                            )
+                            .child(div().w(px(44.0)).text_sm().child(format!(
+                                "{} pt",
+                                self.window_padding.read(cx).value().end() as u32
+                            ))),
+                        cx,
+                    ))
+                })
+                .when(
+                    matches!(
+                        style.background,
+                        WindowBackground::Solid | WindowBackground::Wallpaper
+                    ),
+                    |card| {
+                        card.child(divider(cx)).child(row_with_error(
+                            if wallpaper {
+                                "Fallback color"
+                            } else {
+                                "Background color"
+                            },
+                            if wallpaper {
+                                "Used if the wallpaper image is unavailable."
+                            } else {
+                                "A solid color behind the window and its shadow."
+                            },
+                            self.field_error(Field::BackgroundColor),
+                            div().flex().items_center().gap_2().child(swatches).child(
+                                Input::new(&self.background_color)
+                                    .id("window-background-color")
+                                    .w(px(96.0)),
+                            ),
+                            cx,
+                        ))
+                    },
+                )
+                .when(wallpaper, |card| {
+                    card.child(divider(cx))
+                        .child(row_with_error(
+                            "Wallpaper image",
+                            "Use your desktop wallpaper or choose an image.",
+                            self.field_error(Field::Wallpaper),
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("desktop-wallpaper")
+                                        .ghost()
+                                        .label("Use desktop")
+                                        .disabled(style.wallpaper.is_none())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.change(cx, |settings| {
+                                                settings.window_capture.wallpaper = None
+                                            })
+                                        })),
+                                )
+                                .child(Button::new("choose-wallpaper").label("Choose…").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.choose_wallpaper(window, cx)
+                                    }),
+                                )),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .px_4()
+                                .pb_3()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(style.wallpaper.as_ref().map_or_else(
+                                    || "Desktop wallpaper".into(),
+                                    |path| path.display().to_string(),
+                                )),
+                        )
+                }),
+            cx,
+        )
+        .into_any_element()
     }
 
-    fn general(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn capture(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = self.editor.read(cx).settings.clone();
+        let limit = settings.scroll_max_frames;
+        let stepper = div()
+            .flex()
+            .items_center()
+            .h(px(32.0))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("scroll-limit-down")
+                    .ghost()
+                    .small()
+                    .icon(tool_icon("minus"))
+                    .accessibility_label("Fewer frames")
+                    .disabled(limit <= 2)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change(cx, |s| s.scroll_max_frames = step_limit(limit, false))
+                    })),
+            )
+            .child(
+                div()
+                    .id("scroll-limit")
+                    .test_support()
+                    .w(px(40.0))
+                    .flex()
+                    .justify_center()
+                    .child(limit.to_string()),
+            )
+            .child(
+                Button::new("scroll-limit-up")
+                    .ghost()
+                    .small()
+                    .icon(tool_icon("plus"))
+                    .accessibility_label("More frames")
+                    .disabled(limit >= 200)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change(cx, |s| s.scroll_max_frames = step_limit(limit, true))
+                    })),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(self.window_background(cx))
+            .child(section(
+                "After capture",
+                card(cx)
+                    .child(self.toggle(
+                        "auto-copy",
+                        "Copy captures automatically",
+                        "A fresh capture is ready to paste.",
+                        settings.auto_copy,
+                        |s, v| s.auto_copy = v,
+                        cx,
+                    ))
+                    .child(divider(cx))
+                    .child(self.toggle(
+                        "hide-after-export",
+                        "Hide editor after copy or save",
+                        "Return to the app you were working in.",
+                        settings.hide_after_export,
+                        |s, v| s.hide_after_export = v,
+                        cx,
+                    )),
+                cx,
+            ))
+            .child(section(
+                "Scrolling capture",
+                card(cx)
+                    .child(row(
+                        "Capture limit",
+                        "Most frames in one scrolling capture (2–200).",
+                        stepper,
+                        cx,
+                    ))
+                    .child(divider(cx))
+                    .child(row(
+                        "Scrolling speed",
+                        "Slow down for pages that need time to load.",
+                        div()
+                            .w(px(200.0))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("scroll-speed")
+                                    .test_support()
+                                    .w_full()
+                                    .h(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .child(Slider::new(&self.scroll_speed)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Slower")
+                                    .child("Faster"),
+                            ),
+                        cx,
+                    )),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// A click-to-record shortcut field that shows the saved keys as key caps.
+    fn recorder(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let text = self.editor.read(cx).settings.hotkeys.slots()[index].to_owned();
+        let changed = text != HotkeySettings::default().slots()[index];
+        let live = self.recording == Some(index);
+        let border = if self.field_error(Field::Hotkey(index)).is_some() {
+            cx.theme().danger
+        } else if live {
+            rgb(crate::theme::ACCENT).into()
+        } else {
+            cx.theme().border
+        };
+        let content = if live {
+            let held = modifier_tokens(self.live_modifiers);
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(held.into_iter().map(|token| key_cap(&key_label(token), cx)))
+                .child(div().text_xs().text_color(rgb(crate::theme::ACCENT)).child(
+                    if self.live_modifiers.modified() {
+                        "…"
+                    } else {
+                        "Press keys…"
+                    },
+                ))
+        } else if text.is_empty() {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Off")
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(text.split('+').map(|token| key_cap(&key_label(token), cx)))
+        };
+        let action = |id: (&'static str, usize), icon: &'static str, label: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(tool_icon(icon).size(px(14.0)))
+                .accessibility_label(label)
+                .tooltip(label)
+        };
+        div()
+            .id(("hotkey", index))
+            .test_support()
+            .w(px(230.0))
+            .h(px(32.0))
+            .pl_2()
+            .pr_1()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.recording == Some(index) {
+                    this.stop_recording(cx);
+                } else {
+                    this.start_recording(index, window, cx);
+                }
+            }))
+            .child(content)
+            .child(
+                div()
+                    .flex()
+                    .when(live, |actions| {
+                        actions.child(action(("hotkey-cancel", index), "x", "Cancel").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.stop_recording(cx);
+                            }),
+                        ))
+                    })
+                    .when(!live && changed, |actions| {
+                        actions.child(
+                            action(("hotkey-reset", index), "rotate-ccw", "Restore default")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let value = HotkeySettings::default().slots()[index].to_owned();
+                                    this.set_hotkey(index, value, cx);
+                                })),
+                        )
+                    })
+                    .when(!live && !text.is_empty(), |actions| {
+                        actions.child(action(("hotkey-clear", index), "x", "Turn off").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_hotkey(index, String::new(), cx);
+                            }),
+                        ))
+                    }),
+            )
+    }
+
+    fn shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let registration_error = self
+            .recording
+            .is_none()
+            .then(|| self.editor.read(cx).hotkey_error.clone())
+            .flatten();
+        let groups = SHORTCUT_GROUPS.map(|(group, items)| {
+            let mut rows = card(cx);
+            for (position, &(index, label)) in items.iter().enumerate() {
+                if position > 0 {
+                    rows = rows.child(divider(cx));
+                }
+                let recorder = self.recorder(index, cx).into_any_element();
+                rows = rows.child(row_with_error(
+                    label,
+                    "",
+                    self.field_error(Field::Hotkey(index)),
+                    recorder,
+                    cx,
+                ));
+            }
+            section(group, rows, cx)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .when_some(registration_error, |page, error| {
+                page.child(
+                    div()
+                        .p_3()
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(cx.theme().danger)
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            })
+            .children(groups)
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_4()
+                    .child(div().flex_1().min_w_0().child(note(
+                        "Click a shortcut, then press the new keys. Esc cancels. Backspace turns it off.",
+                        cx,
+                    )))
+                    .child(
+                        Button::new("reset-hotkeys")
+                            .ghost()
+                            .icon(tool_icon("rotate-ccw"))
+                            .label("Restore all defaults")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change(cx, |s| s.hotkeys = HotkeySettings::default())
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn share(&self, cx: &mut Context<Self>) -> AnyElement {
         let settings = self.editor.read(cx).settings.clone();
         let directory = settings
             .screenshot_directory
             .clone()
             .or_else(|| sniplet_platform::default_export_directory().ok());
-        let appearance = div().flex().gap_3().children(
-            [
-                ("theme-system", "System", ThemePreference::System),
-                ("theme-light", "Light", ThemePreference::Light),
-                ("theme-dark", "Dark", ThemePreference::Dark),
-            ]
-            .map(|(id, label, preference)| {
-                Button::new(id)
-                    .ghost()
-                    .selected(settings.theme == preference)
-                    .w(px(132.0))
-                    .h(px(106.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap_2()
-                            .child(appearance_preview(preference))
-                            .child(div().text_sm().child(label)),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.change(cx, |settings| settings.theme = preference);
-                        crate::theme::apply(preference, window, cx);
-                    }))
-            }),
-        );
         let format = div().flex().gap_1().children(
             [
                 ("png", "PNG", ExportFormat::Png),
@@ -548,14 +1186,12 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap_5()
-            .child(section("Appearance", card(cx).p_3().child(appearance), cx))
-            .child(self.window_background(cx))
             .child(section(
                 "Saving",
                 card(cx)
                     .child(row(
                         "Screenshots folder",
-                        "The starting folder when saving a screenshot.",
+                        "The starting folder when you save a screenshot.",
                         folder,
                         cx,
                     ))
@@ -572,134 +1208,60 @@ impl SettingsWindow {
                             )),
                     )
                     .child(divider(cx))
-                    .child(row(
-                        "Save format",
-                        "Choose the default image format.",
-                        format,
-                        cx,
-                    ))
+                    .child(row("Save format", "The default image format.", format, cx))
                     .child(divider(cx))
                     .child(self.toggle(
                         "downscale-on-save",
                         "Save Retina screenshots at 1×",
-                        "Keep the editor and clipboard at full resolution.",
+                        "The editor and clipboard keep full resolution.",
                         settings.downscale_on_save,
                         |s, v| s.downscale_on_save = v,
                         cx,
                     )),
                 cx,
             ))
-            .child(section(
-                "After capture",
-                card(cx)
-                    .child(self.toggle(
-                        "auto-copy",
-                        "Copy captures automatically",
-                        "A fresh capture is ready to paste.",
-                        settings.auto_copy,
-                        |s, v| s.auto_copy = v,
-                        cx,
-                    ))
-                    .child(divider(cx))
-                    .child(self.toggle(
-                        "hide-after-export",
-                        "Hide editor after copy or save",
-                        "Return to the app you were working in.",
-                        settings.hide_after_export,
-                        |s, v| s.hide_after_export = v,
-                        cx,
-                    )),
-                cx,
-            ))
-            .child(crate::updates::settings_section(&self.editor, cx))
+            .child(self.upload_section(settings.cloud_upload.is_some(), cx))
             .into_any_element()
     }
 
-    fn hotkeys(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut captures = card(cx);
-        for (index, label) in [
-            "Capture area",
-            "Capture screen",
-            "Capture window",
-            "Scrolling capture",
-            "Repeat area",
-            "Active window",
-            "Capture text / QR",
-            "Reopen editor",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if index > 0 {
-                captures = captures.child(divider(cx));
-            }
-            captures = captures.child(row(
-                label,
-                "",
-                Input::new(&self.hotkeys[index])
-                    .id(("hotkey-input", index))
-                    .w(px(250.0)),
-                cx,
-            ));
+    fn upload_section(&self, configured: bool, cx: &mut Context<Self>) -> AnyElement {
+        let status = if configured {
+            "On. Screenshots upload only when you choose Upload."
+        } else if self.upload_open {
+            "Save a destination below to turn it on."
+        } else {
+            "Off. Turn on to set up a destination."
+        };
+        let mut upload = card(cx).child(row(
+            "Upload to the cloud",
+            status,
+            Switch::new("upload-enabled")
+                .checked(self.upload_open)
+                .accessibility_label("Upload to the cloud")
+                .on_click(cx.listener(|this, open: &bool, _, cx| this.set_upload_open(*open, cx))),
+            cx,
+        ));
+        if !self.upload_open {
+            return section("Upload", upload, cx).into_any_element();
         }
-        let controls = div().flex().justify_between().items_center().child(
-            Button::new("reset-hotkeys")
-                .ghost()
-                .label("Restore defaults")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    for (input, value) in this
-                        .hotkeys
-                        .iter()
-                        .zip(hotkey_values(&HotkeySettings::default()))
-                    {
-                        input.update(cx, |input, cx| input.set_value(value, window, cx));
-                    }
-                    this.message = "Default shortcuts restored. Save to apply.".into();
-                    this.error = false;
-                    cx.notify();
-                })),
+        let kinds = div().flex().gap_1().children(
+            [
+                ("upload-signed-url", "Signed URL", UploadKind::SignedUrl),
+                ("upload-s3", "S3 compatible", UploadKind::S3),
+            ]
+            .map(|(id, label, kind)| {
+                Button::new(id)
+                    .ghost()
+                    .label(label)
+                    .selected(self.upload_kind == kind)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.upload_kind = kind;
+                        this.clear_notice(cx);
+                        cx.notify();
+                    }))
+            }),
         );
-        section("Capture shortcuts", div().flex().flex_col().gap_3().child(captures).child(controls)
-            .child(note("Use Ctrl+Shift+2 on Windows/Linux or Cmd+Shift+2 on Mac. Leave a field empty to disable it. Changes apply immediately after saving.", cx)), cx).into_any_element()
-    }
-
-    fn save_hotkeys(&mut self, cx: &mut Context<Self>) {
-        let values = self
-            .hotkeys
-            .each_ref()
-            .map(|input| input.read(cx).value().trim().to_owned());
-        if let Err(error) = crate::runtime::validate_hotkeys(&values) {
-            self.fail(error, cx);
-            return;
-        }
-        let [
-            capture_area,
-            capture_screen,
-            capture_window,
-            scrolling_capture,
-            repeat_area,
-            active_window,
-            capture_ocr,
-            show_editor,
-        ] = values;
-        self.change(cx, |settings| {
-            settings.hotkeys = HotkeySettings {
-                capture_area,
-                capture_screen,
-                capture_window,
-                scrolling_capture,
-                repeat_area,
-                active_window,
-                capture_ocr,
-                show_editor,
-            }
-        });
-    }
-
-    fn uploading(&self, cx: &mut Context<Self>) -> AnyElement {
-        let configured = self.editor.read(cx).settings.cloud_upload.is_some();
-        let mut fields = card(cx);
-        let descriptors: &[(usize, &str)] = match self.upload_kind {
+        let fields: &[(usize, &str)] = match self.upload_kind {
             UploadKind::SignedUrl => &[(0, "Signed PUT URL"), (1, "Image link (optional)")],
             UploadKind::S3 => &[
                 (2, "Bucket"),
@@ -709,180 +1271,88 @@ impl SettingsWindow {
                 (6, "Public base URL (optional)"),
             ],
         };
-        for (index, label) in descriptors {
-            fields = fields.child(
+        upload = upload
+            .child(divider(cx))
+            .child(row("Destination", "", kinds, cx))
+            .child(divider(cx));
+        for &(index, label) in fields {
+            upload = upload.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .p_4()
-                    .child(div().text_sm().child(*label))
-                    .child(Input::new(&self.upload[*index]).id(("upload-input", *index))),
+                    .px_4()
+                    .py_3()
+                    .child(label)
+                    .child(Input::new(&self.upload[index]).id(("upload-input", index))),
             );
         }
-        div().flex().flex_col().gap_5()
-            .child(section("Destination", card(cx).p_4().child(div().flex().justify_between().items_center()
-                .child(div().flex().flex_col().gap_1().child(if configured { "Uploading enabled" } else { "Uploading is off" })
-                    .child(note("Screenshots upload only when you choose Upload.", cx)))
-                .when(configured, |div| div.child(Button::new("disable-upload").ghost().label("Disable")
-                    .on_click(cx.listener(|this, _, _, cx| this.change(cx, |s| s.cloud_upload = None)))))), cx))
-            .child(div().flex().gap_2().children([
-                ("upload-signed-url", "Signed URL", UploadKind::SignedUrl), ("upload-s3", "S3 compatible", UploadKind::S3),
-            ].map(|(id, label, kind)| Button::new(id).ghost().label(label).selected(self.upload_kind == kind)
-                .on_click(cx.listener(move |this, _, _, cx| { this.upload_kind = kind; this.message.clear(); this.error = false; cx.notify(); })))))
-            .child(fields)
-            .child(note(match self.upload_kind {
-                UploadKind::SignedUrl => "Paste a signed upload URL from your provider. A new URL may be needed when it expires.",
-                UploadKind::S3 => "Uses AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from your environment. Optional AWS_SESSION_TOKEN is supported. Leave Endpoint empty for Amazon S3.",
-            }, cx))
-            .into_any_element()
-    }
-
-    fn save_upload(&mut self, cx: &mut Context<Self>) {
-        let values = self
-            .upload
-            .each_ref()
-            .map(|input| input.read(cx).value().trim().to_owned());
-        let config = match self.upload_kind {
-            UploadKind::SignedUrl => CloudUploadConfig::PresignedPut {
-                url: values[0].clone(),
-                public_url: optional(&values[1]),
-            },
-            UploadKind::S3 => CloudUploadConfig::S3 {
-                bucket: values[2].clone(),
-                region: values[3].clone(),
-                endpoint: optional(&values[4]),
-                key_prefix: values[5].clone(),
-                public_base_url: optional(&values[6]),
-            },
-        };
-        if let Err(error) = config.validate() {
-            self.fail(error.to_string(), cx);
-            return;
-        }
-        self.change(cx, |settings| settings.cloud_upload = Some(config));
-    }
-
-    fn advanced(&self, cx: &mut Context<Self>) -> AnyElement {
-        let settings = self.editor.read(cx).settings.clone();
-        let content = div()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(section(
-                "Scrolling capture",
-                card(cx)
-                    .child(row(
-                        "Capture limit",
-                        "Maximum frames captured in one session (2–200).",
-                        Input::new(&self.scroll_limit)
-                            .id("scroll-limit")
-                            .w(px(75.0)),
-                        cx,
-                    ))
-                    .child(divider(cx))
-                    .child(row(
-                        "Scrolling speed",
-                        "Slow down for pages that need time to load.",
-                        div()
-                            .w(px(210.0))
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("scroll-speed")
-                                    .test_support()
-                                    .w_full()
-                                    .h(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .child(Slider::new(&self.scroll_speed)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Slower")
-                                    .child("Faster"),
-                            ),
-                        cx,
-                    )),
+        upload = match self.upload_kind {
+            UploadKind::SignedUrl => upload.child(div().px_4().pb_3().child(note(
+                "Paste a signed upload URL from your provider. Signed URLs expire, so paste a new one when uploads fail.",
                 cx,
-            ))
-            .child(section(
-                "Editor",
-                card(cx).child(self.toggle(
-                    "always-on-top",
-                    "Keep editor on top",
-                    "Takes effect after restarting Sniplet.",
-                    settings.always_on_top,
-                    |s, v| s.always_on_top = v,
-                    cx,
-                )),
-                cx,
-            ));
-        let content = content.child(section(
-            "Startup",
-            card(cx).child(row(
-                "Launch at startup",
-                "Start in the tray when you sign in. The editor stays closed.",
-                Switch::new("launch-at-startup")
-                    .checked(crate::runtime::startup_state(cx).0)
-                    .disabled(crate::runtime::startup_state(cx).1)
-                    .on_click(cx.listener(|this, enabled: &bool, _, cx| {
-                        let enabled = *enabled;
-                        let task = crate::runtime::change_startup(enabled, cx);
-                        let editor = this.editor.clone();
-                        cx.notify();
-                        cx.spawn(async move |this, cx| {
-                            let result = task.await;
-                            let _ = this.update(cx, |this, cx| {
-                                match result {
-                                    Ok(actual) if actual == enabled => {
-                                        this.message = "Startup preference saved".into();
-                                        this.error = false;
-                                        cx.notify();
-                                    }
-                                    Ok(_) => this.fail(
-                                        if cfg!(target_os = "macos") {
-                                            "Enable Sniplet in System Settings → General → Login Items."
-                                        } else {
-                                            "Allow Sniplet to start in your system's startup settings."
-                                        },
-                                        cx,
-                                    ),
-                                    Err(error) => this.fail(error, cx),
-                                }
-                                editor.update(cx, |_, cx| cx.notify());
-                            });
+            ))),
+            UploadKind::S3 => {
+                let found = sniplet_platform::s3_credentials_available();
+                upload.child(divider(cx)).child(row(
+                    "AWS credentials",
+                    if found {
+                        "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. AWS_SESSION_TOKEN is optional."
+                    } else {
+                        "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then restart Sniplet."
+                    },
+                    div()
+                        .id("aws-credentials")
+                        .test_support()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(if found {
+                            cx.theme().success
+                        } else {
+                            cx.theme().danger
                         })
-                        .detach();
-                    })),
-                cx,
-            )),
-            cx,
-        ));
-        content
-            .child(section(
-                "Preferences",
-                card(cx).child(row(
-                    "Settings file",
-                    "Open the saved preferences in your file manager.",
-                    Button::new("reveal-settings")
-                        .label("Show in folder")
-                        .on_click(|_, _, cx| {
-                            if let Ok(store) = sniplet_platform::SettingsStore::for_app() {
-                                cx.reveal_path(store.path());
-                            }
-                        }),
+                        .child(
+                            tool_icon(if found { "circle-check" } else { "circle-alert" })
+                                .size(px(14.0)),
+                        )
+                        .child(if found { "Found" } else { "Not found" }),
                     cx,
-                )),
+                ))
+            }
+        };
+        let footer_message = match self.field_error(Field::Upload) {
+            Some(error) => div().text_xs().text_color(cx.theme().danger).child(error),
+            None => note(
+                if configured {
+                    "Save again after you change a field."
+                } else {
+                    "Upload stays off until you save a destination."
+                },
                 cx,
-            ))
-            .into_any_element()
+            ),
+        };
+        upload = upload.child(
+            div()
+                .px_4()
+                .py_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().muted.opacity(0.4))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(div().flex_1().min_w_0().child(footer_message))
+                .child(
+                    Button::new("save-upload")
+                        .primary()
+                        .label("Save destination")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_upload(cx))),
+                ),
+        );
+        section("Upload", upload, cx).into_any_element()
     }
 }
 
@@ -893,102 +1363,99 @@ impl Render for SettingsWindow {
         }
         let page = match self.page {
             Page::General => self.general(cx),
-            Page::Hotkeys => self.hotkeys(cx),
-            Page::Uploading => self.uploading(cx),
-            Page::Advanced => self.advanced(cx),
+            Page::Capture => self.capture(cx),
+            Page::Shortcuts => self.shortcuts(cx),
+            Page::Share => self.share(cx),
         };
-        let sidebar = div()
-            .w(px(188.0))
-            .flex_shrink_0()
-            .h_full()
-            .bg(cx.theme().muted)
-            .border_r_1()
-            .border_color(cx.theme().border)
+        let tabs = div()
             .flex()
-            .flex_col()
-            .p_3()
+            .flex_shrink_0()
+            .justify_center()
             .gap_1()
-            .child(
+            .p_2()
+            .bg(cx.theme().title_bar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(Page::ALL.into_iter().enumerate().map(|(index, page)| {
+                let selected = self.page == page;
+                let hover = cx.theme().foreground.opacity(0.06);
                 div()
-                    .px_2()
-                    .py_3()
+                    .id(("settings-nav", index))
+                    .test_support()
+                    .w(px(96.0))
+                    .h(px(56.0))
+                    .rounded_md()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
                     .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("SNIPLET"),
-            )
-            .children(
-                [
-                    Page::General,
-                    Page::Hotkeys,
-                    Page::Uploading,
-                    Page::Advanced,
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, page)| {
-                    // Left-aligned rows. The selected row gets a neutral fill
-                    // and an accent icon, so the page content stays the focus.
-                    let selected = self.page == page;
-                    let hover = cx.theme().foreground.opacity(0.06);
-                    div()
-                        .id(("settings-nav", index))
-                        .test_support()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .w_full()
-                        .h(px(36.0))
-                        .px_3()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .when(selected, |row| {
-                            row.bg(cx.theme().foreground.opacity(0.1))
-                                .font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .child(
-                            tool_icon(page.icon())
-                                .size(px(17.0))
-                                .text_color(if selected {
-                                    rgb(crate::theme::ACCENT).into()
-                                } else {
-                                    cx.theme().muted_foreground
-                                }),
-                        )
-                        .child(page.title())
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
-                }),
-            )
-            .child(div().flex_1())
-            .child(
+                    .cursor_pointer()
+                    .text_color(if selected {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .hover(move |style| style.bg(hover))
+                    .when(selected, |tab| {
+                        tab.bg(cx.theme().foreground.opacity(0.1))
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .child(
+                        tool_icon(page.icon())
+                            .size(px(20.0))
+                            .text_color(if selected {
+                                rgb(crate::theme::ACCENT).into()
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
+                    )
+                    .child(page.title())
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
+            }));
+        let toast = self
+            .notice
+            .as_ref()
+            .filter(|notice| notice.field.is_none())
+            .map(|notice| {
+                let error = notice.error;
                 div()
-                    .px_2()
+                    .id("settings-toast")
+                    .test_support()
+                    .absolute()
+                    .right_4()
+                    .bottom_4()
+                    .max_w(px(420.0))
+                    .px_3()
                     .py_2()
+                    .rounded_lg()
+                    .shadow_lg()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("Sniplet {}", sniplet_platform::updates::VERSION)),
-            );
-        let registration_error = if self.page == Page::Hotkeys && !self.error {
-            self.editor.read(cx).hotkey_error.clone()
-        } else {
-            None
-        };
-        let error = self.error || registration_error.is_some();
-        let footer = if let Some(error) = registration_error {
-            error
-        } else if self.message.is_empty() {
-            match self.page {
-                Page::Hotkeys | Page::Uploading => "Save to apply your changes.",
-                _ => "Changes save automatically.",
-            }
-            .to_owned()
-        } else {
-            self.message.clone()
-        };
+                    .when(error, |toast| {
+                        toast
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().danger)
+                            .text_color(cx.theme().danger)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_notice(cx)))
+                    })
+                    .when(!error, |toast| {
+                        toast
+                            .bg(cx.theme().foreground)
+                            .text_color(cx.theme().background)
+                    })
+                    .child(tool_icon(if error { "circle-alert" } else { "check" }).size(px(14.0)))
+                    .child(notice.text.clone())
+            });
         div()
             .id("settings-window")
             .test_support()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -996,7 +1463,18 @@ impl Render for SettingsWindow {
             .text_color(cx.theme().foreground)
             .text_sm()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if this.recording.is_some() {
+                    this.live_modifiers = event.modifiers;
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if let Some(index) = this.recording {
+                    this.record_key(index, &event.keystroke, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let key = event.keystroke.key.as_str();
                 if key == "escape"
                     || (key == "w"
@@ -1020,84 +1498,18 @@ impl Render for SettingsWindow {
                             .child("Settings"),
                     ),
             )
+            .child(tabs)
             .child(
-                div().flex().flex_1().min_h_0().child(sidebar).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .id(("settings-content", self.page as usize))
-                                .test_support()
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .p_6()
-                                .child(
-                                    div()
-                                        .mb_5()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_2xl()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(self.page.title()),
-                                        )
-                                        .child(note(self.page.description(), cx)),
-                                )
-                                .child(page),
-                        )
-                        .child(
-                            div()
-                                .id("settings-status")
-                                .test_support()
-                                .px_6()
-                                .py_3()
-                                .border_t_1()
-                                .border_color(cx.theme().border)
-                                .text_xs()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_color(if error {
-                                            cx.theme().danger
-                                        } else {
-                                            cx.theme().muted_foreground
-                                        })
-                                        .child(footer),
-                                )
-                                .when(self.page == Page::Hotkeys, |footer| {
-                                    footer.child(
-                                        Button::new("save-hotkeys")
-                                            .primary()
-                                            .label("Save shortcuts")
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.save_hotkeys(cx)),
-                                            ),
-                                    )
-                                })
-                                .when(self.page == Page::Uploading, |footer| {
-                                    footer.child(
-                                        Button::new("save-upload")
-                                            .primary()
-                                            .label("Save destination")
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.save_upload(cx)),
-                                            ),
-                                    )
-                                }),
-                        ),
-                ),
+                div()
+                    .id(("settings-content", self.page as usize))
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_6()
+                    .child(page),
             )
+            .children(toast)
             .into_any_element()
     }
 }
@@ -1106,18 +1518,187 @@ fn optional(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-fn hotkey_values(keys: &HotkeySettings) -> [String; 8] {
+/// Moves the scrolling capture limit to the next multiple of 10, within 2–200.
+fn step_limit(limit: usize, up: bool) -> usize {
+    if up {
+        (limit / 10 * 10 + 10).min(200)
+    } else {
+        (limit.div_ceil(10) * 10).saturating_sub(10).max(2)
+    }
+}
+
+/// Held modifiers as shortcut tokens. The platform's main modifier (Cmd on
+/// Mac, Ctrl elsewhere) becomes `CommandOrControl`, like the default shortcuts.
+fn modifier_tokens(modifiers: Modifiers) -> Vec<&'static str> {
+    let mac = cfg!(target_os = "macos");
+    let (primary, secondary) = if mac {
+        (modifiers.platform, modifiers.control)
+    } else {
+        (modifiers.control, modifiers.platform)
+    };
     [
-        &keys.capture_area,
-        &keys.capture_screen,
-        &keys.capture_window,
-        &keys.scrolling_capture,
-        &keys.repeat_area,
-        &keys.active_window,
-        &keys.capture_ocr,
-        &keys.show_editor,
+        (primary, "CommandOrControl"),
+        (secondary, if mac { "Control" } else { "Super" }),
+        (modifiers.alt, "Alt"),
+        (modifiers.shift, "Shift"),
     ]
-    .map(Clone::clone)
+    .into_iter()
+    .filter_map(|(held, token)| held.then_some(token))
+    .collect()
+}
+
+/// Converts a recorded key press into the shortcut format that `parse_hotkey` reads.
+fn hotkey_text(keystroke: &Keystroke) -> Result<String, &'static str> {
+    const NAMED: [(&str, &str); 14] = [
+        ("space", "Space"),
+        ("enter", "Enter"),
+        ("tab", "Tab"),
+        ("home", "Home"),
+        ("end", "End"),
+        ("pageup", "PageUp"),
+        ("pagedown", "PageDown"),
+        ("insert", "Insert"),
+        ("delete", "Delete"),
+        ("backspace", "Backspace"),
+        ("up", "Up"),
+        ("down", "Down"),
+        ("left", "Left"),
+        ("right", "Right"),
+    ];
+    // GPUI reports Shift+1 as "!" with Shift cleared. Shortcuts use physical
+    // keys, so map the symbol back to its key on a US layout and restore Shift.
+    const SHIFTED: [(&str, &str); 21] = [
+        ("!", "1"),
+        ("@", "2"),
+        ("#", "3"),
+        ("$", "4"),
+        ("%", "5"),
+        ("^", "6"),
+        ("&", "7"),
+        ("*", "8"),
+        ("(", "9"),
+        (")", "0"),
+        ("_", "-"),
+        ("+", "="),
+        ("{", "["),
+        ("}", "]"),
+        ("|", "\\"),
+        (":", ";"),
+        ("\"", "'"),
+        ("<", ","),
+        (">", "."),
+        ("?", "/"),
+        ("~", "`"),
+    ];
+    let mut modifiers = keystroke.modifiers;
+    let mut key = keystroke.key.as_str();
+    if let Some((_, base)) = SHIFTED.iter().find(|(shifted, _)| *shifted == key) {
+        key = base;
+        modifiers.shift = true;
+    }
+    let function_key = key.len() > 1 && key.starts_with('f') && key[1..].parse::<u8>().is_ok();
+    let key = if let Some((_, name)) = NAMED.iter().find(|(raw, _)| *raw == key) {
+        (*name).to_owned()
+    } else if key.chars().count() == 1 || function_key {
+        key.to_uppercase()
+    } else {
+        return Err("That key can't be used in a shortcut.");
+    };
+    if !(modifiers.control || modifiers.platform || modifiers.alt) && !function_key {
+        return Err(if cfg!(target_os = "macos") {
+            "Add ⌘, ⌥, or ⌃, or use a function key."
+        } else {
+            "Add Ctrl or Alt, or use a function key."
+        });
+    }
+    let mut tokens = modifier_tokens(modifiers);
+    tokens.push(&key);
+    Ok(tokens.join("+"))
+}
+
+/// The label for one shortcut token, such as `Ctrl`, `⌘`, or `2`.
+fn key_label(token: &str) -> String {
+    let mac = cfg!(target_os = "macos");
+    let label = match token.to_ascii_lowercase().as_str() {
+        "commandorcontrol" | "commandorctrl" | "cmdorctrl" | "cmdorcontrol" => {
+            if mac {
+                "⌘"
+            } else {
+                "Ctrl"
+            }
+        }
+        "control" | "ctrl" => {
+            if mac {
+                "⌃"
+            } else {
+                "Ctrl"
+            }
+        }
+        "alt" | "option" => {
+            if mac {
+                "⌥"
+            } else {
+                "Alt"
+            }
+        }
+        "shift" => {
+            if mac {
+                "⇧"
+            } else {
+                "Shift"
+            }
+        }
+        "super" | "cmd" | "command" => {
+            if mac {
+                "⌘"
+            } else {
+                "Win"
+            }
+        }
+        "up" | "arrowup" => "↑",
+        "down" | "arrowdown" => "↓",
+        "left" | "arrowleft" => "←",
+        "right" | "arrowright" => "→",
+        _ => {
+            return token
+                .strip_prefix("Key")
+                .or_else(|| token.strip_prefix("Digit"))
+                .filter(|rest| !rest.is_empty())
+                .unwrap_or(token)
+                .to_owned();
+        }
+    };
+    label.to_owned()
+}
+
+/// A shortcut in readable form, such as `Ctrl+Shift+2`.
+fn shortcut_label(text: &str) -> String {
+    text.split('+').map(key_label).collect::<Vec<_>>().join("+")
+}
+
+fn shortcut_name(index: usize) -> &'static str {
+    SHORTCUT_GROUPS
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .find(|(slot, _)| *slot == index)
+        .map_or("another shortcut", |(_, name)| name)
+}
+
+fn key_cap(label: &str, cx: &App) -> Div {
+    div()
+        .h(px(20.0))
+        .min_w(px(20.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_b_2()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().muted)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .child(label.to_owned())
 }
 
 pub(crate) fn note(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -1162,6 +1743,17 @@ pub(crate) fn row(
     control: impl IntoElement,
     cx: &App,
 ) -> Div {
+    row_with_error(title, description, None, control, cx)
+}
+
+/// A settings row. A validation error shows under the title, next to the control it is about.
+fn row_with_error(
+    title: &'static str,
+    description: &'static str,
+    error: Option<SharedString>,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
     div()
         .p_4()
         .flex()
@@ -1176,11 +1768,18 @@ pub(crate) fn row(
                 .flex_col()
                 .gap_1()
                 .child(title)
-                .when(!description.is_empty(), |div| {
-                    div.child(note(description, cx))
+                .when(!description.is_empty(), |label| {
+                    label.child(note(description, cx))
+                })
+                .when_some(error, |label, error| {
+                    label.child(div().text_xs().text_color(cx.theme().danger).child(error))
                 }),
         )
         .child(div().flex_shrink_0().child(control))
+}
+
+fn color_value(color: [u8; 3]) -> u32 {
+    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
 }
 
 fn color_hex(color: [u8; 3]) -> String {
@@ -1312,6 +1911,13 @@ mod tests {
     use sniplet_platform::SettingsStore;
     use std::prelude::v1::test;
 
+    /// The main modifier in test keystrokes: Cmd on Mac, Ctrl elsewhere.
+    const PRIMARY: &str = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+
     /// Types `value` into a settings text field and presses Enter. Input events
     /// reach subscribers after the update ends, so this runs as its own update.
     fn enter(
@@ -1386,9 +1992,17 @@ mod tests {
     fn scroll_bottom(window: &mut Window, page: Page, cx: &mut App) {
         window.scroll(
             ("settings-content", page as usize),
-            ScrollDelta::Pixels(point(px(0.0), px(-1200.0))),
+            ScrollDelta::Pixels(point(px(0.0), px(-1600.0))),
             cx,
         );
+    }
+
+    fn notice(entity: &Entity<SettingsWindow>, cx: &App) -> Option<(String, bool)> {
+        entity
+            .read(cx)
+            .notice
+            .as_ref()
+            .map(|notice| (notice.text.clone(), notice.error))
     }
 
     #[gpui_kit::test]
@@ -1412,11 +2026,13 @@ mod tests {
             80
         );
         assert_eq!(
-            cx.read(|cx| entity.read(cx).message.clone()),
-            "Settings saved"
+            cx.read(|cx| notice(&entity, cx)),
+            Some(("Saved".into(), false))
         );
         handle
-            .update(cx, |_, _, cx| {
+            .update(cx, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.find("settings-toast").visible());
                 editor.update(cx, |editor, _| editor.settings_path = Some(path.clone()));
             })
             .unwrap();
@@ -1430,25 +2046,20 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        assert!(cx.read(|cx| entity.read(cx).error));
+        assert!(cx.read(|cx| notice(&entity, cx)).unwrap().1);
         std::fs::remove_dir(path).unwrap();
     }
 
     #[gpui_kit::test]
-    fn window_background_choices_padding_and_color_persist_without_changing_open_capture(
+    fn window_background_choices_padding_swatches_and_color_persist_without_changing_open_capture(
         cx: &mut TestAppContext,
     ) {
-        let (handle, entity, editor, path) = fixture(cx, Page::General);
+        let (handle, entity, editor, path) = fixture(cx, Page::Capture);
         let original = cx.read(|cx| editor.read(cx).export_pixels().unwrap());
         let store = SettingsStore::at(&path);
         handle
             .update(cx, |_, window, cx| {
-                window.resize(size(px(760.0), px(580.0)));
-                window.scroll(
-                    ("settings-content", Page::General as usize),
-                    ScrollDelta::Pixels(point(px(0.0), px(-180.0))),
-                    cx,
-                );
+                window.resize(size(px(560.0), px(480.0)));
                 for (id, mode) in [
                     ("window-wallpaper", WindowBackground::Wallpaper),
                     ("window-trim", WindowBackground::TrimShadow),
@@ -1460,26 +2071,52 @@ mod tests {
                     assert_eq!(editor.read(cx).settings.window_capture.background, mode);
                     assert!(window.find(id).bounds().right() <= window.viewport_size().width);
                 }
+                window.render_frame(cx);
+                for index in 0..SWATCHES.len() {
+                    assert!(
+                        window.find(("swatch", index)).bounds().right()
+                            <= window.viewport_size().width
+                    );
+                }
+                window.click(("swatch", 2_usize), cx);
+                assert_eq!(
+                    editor.read(cx).settings.window_capture.color,
+                    [0x1C, 0x1C, 0x1E]
+                );
+                assert_eq!(
+                    entity.read(cx).background_color.read(cx).value().as_str(),
+                    "#1C1C1E"
+                );
             })
             .unwrap();
         let color = cx.read(|cx| entity.read(cx).background_color.clone());
         enter(cx, handle, &color, "invalid");
         cx.read(|cx| {
-            assert!(entity.read(cx).error);
+            assert!(
+                entity
+                    .read(cx)
+                    .field_error(Field::BackgroundColor)
+                    .is_some()
+            );
             assert_eq!(
                 editor.read(cx).settings.window_capture.color,
-                [242, 242, 247]
+                [0x1C, 0x1C, 0x1E]
             );
         });
         enter(cx, handle, &color, "#123456");
         cx.read(|cx| {
-            assert!(!entity.read(cx).error);
+            assert!(
+                entity
+                    .read(cx)
+                    .field_error(Field::BackgroundColor)
+                    .is_none()
+            );
             assert_eq!(editor.read(cx).settings.window_capture.color, [18, 52, 86]);
         });
         handle
             .update(cx, |_, window, cx| {
                 window.render_frame(cx);
-                window.click_at("window-padding", point(px(140.0), px(12.0)), cx);
+                window.click_at("window-padding", point(px(120.0), px(12.0)), cx);
             })
             .unwrap();
         cx.run_until_parked();
@@ -1500,20 +2137,21 @@ mod tests {
     fn wallpaper_picker_cancel_invalid_and_valid_image_then_reset_to_desktop(
         cx: &mut TestAppContext,
     ) {
-        let (handle, entity, editor, path) = fixture(cx, Page::General);
+        let (handle, entity, editor, path) = fixture(cx, Page::Capture);
         let wallpaper_path = path.with_extension("wallpaper.png");
         image::RgbaImage::from_pixel(40, 30, image::Rgba([40, 100, 180, 255]))
             .save(&wallpaper_path)
             .unwrap();
         handle
             .update(cx, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("window-wallpaper", cx);
                 window.scroll(
-                    ("settings-content", Page::General as usize),
-                    ScrollDelta::Pixels(point(px(0.0), px(-180.0))),
+                    ("settings-content", Page::Capture as usize),
+                    ScrollDelta::Pixels(point(px(0.0), px(-260.0))),
                     cx,
                 );
                 window.render_frame(cx);
-                window.click("window-wallpaper", cx);
                 window.click("choose-wallpaper", cx);
             })
             .unwrap();
@@ -1532,7 +2170,10 @@ mod tests {
                 .unwrap();
             cx.simulate_path_prompt_response(|_| Some(vec![candidate.clone()]));
             cx.run_until_parked();
-            assert_eq!(cx.read(|cx| entity.read(cx).error), !candidate.exists());
+            assert_eq!(
+                cx.read(|cx| entity.read(cx).field_error(Field::Wallpaper).is_some()),
+                !candidate.exists()
+            );
         }
         assert_eq!(
             SettingsStore::at(&path)
@@ -1565,16 +2206,11 @@ mod tests {
     fn settings_folder_picker_cancel_and_retina_save_use_the_saved_preferences(
         cx: &mut TestAppContext,
     ) {
-        let (handle, _, editor, path) = fixture(cx, Page::General);
+        let (handle, _, editor, path) = fixture(cx, Page::Share);
         let store = SettingsStore::at(&path);
         let directory = std::env::temp_dir();
         handle
             .update(cx, |_, window, cx| {
-                window.scroll(
-                    ("settings-content", Page::General as usize),
-                    ScrollDelta::Pixels(point(px(0.0), px(-520.0))),
-                    cx,
-                );
                 window.render_frame(cx);
                 window.click("choose-screenshot-folder", cx);
             })
@@ -1644,7 +2280,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn settings_reopens_the_same_window_and_creates_a_new_one_after_close(cx: &mut TestAppContext) {
-        let (handle, _, editor, _) = fixture(cx, Page::General);
+        let (handle, entity, editor, _) = fixture(cx, Page::General);
         let parent = cx
             .windows()
             .into_iter()
@@ -1653,11 +2289,12 @@ mod tests {
         parent
             .update(cx, |_, window, cx| {
                 editor.update(cx, |editor, cx| {
-                    editor.open_settings(Page::Uploading, window, cx)
+                    editor.open_settings(Page::Share, window, cx)
                 })
             })
             .unwrap();
         assert_eq!(cx.windows().len(), 2);
+        assert_eq!(cx.read(|cx| entity.read(cx).page), Page::Share);
         assert_eq!(
             cx.read(|cx| editor.read(cx).settings_window.as_ref().unwrap().0),
             handle
@@ -1681,46 +2318,36 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn settings_navigation_fits_small_windows_in_both_themes_and_escape_preserves_editor(
+    fn settings_tabs_fit_the_minimum_window_in_both_themes_and_escape_preserves_editor(
         cx: &mut TestAppContext,
     ) {
         let (handle, entity, editor, _) = fixture(cx, Page::General);
         let original = cx.read(|cx| editor.read(cx).export_pixels().unwrap());
         handle
-            .update(cx, |_, window, _| window.resize(size(px(760.0), px(580.0))))
+            .update(cx, |_, window, _| window.resize(size(px(560.0), px(480.0))))
             .unwrap();
         handle
             .update(cx, |_, window, cx| {
                 for theme in [ThemePreference::Light, ThemePreference::Dark] {
                     crate::theme::apply(theme, window, cx);
-                    for (index, page) in [
-                        Page::General,
-                        Page::Hotkeys,
-                        Page::Uploading,
-                        Page::Advanced,
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
+                    for (index, page) in Page::ALL.into_iter().enumerate() {
                         window.render_frame(cx);
                         window.click(("settings-nav", index), cx);
-                        assert_eq!(entity.read(cx).page as usize, page as usize);
-                        let nav = window.find(("settings-nav", index));
-                        assert!(nav.visible());
-                        assert!(nav.bounds().right() < px(188.0));
+                        assert_eq!(entity.read(cx).page, page);
+                        window.render_frame(cx);
+                        let width = window.viewport_size().width;
+                        assert!(window.find(("settings-nav", index)).bounds().right() <= width);
                         let content = window.find(("settings-content", index));
-                        assert!(content.bounds().right() <= window.viewport_size().width);
-                        assert!(window.find("settings-status").visible());
-                        if page == Page::Hotkeys {
-                            assert!(window.find("save-hotkeys").visible());
-                            for i in 0_usize..8 {
-                                assert!(
-                                    window.find(("hotkey-input", i)).bounds().right()
-                                        <= window.viewport_size().width
-                                );
+                        assert!(content.bounds().right() <= width);
+                        if page == Page::Shortcuts {
+                            for slot in 0_usize..8 {
+                                assert!(window.find(("hotkey", slot)).bounds().right() <= width);
                             }
                             scroll_bottom(window, page, cx);
-                            assert!(window.find("save-hotkeys").visible());
+                            window.render_frame(cx);
+                            let reset = window.find("reset-hotkeys");
+                            assert!(reset.visible());
+                            assert!(reset.bounds().right() <= width);
                         }
                     }
                 }
@@ -1736,70 +2363,154 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn settings_hotkey_validation_retains_drafts_and_saves_without_restarting(
+    fn shortcut_recorder_saves_keys_rejects_conflicts_and_pauses_global_shortcuts(
         cx: &mut TestAppContext,
     ) {
-        let (handle, entity, editor, path) = fixture(cx, Page::Hotkeys);
+        let (handle, entity, editor, path) = fixture(cx, Page::Shortcuts);
         let store = SettingsStore::at(&path);
+        let defaults = HotkeySettings::default();
         handle
             .update(cx, |_, window, cx| {
-                let duplicate = editor.read(cx).settings.hotkeys.capture_screen.clone();
-                entity.read(cx).hotkeys[0]
-                    .clone()
-                    .update(cx, |input, cx| input.set_value(duplicate, window, cx));
                 window.render_frame(cx);
-                scroll_bottom(window, Page::Hotkeys, cx);
-                window.click("save-hotkeys", cx);
-                assert!(entity.read(cx).error);
-                assert_eq!(editor.read(cx).settings.hotkeys, HotkeySettings::default());
-                window.click(("settings-nav", Page::General as usize), cx);
-                window.click(("settings-nav", Page::Hotkeys as usize), cx);
-                assert_eq!(
-                    entity.read(cx).hotkeys[0].read(cx).value().as_str(),
-                    editor.read(cx).settings.hotkeys.capture_screen
-                );
-                for (index, value) in [(0, "Control+Alt+9"), (1, "")] {
-                    entity.read(cx).hotkeys[index]
-                        .clone()
-                        .update(cx, |input, cx| input.set_value(value, window, cx));
-                }
-                window.render_frame(cx);
-                scroll_bottom(window, Page::Hotkeys, cx);
-                window.click("save-hotkeys", cx);
-                assert!(!entity.read(cx).error);
+                window.click(("hotkey", 0_usize), cx);
+                assert_eq!(entity.read(cx).recording, Some(0));
+                assert!(editor.read(cx).hotkeys_paused);
+
+                // A plain letter would block typing everywhere, so it is refused.
+                window.press("a", cx);
+                assert_eq!(entity.read(cx).recording, Some(0));
+                assert!(entity.read(cx).field_error(Field::Hotkey(0)).is_some());
+
+                window.press(&format!("{PRIMARY}-alt-9"), cx);
+                assert_eq!(entity.read(cx).recording, None);
+                assert!(!editor.read(cx).hotkeys_paused);
                 assert_eq!(
                     editor.read(cx).settings.hotkeys.capture_area,
-                    "Control+Alt+9"
+                    "CommandOrControl+Alt+9"
                 );
+
+                // The capture screen keys are taken, so nothing changes.
+                window.click(("hotkey", 0_usize), cx);
+                window.press(&format!("{PRIMARY}-shift-1"), cx);
+                let error = entity.read(cx).field_error(Field::Hotkey(0)).unwrap();
+                assert!(error.contains("Capture screen"), "{error}");
+                assert_eq!(entity.read(cx).recording, None);
+                assert!(!editor.read(cx).hotkeys_paused);
+                assert_eq!(
+                    editor.read(cx).settings.hotkeys.capture_area,
+                    "CommandOrControl+Alt+9"
+                );
+
+                // Escape cancels recording and keeps the window open.
+                window.click(("hotkey", 1_usize), cx);
+                window.press("escape", cx);
+                assert_eq!(entity.read(cx).recording, None);
+                assert_eq!(
+                    editor.read(cx).settings.hotkeys.capture_screen,
+                    defaults.capture_screen
+                );
+
+                // Backspace turns a shortcut off.
+                window.click(("hotkey", 1_usize), cx);
+                window.press("backspace", cx);
                 assert!(editor.read(cx).settings.hotkeys.capture_screen.is_empty());
-                window.click("reset-hotkeys", cx);
+                window.render_frame(cx);
+                window.click(("hotkey-reset", 1_usize), cx);
                 assert_eq!(
-                    entity.read(cx).hotkeys[0].read(cx).value().as_str(),
-                    HotkeySettings::default().capture_area
+                    editor.read(cx).settings.hotkeys.capture_screen,
+                    defaults.capture_screen
                 );
-                assert_eq!(
-                    editor.read(cx).settings.hotkeys.capture_area,
-                    "Control+Alt+9"
-                );
+                scroll_bottom(window, Page::Shortcuts, cx);
+                window.render_frame(cx);
+                window.click(("hotkey-clear", 7_usize), cx);
+                assert!(editor.read(cx).settings.hotkeys.show_editor.is_empty());
             })
             .unwrap();
+        assert_eq!(cx.windows().len(), 2);
         cx.run_until_parked();
-        assert_eq!(store.load().unwrap().hotkeys.capture_area, "Control+Alt+9");
-        assert!(store.load().unwrap().hotkeys.capture_screen.is_empty());
+        let saved = store.load().unwrap().hotkeys;
+        assert_eq!(saved.capture_area, "CommandOrControl+Alt+9");
+        assert_eq!(saved.capture_screen, defaults.capture_screen);
+        assert!(saved.show_editor.is_empty());
+        handle
+            .update(cx, |_, window, cx| {
+                scroll_bottom(window, Page::Shortcuts, cx);
+                window.render_frame(cx);
+                window.click("reset-hotkeys", cx);
+                assert_eq!(editor.read(cx).settings.hotkeys, defaults);
+                // Closing the window while recording turns global shortcuts back on.
+                window.click(("hotkey", 2_usize), cx);
+                assert!(editor.read(cx).hotkeys_paused);
+                window.remove_window();
+            })
+            .unwrap();
+        drop(entity);
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| editor.read(cx).hotkeys_paused));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn shortcut_labels_and_scroll_limit_steps() {
+        let primary = if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl"
+        };
+        assert_eq!(
+            shortcut_label("CommandOrControl+Shift+2"),
+            format!(
+                "{primary}+{}+2",
+                if cfg!(target_os = "macos") {
+                    "⇧"
+                } else {
+                    "Shift"
+                }
+            )
+        );
+        assert_eq!(key_label("KeyA"), "A");
+        assert_eq!(key_label("Digit7"), "7");
+        assert_eq!(key_label("Up"), "↑");
+        assert_eq!(
+            hotkey_text(&Keystroke::parse(&format!("{PRIMARY}-f5")).unwrap()).unwrap(),
+            "CommandOrControl+F5"
+        );
+        assert_eq!(hotkey_text(&Keystroke::parse("f5").unwrap()).unwrap(), "F5");
+        // Native key events report Shift+1 as "!" without Shift.
+        let native = Keystroke::parse(&format!("{PRIMARY}-!")).unwrap();
+        assert_eq!(native.key, "!");
+        assert!(!native.modifiers.shift);
+        assert_eq!(hotkey_text(&native).unwrap(), "CommandOrControl+Shift+1");
+        assert!(crate::runtime::parse_hotkey("CommandOrControl+Shift+\\").is_ok());
+        assert!(hotkey_text(&Keystroke::parse("shift-a").unwrap()).is_err());
+        assert_eq!(
+            [40, 45, 2, 200, 10].map(|limit| step_limit(limit, true)),
+            [50, 50, 10, 200, 20]
+        );
+        assert_eq!(
+            [40, 45, 2, 200, 10].map(|limit| step_limit(limit, false)),
+            [30, 40, 2, 190, 2]
+        );
     }
 
     #[gpui_kit::test]
     fn settings_upload_validates_before_saving_and_supports_s3_without_network_requests(
         cx: &mut TestAppContext,
     ) {
-        let (handle, entity, editor, path) = fixture(cx, Page::Uploading);
+        let (handle, entity, editor, path) = fixture(cx, Page::Share);
         let store = SettingsStore::at(&path);
         handle.update(cx, |_, window, cx| {
+            scroll_bottom(window, Page::Share, cx);
+            window.render_frame(cx);
+            window.click("upload-enabled", cx);
+            assert!(entity.read(cx).upload_open);
+            assert!(editor.read(cx).settings.cloud_upload.is_none());
             entity.read(cx).upload[0].clone().update(cx, |input, cx| input.set_value("not-a-url", window, cx));
             window.render_frame(cx);
+            scroll_bottom(window, Page::Share, cx);
+            window.render_frame(cx);
             window.click("save-upload", cx);
-            assert!(entity.read(cx).error);
+            assert!(entity.read(cx).field_error(Field::Upload).is_some());
             assert!(editor.read(cx).settings.cloud_upload.is_none());
             assert!(!path.exists());
             window.click("upload-s3", cx);
@@ -1807,46 +2518,59 @@ mod tests {
                 entity.read(cx).upload[index].clone().update(cx, |input, cx| input.set_value(value, window, cx));
             }
             window.render_frame(cx);
-            scroll_bottom(window, Page::Uploading, cx);
+            scroll_bottom(window, Page::Share, cx);
+            window.render_frame(cx);
+            assert!(window.find("aws-credentials").visible());
             window.click("save-upload", cx);
-            assert!(entity.read(cx).error);
+            assert!(entity.read(cx).field_error(Field::Upload).is_some());
             assert!(editor.read(cx).settings.cloud_upload.is_none());
             entity.read(cx).upload[5].clone().update(cx, |input, cx| input.set_value("sniplet/", window, cx));
             window.render_frame(cx);
             window.click("save-upload", cx);
-            assert!(!entity.read(cx).error);
+            assert!(entity.read(cx).field_error(Field::Upload).is_none());
             assert!(matches!(editor.read(cx).settings.cloud_upload.clone(), Some(CloudUploadConfig::S3 { bucket, key_prefix, .. }) if bucket == "screenshots" && key_prefix == "sniplet/"));
-            window.scroll(("settings-content", Page::Uploading as usize), ScrollDelta::Pixels(point(px(0.0), px(1200.0))), cx);
-            window.click("disable-upload", cx);
-            assert!(editor.read(cx).settings.cloud_upload.clone().is_none());
         }).unwrap();
+        cx.run_until_parked();
+        assert!(store.load().unwrap().cloud_upload.is_some());
+        handle
+            .update(cx, |_, window, cx| {
+                window.scroll(
+                    ("settings-content", Page::Share as usize),
+                    ScrollDelta::Pixels(point(px(0.0), px(1600.0))),
+                    cx,
+                );
+                window.render_frame(cx);
+                window.click("upload-enabled", cx);
+                assert!(!entity.read(cx).upload_open);
+                assert!(editor.read(cx).settings.cloud_upload.is_none());
+            })
+            .unwrap();
         cx.run_until_parked();
         assert!(store.load().unwrap().cloud_upload.is_none());
         std::fs::remove_file(path).unwrap();
     }
 
     #[gpui_kit::test]
-    fn settings_scrolling_preferences_validate_limits_and_faster_slider_reduces_delay(
-        cx: &mut TestAppContext,
-    ) {
-        let (handle, entity, editor, path) = fixture(cx, Page::Advanced);
+    fn settings_scrolling_limit_steps_and_faster_slider_reduces_delay(cx: &mut TestAppContext) {
+        let (handle, _, editor, path) = fixture(cx, Page::Capture);
         let store = SettingsStore::at(&path);
-        let limit = cx.read(|cx| entity.read(cx).scroll_limit.clone());
-        for invalid in ["0", "201", "NaN"] {
-            enter(cx, handle, &limit, invalid);
-            assert!(cx.read(|cx| entity.read(cx).error));
-            assert!(!path.exists());
-        }
-        enter(cx, handle, &limit, "80");
-        assert_eq!(cx.read(|cx| editor.read(cx).settings.scroll_max_frames), 80);
         handle
             .update(cx, |_, window, cx| {
+                scroll_bottom(window, Page::Capture, cx);
                 window.render_frame(cx);
-                window.click_at("scroll-speed", point(px(200.0), px(12.0)), cx);
+                window.click("scroll-limit-up", cx);
+                assert_eq!(editor.read(cx).settings.scroll_max_frames, 50);
+                window.render_frame(cx);
+                window.click("scroll-limit-down", cx);
+                window.render_frame(cx);
+                window.click("scroll-limit-down", cx);
+                assert_eq!(editor.read(cx).settings.scroll_max_frames, 30);
+                window.render_frame(cx);
+                window.click_at("scroll-speed", point(px(190.0), px(12.0)), cx);
             })
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(store.load().unwrap().scroll_max_frames, 80);
+        assert_eq!(store.load().unwrap().scroll_max_frames, 30);
         assert!(store.load().unwrap().scroll_settle_ms < 250);
         std::fs::remove_file(path).unwrap();
     }
