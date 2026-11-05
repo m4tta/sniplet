@@ -875,7 +875,9 @@ fn recognition_previews_text_and_ocr_tool_reads_only_the_dragged_region(cx: &mut
         let before = editor.read(cx).export_pixels().unwrap();
         window.click(("tool", Tool::Ocr as usize), cx);
         assert_eq!(editor.read(cx).tool, Tool::Ocr);
-        // The fitted 600 × 300 image starts at (340, 302). Select the left QR only.
+        // The fitted 600 × 300 image starts at (340, 302). Read the right QR,
+        // then the left QR before the first result arrives. Only the latest may open.
+        window.drag(point(px(680.0), px(332.0)), point(px(930.0), px(562.0)), cx);
         window.drag(point(px(350.0), px(332.0)), point(px(580.0), px(562.0)), cx);
         assert_eq!(
             editor.read(cx).selection,

@@ -186,6 +186,7 @@ pub struct Editor {
     preview_revision: u64,
     document_revision: u64,
     pub(crate) load_revision: u64,
+    recognition_revision: u64,
     settings_revision: u64,
     pub(crate) settings_save_running: bool,
     pub(crate) settings_save_result: Option<(u64, Option<String>)>,
@@ -314,6 +315,7 @@ impl Editor {
             preview_revision: 0,
             document_revision: 0,
             load_revision: 0,
+            recognition_revision: 0,
             settings_revision: 0,
             settings_save_running: false,
             settings_save_result: None,
@@ -1959,14 +1961,15 @@ impl Editor {
         };
         self.status = "Recognizing text…".into();
         cx.notify();
-        // Only a new document makes the result stale. Edits and clicks during
-        // recognition must not drop it.
-        let revision = self.load_revision;
+        // A new document or a newer recognition makes the result stale.
+        // Edits and clicks during recognition must not drop it.
+        self.recognition_revision += 1;
+        let revision = (self.load_revision, self.recognition_revision);
         let task = crate::clipboard_jobs::recognize(document, qr_only, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.load_revision != revision {
+                if (this.load_revision, this.recognition_revision) != revision {
                     return;
                 }
                 match result {

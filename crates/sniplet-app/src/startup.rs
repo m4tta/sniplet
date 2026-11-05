@@ -8,6 +8,23 @@ pub fn start_minimized(args: &[String], login_launch: bool) -> bool {
             .any(|arg| arg == "--demo" || arg == "--settings" || !arg.starts_with('-'))
 }
 
+/// tray-icon creates a Linux tray even when no StatusNotifier host can show it.
+/// Ask D-Bus for a host so that a hidden start always leaves a way back in.
+#[cfg(target_os = "linux")]
+pub fn tray_host_available() -> bool {
+    let check = || -> zbus::Result<bool> {
+        let connection = zbus::blocking::Connection::session()?;
+        zbus::blocking::Proxy::new(
+            &connection,
+            "org.kde.StatusNotifierWatcher",
+            "/StatusNotifierWatcher",
+            "org.kde.StatusNotifierWatcher",
+        )?
+        .get_property("IsStatusNotifierHostRegistered")
+    };
+    check().unwrap_or(false)
+}
+
 #[cfg(target_os = "macos")]
 pub fn enabled() -> anyhow::Result<bool> {
     Ok(crate::macos::launch_at_startup())

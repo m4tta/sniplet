@@ -108,6 +108,8 @@ fn main() -> anyhow::Result<()> {
         #[cfg(not(target_os = "macos"))]
         let login_launch = false;
         let minimized = !smoke && startup::start_minimized(&args, login_launch);
+        #[cfg(target_os = "linux")]
+        let minimized = minimized && startup::tray_host_available();
         gpui_kit::init(cx);
         if let Err(error) = cx
             .text_system()
