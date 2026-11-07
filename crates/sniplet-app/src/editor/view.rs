@@ -24,6 +24,11 @@ pub(crate) fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
         .on_key_up(|s: &mut Editor, event: &KeyEvent, tx: &mut Tx| {
             Keystroke::new(event, tx.key_base(), false).is_some_and(|key| s.key_up(&key))
         })
+        .on_window_focus(|s: &mut Editor, focused: bool, _: &mut Tx| {
+            if !focused {
+                s.deactivated();
+            }
+        })
         .on_drop_files(|s: &mut Editor, paths: &[std::path::PathBuf], _: &mut Tx| {
             if let Some(path) = paths.first() {
                 s.load_path(path.clone());
