@@ -51,3 +51,25 @@ impl Editor {
     /// Start the automatic update checks. Called once after launch.
     pub(crate) fn schedule_updates(&mut self) {}
 }
+
+/// What the Settings window shows about updates. The editor owns the update state; Settings
+/// gets this copy whenever it changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct UpdateSummary;
+
+impl Editor {
+    pub(crate) fn update_summary(&self) -> UpdateSummary {
+        UpdateSummary
+    }
+}
+
+/// The Updates section of Settings. Its buttons send their actions to the editor's inbox, so it
+/// works in any window's state `S`.
+pub(crate) fn settings_section<S: 'static>(
+    p: &Palette,
+    summary: &UpdateSummary,
+    editor: &crate::ui::Inbox<Editor>,
+) -> El {
+    let _ = (summary, editor);
+    rune::el().fill(p.background)
+}
