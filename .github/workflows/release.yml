@@ -108,12 +108,6 @@ jobs:
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxrandr-dev \
             libdbus-1-dev libpipewire-0.3-dev libegl-dev libgbm-dev \
             libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
-      - name: Check Metal compiler
-        if: runner.os == 'macOS'
-        run: |
-          if ! xcrun -sdk macosx metal --version; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
