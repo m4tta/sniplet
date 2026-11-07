@@ -1,8 +1,7 @@
 # Sniplet guide
 
 A Rust screenshot utility and editor for Windows, macOS, and Linux, built with
-[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and
-[gpui-kit](https://github.com/longbridge/gpui-kit). Capture a screen or area,
+[Rune](https://github.com/anomalyco/rune). Capture a screen or area,
 add annotations, then copy or save the image.
 
 ## Run
@@ -201,12 +200,7 @@ and signing.
 
 ## Testing on a Mac
 
-Install Xcode and select it as the active developer directory. The locked GPUI
-dependency invokes `xcrun` to compile Metal shaders. Confirm the compiler is
-available with `xcrun -sdk macosx metal --version`. If it reports a missing Metal
-toolchain, install it through Xcode's Components settings or
-`xcodebuild -downloadComponent MetalToolchain`; see
-[Apple's component installation guide](https://developer.apple.com/documentation/xcode/downloading-and-installing-additional-xcode-components).
+Install Xcode and select it as the active developer directory.
 
 After installing Rust and the macOS prerequisites, run the automated checks and
 create a debug app bundle for native testing:
@@ -269,8 +263,8 @@ into display frames, and replaced GPU images are released.
 Pass an editable `.sniplet` project as the second argument to measure its actual
 annotations; append `--project-only` to skip the synthetic workloads.
 
-The scripts run formatting, strict linting, workspace tests, and GPUI pointer/
-keyboard integration tests. Native mode launches a smoke-test window and runs
+The scripts run formatting, strict linting, workspace tests, and headless Rune
+pointer and keyboard tests of the real views. Native mode launches a smoke-test window and runs
 a real capture-to-PNG self-test; its output is in `artifacts/self-test`.
 Upload tests use a loopback HTTP server and never send screenshots externally.
 
