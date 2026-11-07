@@ -1,3 +1,4 @@
+use crate::ui::icons;
 use sniplet_core::{AnnotationKind, AnnotationStyle, Color, ImageRect, Point};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,22 +82,22 @@ impl Tool {
         })
     }
 
-    pub fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static rune::Icon {
         match self {
-            Self::Select => "mouse-pointer-2",
-            Self::Arrow => "arrow-up-right",
-            Self::Text => "type",
-            Self::Ruler => "ruler",
-            Self::Rectangle => "square",
-            Self::Ellipse => "circle",
-            Self::Line => "slash",
-            Self::Freehand => "pencil",
-            Self::Highlight => "highlighter",
-            Self::Spotlight => "focus",
-            Self::Counter => "list-ordered",
-            Self::Hide => "eye-off",
-            Self::Zoom => "zoom-in",
-            Self::Ocr => "scan-text",
+            Self::Select => &icons::MOUSE_POINTER_2,
+            Self::Arrow => &icons::ARROW_UP_RIGHT,
+            Self::Text => &icons::TYPE,
+            Self::Ruler => &icons::RULER,
+            Self::Rectangle => &icons::SQUARE,
+            Self::Ellipse => &icons::CIRCLE,
+            Self::Line => &icons::SLASH,
+            Self::Freehand => &icons::PENCIL,
+            Self::Highlight => &icons::HIGHLIGHTER,
+            Self::Spotlight => &icons::FOCUS,
+            Self::Counter => &icons::LIST_ORDERED,
+            Self::Hide => &icons::EYE_OFF,
+            Self::Zoom => &icons::ZOOM_IN,
+            Self::Ocr => &icons::SCAN_TEXT,
         }
     }
 
@@ -210,12 +211,12 @@ impl HideStyle {
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static rune::Icon {
         match self {
-            Self::Blur => "droplets",
-            Self::Pixelate => "grid-2x2",
-            Self::Erase => "eraser",
-            Self::Redact => "square-dashed-bottom",
+            Self::Blur => &icons::DROPLETS,
+            Self::Pixelate => &icons::GRID_2X2,
+            Self::Erase => &icons::ERASER,
+            Self::Redact => &icons::SQUARE_DASHED_BOTTOM,
         }
     }
 

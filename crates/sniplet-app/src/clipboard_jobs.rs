@@ -3,7 +3,6 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use gpui_kit::{App, Task};
 use sniplet_core::Document;
 use sniplet_platform::Clipboard;
 
@@ -53,10 +52,11 @@ static ORDER: CopyOrder = CopyOrder {
     writer: Mutex::new(0),
 };
 
-/// Prepare and write on a worker. An old render cannot replace a newer copy.
-pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<()>>> {
+/// The work of one copy, for a worker thread. Its order slot is taken now, so an old render
+/// cannot replace a newer copy. `Ok(None)` means a newer copy already owns the clipboard.
+pub(crate) fn copy(source: Source) -> impl FnOnce() -> anyhow::Result<Option<()>> + Send + 'static {
     let request = ORDER.request();
-    cx.background_executor().spawn(async move {
+    move || {
         // Rendering is outside the write lock. Clipboard writes alone are ordered.
         let rendered = match &source {
             Source::Rendered(document) => Some(document.render(&crate::editor::render_options())?),
@@ -71,7 +71,7 @@ pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<()>>>
             }
             Ok(())
         })
-    })
+    }
 }
 
 /// Read QR contents, or OCR text when there is no QR code, then copy the result.
@@ -80,10 +80,9 @@ pub(crate) fn copy(source: Source, cx: &App) -> Task<anyhow::Result<Option<()>>>
 pub(crate) fn recognize(
     document: Document,
     qr_only: bool,
-    cx: &App,
-) -> Task<anyhow::Result<Recognized>> {
+) -> impl FnOnce() -> anyhow::Result<Recognized> + Send + 'static {
     let request = ORDER.request();
-    cx.background_executor().spawn(async move {
+    move || {
         let image = document.render(&crate::editor::render_options())?;
         let codes = sniplet_platform::scan_qr_codes(&image)?;
         let text = if !codes.is_empty() {
@@ -91,10 +90,7 @@ pub(crate) fn recognize(
                 .into_iter()
                 .map(|code| code.content)
                 .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                )
+                .join("\n")
         } else if qr_only {
             anyhow::bail!("No QR code found in the selected image");
         } else {
@@ -107,7 +103,7 @@ pub(crate) fn recognize(
             .write(request, || Ok(Clipboard::new()?.set_text(text.clone())?))
             .map(|written| written.is_some());
         Ok(Recognized { text, copied })
-    })
+    }
 }
 
 #[cfg(test)]

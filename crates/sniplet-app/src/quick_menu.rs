@@ -1,16 +1,10 @@
 use std::rc::Rc;
 
-use gpui_kit::{
-    component::{
-        ActiveTheme, Sizable,
-        button::{Button, ButtonVariants},
-    },
-    prelude::*,
-    *,
-};
+use rune::{El, Icon, Tx, col, el, icon, row, text};
 use sniplet_platform::HotkeySettings;
 
-use crate::editor::{Command, tool_icon};
+use crate::editor::Command;
+use crate::ui::{Button, Palette, SMALL, icons};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Action {
@@ -20,11 +14,11 @@ pub(crate) enum Action {
 
 pub(crate) struct Item {
     label: &'static str,
-    icon: &'static str,
+    icon: &'static Icon,
     action: Action,
 }
 
-const fn run(label: &'static str, icon: &'static str, command: Command) -> Item {
+const fn run(label: &'static str, icon: &'static Icon, command: Command) -> Item {
     Item {
         label,
         icon,
@@ -41,34 +35,34 @@ pub(crate) struct Layout {
 }
 
 const TILES: &[Item] = &[
-    run("Screen", "monitor", Command::Screen),
-    run("Area", "scan", Command::Area),
-    run("Scrolling", "chevrons-down", Command::Scroll),
-    run("Text & QR", "scan-text", Command::CaptureOcr),
+    run("Screen", &icons::MONITOR, Command::Screen),
+    run("Area", &icons::SCAN, Command::Area),
+    run("Scrolling", &icons::CHEVRONS_DOWN, Command::Scroll),
+    run("Text & QR", &icons::SCAN_TEXT, Command::CaptureOcr),
 ];
 
-const SETTINGS: Item = run("Settings", "settings", Command::Settings);
-const QUIT: Item = run("Quit", "power", Command::Quit);
+const SETTINGS: Item = run("Settings", &icons::SETTINGS, Command::Settings);
+const QUIT: Item = run("Quit", &icons::POWER, Command::Quit);
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) const TRAY: Layout = Layout {
     tiles: TILES,
     more: &[
-        run("Repeat Area", "repeat", Command::Repeat),
-        run("Active Window", "app-window", Command::ActiveWindow),
-        run("Pick Window", "square-mouse-pointer", Command::Window),
-        run("Delayed 3s", "timer", Command::Delayed),
-        run("Scroll Up", "chevrons-up", Command::ScrollUp),
-        run("Open File", "folder-open", Command::Open),
+        run("Repeat Area", &icons::REPEAT, Command::Repeat),
+        run("Active Window", &icons::APP_WINDOW, Command::ActiveWindow),
+        run("Pick Window", &icons::SQUARE_MOUSE_POINTER, Command::Window),
+        run("Delayed 3s", &icons::TIMER, Command::Delayed),
+        run("Scroll Up", &icons::CHEVRONS_UP, Command::ScrollUp),
+        run("Open File", &icons::FOLDER_OPEN, Command::Open),
         run(
             "Paste From Clipboard",
-            "clipboard-paste",
+            &icons::CLIPBOARD_PASTE,
             Command::LoadClipboard,
         ),
     ],
     image: &[],
     footer: &[
-        run("Open Editor", "scissors", Command::ShowEditor),
+        run("Open Editor", &icons::SCISSORS, Command::ShowEditor),
         SETTINGS,
         QUIT,
     ],
@@ -77,32 +71,40 @@ pub(crate) const TRAY: Layout = Layout {
 pub(crate) const EDITOR: Layout = Layout {
     tiles: TILES,
     more: &[
-        run("Repeat Area", "repeat", Command::Repeat),
-        run("Active Window", "app-window", Command::ActiveWindow),
-        run("Pick Window", "square-mouse-pointer", Command::Window),
-        run("Delayed 3s", "timer", Command::Delayed),
-        run("Scroll Up", "chevrons-up", Command::ScrollUp),
-        run("Manual Scrolling Capture", "mouse", Command::ManualScroll),
-        run("Open File", "folder-open", Command::Open),
+        run("Repeat Area", &icons::REPEAT, Command::Repeat),
+        run("Active Window", &icons::APP_WINDOW, Command::ActiveWindow),
+        run("Pick Window", &icons::SQUARE_MOUSE_POINTER, Command::Window),
+        run("Delayed 3s", &icons::TIMER, Command::Delayed),
+        run("Scroll Up", &icons::CHEVRONS_UP, Command::ScrollUp),
+        run(
+            "Manual Scrolling Capture",
+            &icons::MOUSE,
+            Command::ManualScroll,
+        ),
+        run("Open File", &icons::FOLDER_OPEN, Command::Open),
         // Pasting into an open image keeps it, as Ctrl+V does in the editor.
-        run("Paste From Clipboard", "clipboard-paste", Command::Paste),
+        run(
+            "Paste From Clipboard",
+            &icons::CLIPBOARD_PASTE,
+            Command::Paste,
+        ),
     ],
     image: &[
-        run("Recognize Text", "square-dashed-text", Command::Ocr),
-        run("Read QR Code", "qr-code", Command::Qr),
+        run("Recognize Text", &icons::SQUARE_DASHED_TEXT, Command::Ocr),
+        run("Read QR Code", &icons::QR_CODE, Command::Qr),
         run(
             "Auto-adjust Selection",
-            "wand-sparkles",
+            &icons::WAND_SPARKLES,
             Command::AutoAdjust,
         ),
-        run("Reset Crop", "crop", Command::ResetCrop),
-        run("Add Capture", "image-plus", Command::AddCapture),
-        run("Upload Image", "cloud-upload", Command::Upload),
+        run("Reset Crop", &icons::CROP, Command::ResetCrop),
+        run("Add Capture", &icons::IMAGE_PLUS, Command::AddCapture),
+        run("Upload Image", &icons::CLOUD_UPLOAD, Command::Upload),
     ],
     footer: &[
         Item {
             label: "Keyboard Shortcuts",
-            icon: "keyboard",
+            icon: &icons::KEYBOARD,
             action: Action::Help,
         },
         SETTINGS,
@@ -166,117 +168,103 @@ fn shortcut(action: Action, hotkeys: &HotkeySettings) -> Option<String> {
         .map(|key| shortcut_label(key, cfg!(target_os = "macos")))
 }
 
-fn divider(cx: &App) -> Div {
-    div().h(px(1.0)).bg(cx.theme().border)
+fn divider(p: &Palette) -> El {
+    el().h(1.0).w_full().fill(p.border)
 }
 
-/// The quick menu shared by the tray panel and the editor's app menu. `choose`
-/// runs when an item is clicked; closing the menu is up to the host.
-pub(crate) fn view(
+/// The quick menu shared by the tray panel and the editor's app menu. `choose` runs when an
+/// item is pressed; closing the menu is up to the host.
+pub(crate) fn view<S: 'static>(
+    p: &Palette,
     layout: &'static Layout,
     hotkeys: &HotkeySettings,
-    choose: impl Fn(Action, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> Stateful<Div> {
+    choose: impl Fn(&mut S, Action, &mut Tx) + 'static,
+) -> El {
     let choose = Rc::new(choose);
-    let on_click = |action: Action| {
+    let on_press = |action: Action| {
         let choose = choose.clone();
-        move |_: &ClickEvent, window: &mut Window, cx: &mut App| choose(action, window, cx)
+        move |s: &mut S, tx: &mut Tx| choose(s, action, tx)
     };
-    let hover = cx.theme().secondary_hover;
+    let tile_fill = p.border;
     let tiles = layout.tiles.iter().enumerate().map(|(index, item)| {
-        let tile = div()
-            .id(("menu-tile", index))
-            .flex_1()
-            .min_w_0()
-            .h(px(TILE_HEIGHT))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .rounded_md()
-            .bg(cx.theme().secondary)
-            .hover(move |style| style.bg(hover))
-            .cursor_pointer()
-            .child(tool_icon(item.icon).size(px(24.0)))
+        col()
+            .key(format!("menu-tile-{index}"))
+            .role("button")
+            .label(item.label)
+            .grow(1.0)
+            .min_w(0.0)
+            .h(TILE_HEIGHT)
+            .center()
+            .gap(4.0)
+            .radius(6.0)
+            .fill(tile_fill)
+            .hover(tile_fill.mix(p.foreground, 0.08))
+            .cursor(rune::Cursor::Pointer)
+            .child(icon(item.icon, 24.0).color(p.foreground))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(item.label),
+                text(item.label)
+                    .font(rune::TextStyle::new(14.0, 500.0))
+                    .color(p.foreground),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .children(shortcut(item.action, hotkeys)),
+                text(shortcut(item.action, hotkeys).unwrap_or_default())
+                    .font(SMALL)
+                    .color(p.muted_foreground),
             )
-            .on_click(on_click(item.action));
-        #[cfg(feature = "ui-tests")]
-        let tile = {
-            use gpui_kit::test::TestSupportExt;
-            tile.test_support()
-        };
-        tile
+            .on_press_tx(on_press(item.action))
     });
     // Every icon row shares one slot pitch, so a shorter row lines up under the one above.
     let slots = layout.more.len().max(layout.image.len()) as f32;
     let inner_width = WIDTH - 2.0 * (BORDER + PADDING);
     let slot_gap = (inner_width - slots * SLOT_WIDTH) / (slots - 1.0).max(1.0);
     let icon_row = |id: &'static str, items: &'static [Item]| {
-        div()
-            .flex()
-            .gap(px(slot_gap))
+        row()
+            .gap(slot_gap)
             .children(items.iter().enumerate().map(|(index, item)| {
-                let tooltip = match shortcut(item.action, hotkeys) {
+                let help = match shortcut(item.action, hotkeys) {
                     Some(key) => format!("{} · {key}", item.label),
                     None => item.label.to_owned(),
                 };
-                Button::new((id, index))
-                    .ghost()
-                    .icon(tool_icon(item.icon))
-                    .tooltip(tooltip)
-                    .w(px(SLOT_WIDTH))
-                    .h(px(ROW_HEIGHT))
-                    .on_click(on_click(item.action))
+                Button::new(format!("{id}-{index}"))
+                    .icon(item.icon)
+                    .help(help)
+                    .size(SLOT_WIDTH, ROW_HEIGHT)
+                    .build(p, on_press(item.action))
             }))
     };
-    let mut footer = layout.footer.iter().enumerate().map(|(index, item)| {
-        Button::new(("menu-footer", index))
-            .ghost()
-            .icon(tool_icon(item.icon))
-            .label(item.label)
-            .small()
-            .h(px(ROW_HEIGHT))
-            .on_click(on_click(item.action))
-    });
-    let last = footer.next_back();
-    let mut menu = div()
-        .id("quick-menu")
-        .w(px(WIDTH))
-        .flex()
-        .flex_col()
-        .gap(px(GAP))
-        .p(px(PADDING))
-        .bg(cx.theme().popover)
-        .text_color(cx.theme().popover_foreground)
-        .border_1()
-        .border_color(cx.theme().border)
-        .rounded_lg()
-        .child(div().flex().gap(px(GAP)).children(tiles))
-        .child(divider(cx))
+    let mut footer: Vec<El> = layout
+        .footer
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            Button::new(format!("menu-footer-{index}"))
+                .icon(item.icon)
+                .label(item.label)
+                .compact()
+                .build(p, on_press(item.action))
+        })
+        .collect();
+    let last = footer.pop();
+    let mut menu = col()
+        .key("quick-menu")
+        .w(WIDTH)
+        .gap(GAP)
+        .padding(PADDING)
+        .fill(p.popover)
+        .border(BORDER, p.border)
+        .radius(8.0)
+        .child(row().gap(GAP).children(tiles))
+        .child(divider(p))
         .child(icon_row("menu-more", layout.more));
     if !layout.image.is_empty() {
         menu = menu
-            .child(divider(cx))
+            .child(divider(p))
             .child(icon_row("menu-image", layout.image));
     }
-    menu.child(divider(cx)).child(
-        div()
-            .flex()
+    menu.child(divider(p)).child(
+        row()
             .justify_between()
-            .child(div().flex().children(footer))
+            .child(row().children(footer))
             .children(last),
     )
 }
@@ -322,26 +310,5 @@ mod tests {
     fn tray_height_fits_two_rows_and_the_editor_adds_the_image_row() {
         assert_eq!(TRAY.height(), 194.0);
         assert_eq!(EDITOR.height(), 243.0);
-    }
-
-    #[test]
-    fn every_menu_icon_is_bundled() {
-        let layouts = [
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            &TRAY,
-            &EDITOR,
-        ];
-        for item in layouts.into_iter().flat_map(Layout::items) {
-            assert!(
-                AssetSource::load(
-                    &gpui_kit::assets::AllAssets,
-                    &format!("icons/{}.svg", item.icon)
-                )
-                .unwrap()
-                .is_some(),
-                "{}",
-                item.icon
-            );
-        }
     }
 }

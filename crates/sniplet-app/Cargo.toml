@@ -9,11 +9,10 @@ description = "Sniplet, a precise cross-platform screenshot editor"
 name = "sniplet"
 path = "src/main.rs"
 
-[features]
-ui-tests = ["gpui-kit/test-support"]
-
 [dependencies]
-gpui-kit = "=0.7.0"
+# Rune is pre-release: pin a `dev` revision (dev is never rewritten).
+rune = { git = "https://github.com/anomalyco/rune", rev = "1c10c5c26b8fc95c1ce359de366aee87c9faa527", default-features = false, features = ["accessibility", "dbus", "embedded-fonts", "metal-backend", "native-file-dialog", "svg"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "1c10c5c26b8fc95c1ce359de366aee87c9faa527" }
 sniplet-core = { path = "../sniplet-core" }
 sniplet-platform = { path = "../sniplet-platform" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
