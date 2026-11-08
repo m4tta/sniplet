@@ -42,9 +42,88 @@ pub(crate) fn source<S: 'static>(
 
 #[cfg(target_os = "windows")]
 mod windows {
-    /// Run a system drag of the file at `path` until it drops or is cancelled.
+    use windows::{
+        Win32::{
+            Foundation::{
+                DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, LPARAM, POINT,
+                WPARAM,
+            },
+            Graphics::Gdi::ScreenToClient,
+            System::{
+                Com::IDataObject,
+                Ole::{
+                    DROPEFFECT, DROPEFFECT_COPY, DoDragDrop, IDropSource, IDropSource_Impl,
+                    OleInitialize,
+                },
+                SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
+            },
+            UI::{
+                Input::KeyboardAndMouse::GetCapture,
+                Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
+                WindowsAndMessaging::{GetCursorPos, PostMessageW, WM_LBUTTONUP},
+            },
+        },
+        core::{BOOL, HRESULT, HSTRING, implement},
+    };
+
+    /// The drag source OLE asks while the drag runs: drop on release, cancel on Escape.
+    #[implement(IDropSource)]
+    struct Source;
+
+    impl IDropSource_Impl for Source_Impl {
+        fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+            if escape.as_bool() {
+                DRAGDROP_S_CANCEL
+            } else if keys.0 & MK_LBUTTON.0 == 0 {
+                DRAGDROP_S_DROP
+            } else {
+                HRESULT(0)
+            }
+        }
+
+        fn GiveFeedback(&self, _: DROPEFFECT) -> HRESULT {
+            DRAGDROP_S_USEDEFAULTCURSORS
+        }
+    }
+
+    /// Run a system drag of the file at `path` until it drops or is cancelled. `DoDragDrop`
+    /// runs its own message loop on this (the UI) thread and returns when the drag ends.
     pub(super) fn drag_file(path: &std::path::Path) -> Result<(), String> {
-        let _ = path;
-        Err("Dragging files out is not ported yet".into())
+        let fail = |error: windows::core::Error| format!("Could not drag image: {error}");
+        // SAFETY: COM calls on the UI thread with arguments that outlive them.
+        unsafe {
+            // winit already initializes OLE on its windows' thread; this only adds a reference.
+            let _ = OleInitialize(None);
+            // The shell's own data object for the file, as Explorer offers one: CF_HDROP and
+            // the shell formats, so Explorer, chat apps and browsers all accept it.
+            let item: IShellItem =
+                SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)
+                    .map_err(fail)?;
+            let data: IDataObject = item.BindToHandler(None, &BHID_DataObject).map_err(fail)?;
+            // The window holding the pointer capture: it never sees the release, which
+            // `DoDragDrop` takes.
+            let window = GetCapture();
+            let mut effect = DROPEFFECT::default();
+            let result = DoDragDrop(
+                &data,
+                &IDropSource::from(Source),
+                DROPEFFECT_COPY,
+                &mut effect,
+            );
+            // Hand that release back so the press ends and nothing stays pressed.
+            if !window.is_invalid() {
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                let _ = ScreenToClient(window, &mut point);
+                let position = (point.x as u16 as u32) | ((point.y as u16 as u32) << 16);
+                let _ = PostMessageW(
+                    Some(window),
+                    WM_LBUTTONUP,
+                    WPARAM(0),
+                    LPARAM(position as isize),
+                );
+            }
+            result.ok().map_err(fail)
+        }
     }
 }

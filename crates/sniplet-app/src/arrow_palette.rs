@@ -9,12 +9,14 @@ const THUMB_SIZE: f32 = 18.0;
 /// The compact tapered size control shared by every tool in the properties popover.
 /// `fraction` is the value as a 0–1 share of the range. `change` hears every press and move
 /// with the new fraction and the drag's phase, so the host can group one drag into one undo
-/// step and close the group on `Phase::Up`.
+/// step and close the group on `Phase::Up`. `cancel` hears a drag that Escape or a lost
+/// pointer ended instead, so the host can put the size back.
 pub(crate) fn size_slider<S: 'static>(
     p: &Palette,
     label: &'static str,
     fraction: f32,
     change: impl Fn(&mut S, f32, Phase, &mut Tx) + 'static,
+    cancel: impl Fn(&mut S) + 'static,
 ) -> El {
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
@@ -43,6 +45,9 @@ pub(crate) fn size_slider<S: 'static>(
         )
         .child(thumb)
         .on_drag(move |s: &mut S, drag: &mut Drag, tx: &mut Tx| {
+            if drag.cancelled() {
+                return cancel(s);
+            }
             let value = ((drag.x - THUMB_SIZE / 2.0) / TRACK_WIDTH).clamp(0.0, 1.0);
             change(s, value, drag.phase, tx);
         })

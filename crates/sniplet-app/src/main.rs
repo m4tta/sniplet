@@ -191,6 +191,7 @@ fn poll(editor: &mut Editor, _: f64, tx: &mut Tx) -> bool {
     if changed && !rune::is_headless() {
         shell::sync_hotkeys(editor);
     }
+    settings_window::sync(editor);
     #[cfg(target_os = "windows")]
     if shell::has_tray() {
         shell::refresh_tray_theme();

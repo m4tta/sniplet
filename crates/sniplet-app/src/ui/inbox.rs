@@ -7,6 +7,8 @@ type Job<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
 struct Shared<S> {
     jobs: Vec<Job<S>>,
     waker: Option<Waker>,
+    /// Workers `spawn` started that have not sent their result yet.
+    running: usize,
 }
 
 /// Work for one window's state from other threads and other windows. A sender queues a closure
@@ -34,6 +36,7 @@ impl<S> Default for Inbox<S> {
             shared: Arc::new(Mutex::new(Shared {
                 jobs: Vec::new(),
                 waker: None,
+                running: 0,
             })),
         }
     }
@@ -54,9 +57,14 @@ impl<S: 'static> Inbox<S> {
 
     /// Run `f` with the window's state on its UI thread, soon.
     pub fn send(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
+        self.queue(Box::new(f), false);
+    }
+
+    fn queue(&self, job: Job<S>, finished: bool) {
         let waker = {
             let mut shared = self.shared.lock().unwrap();
-            shared.jobs.push(Box::new(f));
+            shared.jobs.push(job);
+            shared.running -= usize::from(finished);
             shared.waker.clone()
         };
         if let Some(waker) = waker {
@@ -71,9 +79,10 @@ impl<S: 'static> Inbox<S> {
         done: impl FnOnce(&mut S, T, &mut Tx) + Send + 'static,
     ) {
         let inbox = self.clone();
+        self.shared.lock().unwrap().running += 1;
         std::thread::spawn(move || {
             let result = work();
-            inbox.send(move |state, tx| done(state, result, tx));
+            inbox.queue(Box::new(move |state, tx| done(state, result, tx)), true);
         });
     }
 
@@ -92,9 +101,11 @@ impl<S: 'static> Inbox<S> {
         }
     }
 
-    /// Whether nothing is queued. Tests wait for this after a background job.
+    /// Whether nothing is queued and no worker is running. Tests wait for this after a
+    /// background job.
     #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.shared.lock().unwrap().jobs.is_empty()
+    pub fn is_idle(&self) -> bool {
+        let shared = self.shared.lock().unwrap();
+        shared.jobs.is_empty() && shared.running == 0
     }
 }

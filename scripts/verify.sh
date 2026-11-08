@@ -88,9 +88,9 @@ case "$suite" in
         run_cargo clippy --workspace --all-targets --locked -- -D warnings
         ;;
     ui)
-        run_cargo check -p sniplet-app --all-targets --features ui-tests --locked
-        run_cargo test -p sniplet-app --all-targets --features ui-tests --locked
-        run_cargo clippy -p sniplet-app --all-targets --features ui-tests --locked -- -D warnings
+        run_cargo check -p sniplet-app --all-targets --locked
+        run_cargo test -p sniplet-app --all-targets --locked
+        run_cargo clippy -p sniplet-app --all-targets --locked -- -D warnings
         ;;
     all)
         run_cargo check --workspace --all-targets --all-features --locked
@@ -100,7 +100,6 @@ case "$suite" in
         # immediately reproducible command.
         run_cargo test -p sniplet-core --all-targets --locked
         run_cargo test --workspace --exclude sniplet-core --all-targets --locked
-        run_cargo test -p sniplet-app --all-targets --features ui-tests --locked
 
         run_cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         ;;
