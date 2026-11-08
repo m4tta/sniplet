@@ -129,6 +129,7 @@ fn main() -> anyhow::Result<()> {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(editor::on_key),
+        scenes: updates::SCENES,
         ..AppSpec::new(
             "Sniplet",
             (1280.0, 850.0),
