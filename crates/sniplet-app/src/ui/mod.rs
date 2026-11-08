@@ -7,4 +7,4 @@ mod palette;
 
 pub use button::{BODY, Button, SEMIBOLD, SMALL, divider};
 pub use inbox::Inbox;
-pub use palette::{ACCENT, Palette, core_color, is_dark, rgb};
+pub use palette::{Palette, core_color, rgb};

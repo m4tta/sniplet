@@ -129,15 +129,6 @@ impl Layout {
             .count() as f32;
         2.0 * PADDING + TILE_HEIGHT + rows * (ROW_HEIGHT + 1.0 + 2.0 * GAP)
     }
-
-    #[cfg(test)]
-    fn items(&self) -> impl Iterator<Item = &'static Item> + use<> {
-        self.tiles
-            .iter()
-            .chain(self.more)
-            .chain(self.image)
-            .chain(self.footer)
-    }
 }
 
 /// A readable shortcut such as `Ctrl+Shift+2`, from a settings string such as

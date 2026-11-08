@@ -29,7 +29,7 @@ struct Services {
 }
 
 thread_local! {
-    static SERVICES: RefCell<Services> = RefCell::new(Services {
+    static SERVICES: RefCell<Services> = const { RefCell::new(Services {
         editor: None,
         manager: None,
         tray: None,
@@ -41,7 +41,7 @@ thread_local! {
         next_escape_id: 1,
         #[cfg(target_os = "windows")]
         tray_light_theme: true,
-    });
+    }) };
 }
 
 fn with<T>(f: impl FnOnce(&mut Services) -> T) -> T {
