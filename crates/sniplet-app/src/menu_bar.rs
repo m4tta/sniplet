@@ -1,4 +1,4 @@
-use gpui_kit::{AssetSource, assets::AllAssets};
+use rune::Icon as Glyph;
 use sniplet_platform::HotkeySettings;
 #[cfg(target_os = "linux")]
 use tray_icon::menu::{
@@ -7,6 +7,8 @@ use tray_icon::menu::{
 };
 
 use crate::editor::Command;
+#[cfg(target_os = "linux")]
+use crate::ui::icons;
 
 #[cfg(target_os = "linux")]
 pub struct NativeMenu {
@@ -21,11 +23,11 @@ impl NativeMenu {
         let menu = Menu::new();
         let mut items = Vec::new();
         for (label, icon, command) in [
-            ("Reopen Sniplet", "scissors", Command::ShowEditor),
-            ("Capture Screen", "monitor", Command::Screen),
-            ("Capture Area", "scan", Command::Area),
-            ("Scrolling Capture", "chevrons-down", Command::Scroll),
-            ("Recognize Text/QR", "scan-text", Command::CaptureOcr),
+            ("Reopen Sniplet", &icons::SCISSORS, Command::ShowEditor),
+            ("Capture Screen", &icons::MONITOR, Command::Screen),
+            ("Capture Area", &icons::SCAN, Command::Area),
+            ("Scrolling Capture", &icons::CHEVRONS_DOWN, Command::Scroll),
+            ("Recognize Text/QR", &icons::SCAN_TEXT, Command::CaptureOcr),
         ] {
             let item = menu_item(label, icon, accelerator(command, hotkeys));
             menu.append(&item)?;
@@ -36,13 +38,21 @@ impl NativeMenu {
         }
         let more = Submenu::new("More", true);
         for (label, icon, command) in [
-            ("Repeat Area Capture", "scan", Command::Repeat),
-            ("Capture Active Window", "monitor", Command::ActiveWindow),
-            ("Capture Any Window", "monitor", Command::Window),
-            ("Delayed Screenshot (3s)", "timer", Command::Delayed),
-            ("Scrolling (Up)", "chevrons-up", Command::ScrollUp),
-            ("Open File…", "file", Command::Open),
-            ("Load From Clipboard", "clipboard", Command::LoadClipboard),
+            ("Repeat Area Capture", &icons::SCAN, Command::Repeat),
+            (
+                "Capture Active Window",
+                &icons::MONITOR,
+                Command::ActiveWindow,
+            ),
+            ("Capture Any Window", &icons::MONITOR, Command::Window),
+            ("Delayed Screenshot (3s)", &icons::TIMER, Command::Delayed),
+            ("Scrolling (Up)", &icons::CHEVRONS_UP, Command::ScrollUp),
+            ("Open File…", &icons::FILE, Command::Open),
+            (
+                "Load From Clipboard",
+                &icons::CLIPBOARD,
+                Command::LoadClipboard,
+            ),
         ] {
             if matches!(command, Command::Open) {
                 more.append(&PredefinedMenuItem::separator())?;
@@ -53,14 +63,14 @@ impl NativeMenu {
         }
         menu.append(&more)?;
         menu.append(&PredefinedMenuItem::separator())?;
-        let github = menu_item("Sniplet on GitHub", "github", None);
+        let github = menu_item("Sniplet on GitHub", &icons::GITHUB, None);
         menu.append(&github)?;
         items.push((github, Command::GitHub));
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&CheckMenuItem::new("Launch at Startup", false, false, None))?;
         for (label, icon, command) in [
-            ("Settings…", "settings", Command::Settings),
-            ("Quit Sniplet", "power", Command::Quit),
+            ("Settings…", &icons::SETTINGS, Command::Settings),
+            ("Quit Sniplet", &icons::POWER, Command::Quit),
         ] {
             let item = menu_item(label, icon, accelerator(command, hotkeys));
             menu.append(&item)?;
@@ -122,15 +132,15 @@ fn accelerator(command: Command, hotkeys: &HotkeySettings) -> Option<Accelerator
 }
 
 #[cfg(target_os = "linux")]
-fn menu_item(label: &str, name: &str, accelerator: Option<Accelerator>) -> IconMenuItem {
-    let icon = icon_pixels(name).and_then(|pixels| Icon::from_rgba(pixels, 32, 32).ok());
+fn menu_item(label: &str, icon: &'static Glyph, accelerator: Option<Accelerator>) -> IconMenuItem {
+    let icon = icon_pixels(icon).and_then(|pixels| Icon::from_rgba(pixels, 32, 32).ok());
     IconMenuItem::new(label, true, icon, accelerator)
 }
 
-/// Rasterize a bundled editor icon at the tray's 32 px size.
-pub fn icon_pixels(name: &str) -> Option<Vec<u8>> {
-    let svg = AllAssets.load(&format!("icons/{name}.svg")).ok()??;
-    let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default()).ok()?;
+/// Rasterize a bundled icon at the tray's 32 px size, in black.
+pub fn icon_pixels(icon: &Glyph) -> Option<Vec<u8>> {
+    let tree = resvg::usvg::Tree::from_data(icon.body.as_bytes(), &resvg::usvg::Options::default())
+        .ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32)?;
     resvg::render(
         &tree,
@@ -153,7 +163,7 @@ pub fn tray_icon(light_background: bool) -> anyhow::Result<tray_icon::Icon> {
 }
 
 fn tray_icon_pixels(light_background: bool) -> anyhow::Result<Vec<u8>> {
-    let mut pixels = icon_pixels("scissors")
+    let mut pixels = icon_pixels(&crate::ui::icons::SCISSORS)
         .ok_or_else(|| anyhow::anyhow!("The menu bar icon could not be loaded"))?;
     let ink = if light_background { 0 } else { 255 };
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -202,21 +212,21 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn native_menu_icons_are_available_in_the_bundle() {
-        for name in [
-            "scissors",
-            "monitor",
-            "scan",
-            "chevrons-down",
-            "scan-text",
-            "timer",
-            "chevrons-up",
-            "file",
-            "clipboard",
-            "github",
-            "settings",
-            "power",
+        for (name, icon) in [
+            ("scissors", &icons::SCISSORS),
+            ("monitor", &icons::MONITOR),
+            ("scan", &icons::SCAN),
+            ("chevrons-down", &icons::CHEVRONS_DOWN),
+            ("scan-text", &icons::SCAN_TEXT),
+            ("timer", &icons::TIMER),
+            ("chevrons-up", &icons::CHEVRONS_UP),
+            ("file", &icons::FILE),
+            ("clipboard", &icons::CLIPBOARD),
+            ("github", &icons::GITHUB),
+            ("settings", &icons::SETTINGS),
+            ("power", &icons::POWER),
         ] {
-            let pixels = icon_pixels(name).expect(name);
+            let pixels = icon_pixels(icon).expect(name);
             assert_eq!(pixels.len(), 32 * 32 * 4);
             assert!(
                 pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
@@ -229,7 +239,7 @@ mod tests {
     fn tray_uses_the_same_scissors_mask_in_both_themes() {
         let light = tray_icon_pixels(true).unwrap();
         let dark = tray_icon_pixels(false).unwrap();
-        let scissors = icon_pixels("scissors").unwrap();
+        let scissors = icon_pixels(&crate::ui::icons::SCISSORS).unwrap();
         for ((light, dark), source) in light
             .as_chunks::<4>()
             .0

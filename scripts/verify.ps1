@@ -63,9 +63,9 @@ try {
             Invoke-Cargo @("clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings")
         }
         "ui" {
-            Invoke-Cargo @("check", "-p", "sniplet-app", "--all-targets", "--features", "ui-tests", "--locked")
-            Invoke-Cargo @("test", "-p", "sniplet-app", "--all-targets", "--features", "ui-tests", "--locked")
-            Invoke-Cargo @("clippy", "-p", "sniplet-app", "--all-targets", "--features", "ui-tests", "--locked", "--", "-D", "warnings")
+            Invoke-Cargo @("check", "-p", "sniplet-app", "--all-targets", "--locked")
+            Invoke-Cargo @("test", "-p", "sniplet-app", "--all-targets", "--locked")
+            Invoke-Cargo @("clippy", "-p", "sniplet-app", "--all-targets", "--locked", "--", "-D", "warnings")
         }
         "all" {
             Invoke-Cargo @("check", "--workspace", "--all-targets", "--all-features", "--locked")
@@ -75,7 +75,6 @@ try {
             # diagnosed without relying on a desktop backend.
             Invoke-Cargo @("test", "-p", "sniplet-core", "--all-targets", "--locked")
             Invoke-Cargo @("test", "--workspace", "--exclude", "sniplet-core", "--all-targets", "--locked")
-            Invoke-Cargo @("test", "-p", "sniplet-app", "--all-targets", "--features", "ui-tests", "--locked")
 
             Invoke-Cargo @("clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings")
         }

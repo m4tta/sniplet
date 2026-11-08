@@ -1,57 +1,82 @@
-use std::sync::Arc;
+//! What every capture overlay shares: rectangles, monitor geometry in desktop units, and the
+//! borderless, always-on-top window that covers one monitor.
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui_kit::*;
+use rune::{AppSpec, Cx, El, KeyEvent, Tx, Waker, WindowHandle, WindowOptions, WindowSpec};
+use sniplet_core::Point as ImagePoint;
 
-use crate::editor::display_image;
+use crate::ui::Inbox;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct DisplayGeometry {
-    pub id: DisplayId,
-    pub bounds: Bounds<Pixels>,
+/// An axis-aligned rectangle, in points or desktop units.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
-/// A frozen monitor image and the coordinate transform between its GPUI
-/// overlay and the native desktop.
-pub(crate) struct CaptureSurface {
-    pub image: Arc<RenderImage>,
-    origin: sniplet_platform::ScreenPoint,
-    scale_factor: f32,
-}
-
-impl CaptureSurface {
-    pub fn new(frame: sniplet_platform::CapturedFrame) -> Self {
-        Self {
-            image: display_image(frame.image),
-            origin: frame.origin,
-            scale_factor: frame.scale_factor,
-        }
+impl Rect {
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
     }
 
-    pub fn desktop_point(&self, position: Point<Pixels>) -> sniplet_platform::ScreenPoint {
-        desktop_point(
-            self.origin,
-            self.scale_factor,
-            position,
-            cfg!(target_os = "windows"),
+    pub fn from_corners(a: ImagePoint, b: ImagePoint) -> Self {
+        Self::new(
+            a.x.min(b.x),
+            a.y.min(b.y),
+            (a.x - b.x).abs(),
+            (a.y - b.y).abs(),
         )
     }
 
-    pub fn window_bounds(&self, window: &sniplet_platform::WindowInfo) -> Bounds<Pixels> {
-        window_bounds(
-            self.origin,
-            self.scale_factor,
-            window,
-            cfg!(target_os = "windows"),
+    pub fn right(&self) -> f32 {
+        self.x + self.w
+    }
+
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+
+    /// The overlap, with a zero size when there is none.
+    pub fn intersect(&self, other: &Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        Rect::new(
+            x,
+            y,
+            (self.right().min(other.right()) - x).max(0.0),
+            (self.bottom().min(other.bottom()) - y).max(0.0),
         )
+    }
+
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect::new(
+            x,
+            y,
+            self.right().max(other.right()) - x,
+            self.bottom().max(other.bottom()) - y,
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
+
+    pub fn overlaps(&self, other: &Rect) -> bool {
+        !self.intersect(other).is_empty()
+    }
+
+    pub fn area(&self) -> f32 {
+        self.w * self.h
     }
 }
 
-/// Subtracts axis-aligned cuts from a rectangle. Each cut partitions an
-/// intersecting piece into at most four non-overlapping rectangles.
-pub(crate) fn subtract_rectangles(
-    source: Bounds<Pixels>,
-    cuts: &[Bounds<Pixels>],
-) -> Vec<Bounds<Pixels>> {
+/// Subtracts axis-aligned cuts from a rectangle. Each cut partitions an intersecting piece
+/// into at most four non-overlapping rectangles.
+pub(crate) fn subtract_rectangles(source: Rect, cuts: &[Rect]) -> Vec<Rect> {
     cuts.iter().fold(vec![source], |pieces, cut| {
         pieces
             .into_iter()
@@ -60,309 +85,351 @@ pub(crate) fn subtract_rectangles(
     })
 }
 
-fn subtract_rectangle(source: Bounds<Pixels>, cut: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+fn subtract_rectangle(source: Rect, cut: Rect) -> Vec<Rect> {
     let overlap = source.intersect(&cut);
-    let overlap_width = f32::from(overlap.size.width);
-    let overlap_height = f32::from(overlap.size.height);
-    if overlap_width <= 0.0 || overlap_height <= 0.0 {
+    if overlap.is_empty() {
         return vec![source];
     }
-
-    let left = f32::from(source.origin.x);
-    let top = f32::from(source.origin.y);
-    let right = left + f32::from(source.size.width);
-    let bottom = top + f32::from(source.size.height);
-    let cut_left = f32::from(overlap.origin.x);
-    let cut_top = f32::from(overlap.origin.y);
-    let cut_right = cut_left + overlap_width;
-    let cut_bottom = cut_top + overlap_height;
-
+    let piece = |left: f32, top: f32, right: f32, bottom: f32| {
+        (right > left && bottom > top).then(|| Rect::new(left, top, right - left, bottom - top))
+    };
     [
-        rectangle(left, top, right, cut_top),
-        rectangle(left, cut_bottom, right, bottom),
-        rectangle(left, cut_top, cut_left, cut_bottom),
-        rectangle(cut_right, cut_top, right, cut_bottom),
+        piece(source.x, source.y, source.right(), overlap.y),
+        piece(source.x, overlap.bottom(), source.right(), source.bottom()),
+        piece(source.x, overlap.y, overlap.x, overlap.bottom()),
+        piece(overlap.right(), overlap.y, source.right(), overlap.bottom()),
     ]
     .into_iter()
     .flatten()
     .collect()
 }
 
-fn rectangle(left: f32, top: f32, right: f32, bottom: f32) -> Option<Bounds<Pixels>> {
-    (right > left && bottom > top).then(|| {
-        Bounds::new(
-            point(px(left), px(top)),
-            size(px(right - left), px(bottom - top)),
+/// One monitor in desktop units: physical pixels on Windows and Linux, Quartz points on
+/// macOS. These are the units monitor origins and window frames use on each platform.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Monitor {
+    pub id: u32,
+    pub bounds: Rect,
+    /// The monitor's size in image pixels.
+    pub pixels: (u32, u32),
+}
+
+impl Monitor {
+    pub fn from_frame(frame: &sniplet_platform::CapturedFrame) -> Self {
+        let id = match frame.source {
+            sniplet_platform::CaptureSource::Monitor { id, .. }
+            | sniplet_platform::CaptureSource::MonitorRegion { id, .. }
+            | sniplet_platform::CaptureSource::Window { id } => id,
+        };
+        Self::new(
+            id,
+            frame.origin,
+            frame.image.dimensions(),
+            frame.scale_factor,
         )
-    })
-}
+    }
 
-pub(crate) fn captured_frame_placement(
-    frame: &sniplet_platform::CapturedFrame,
-    cx: &App,
-) -> (Bounds<Pixels>, Option<DisplayId>) {
-    let displays = cx
-        .displays()
-        .into_iter()
-        .map(|display| DisplayGeometry {
-            id: display.id(),
-            bounds: display.bounds(),
-        })
-        .collect::<Vec<_>>();
-    overlay_placement(
-        captured_source_id(&frame.source),
-        frame.origin,
-        frame.image.dimensions(),
-        frame.scale_factor,
-        &displays,
-        cfg!(any(target_os = "windows", target_os = "macos")),
-        cfg!(target_os = "windows"),
-    )
-}
+    #[cfg(target_os = "macos")]
+    pub fn from_info(info: &sniplet_platform::MonitorInfo) -> Self {
+        Self::new(
+            info.id,
+            sniplet_platform::ScreenPoint {
+                x: info.x,
+                y: info.y,
+            },
+            (info.width, info.height),
+            info.scale_factor,
+        )
+    }
 
-fn captured_source_id(source: &sniplet_platform::CaptureSource) -> u32 {
-    match source {
-        sniplet_platform::CaptureSource::Monitor { id, .. }
-        | sniplet_platform::CaptureSource::MonitorRegion { id, .. }
-        | sniplet_platform::CaptureSource::Window { id } => *id,
+    fn new(
+        id: u32,
+        origin: sniplet_platform::ScreenPoint,
+        pixels: (u32, u32),
+        scale_factor: f32,
+    ) -> Self {
+        let units = if cfg!(target_os = "macos") {
+            scale_factor.max(1.0)
+        } else {
+            1.0
+        };
+        Self {
+            id,
+            bounds: Rect::new(
+                origin.x as f32,
+                origin.y as f32,
+                pixels.0 as f32 / units,
+                pixels.1 as f32 / units,
+            ),
+            pixels,
+        }
+    }
+
+    /// Image pixels per desktop unit.
+    pub fn scale(&self) -> f32 {
+        self.pixels.0 as f32 / self.bounds.w.max(1.0)
+    }
+
+    /// A borderless, always-on-top window over the whole monitor. It takes input, and its
+    /// background is transparent when `transparent` is set.
+    pub fn window_options(&self, transparent: bool) -> WindowOptions {
+        // Rune places windows in physical desktop pixels; macOS bounds are in points.
+        let scale = if cfg!(target_os = "macos") {
+            self.scale()
+        } else {
+            1.0
+        };
+        WindowOptions {
+            transparent,
+            borderless: true,
+            click_through: false,
+            always_on_top: true,
+            visible: true,
+            position: Some((
+                (self.bounds.x * scale).round() as i32,
+                (self.bounds.y * scale).round() as i32,
+            )),
+            physical_size: Some(self.pixels),
+            min_size: Some((0.0, 0.0)),
+            max_size: None,
+            resizable: false,
+        }
     }
 }
 
-pub(crate) fn overlay_placement(
-    source_id: u32,
-    origin: sniplet_platform::ScreenPoint,
-    image_size: (u32, u32),
-    scale_factor: f32,
-    displays: &[DisplayGeometry],
-    native_display_ids: bool,
-    physical_origin: bool,
-) -> (Bounds<Pixels>, Option<DisplayId>) {
-    let scale = scale_factor.max(1.0);
-    let origin_scale = if physical_origin { scale } else { 1.0 };
-    let requested = Bounds::new(
-        point(
-            px(origin.x as f32 / origin_scale),
-            px(origin.y as f32 / origin_scale),
-        ),
-        size(
-            px(image_size.0 as f32 / scale),
-            px(image_size.1 as f32 / scale),
-        ),
+/// A point in an overlay window, in points, as desktop units. The overlay covers `bounds`
+/// with a `viewport` of that many points.
+pub(crate) fn to_desktop(bounds: Rect, viewport: (f32, f32), x: f32, y: f32) -> ImagePoint {
+    ImagePoint::new(
+        bounds.x + x * bounds.w / viewport.0.max(1.0),
+        bounds.y + y * bounds.h / viewport.1.max(1.0),
+    )
+}
+
+/// A rectangle in desktop units as points in the overlay that covers `bounds`.
+pub(crate) fn to_local(bounds: Rect, viewport: (f32, f32), rect: Rect) -> Rect {
+    let sx = viewport.0 / bounds.w.max(1.0);
+    let sy = viewport.1 / bounds.h.max(1.0);
+    Rect::new(
+        (rect.x - bounds.x) * sx,
+        (rect.y - bounds.y) * sy,
+        rect.w * sx,
+        rect.h * sy,
+    )
+}
+
+/// The viewport, in points, of an overlay over `monitor` before its first layout reports it.
+pub(crate) fn initial_viewport(monitor: &Monitor, scale_factor: f32) -> (f32, f32) {
+    let points = if cfg!(target_os = "macos") {
+        1.0
+    } else {
+        scale_factor.max(1.0)
+    };
+    (monitor.bounds.w / points, monitor.bounds.h / points)
+}
+
+/// The state of a window Sniplet opens at runtime: its inbox carries results and messages.
+pub(crate) trait WindowState: Sized + 'static {
+    fn inbox(&self) -> &Inbox<Self>;
+}
+
+fn setup<S: WindowState>(state: &mut S, waker: Waker) {
+    state.inbox().set_waker(waker);
+}
+
+fn poll<S: WindowState>(state: &mut S, _: f64, tx: &mut Tx) -> bool {
+    Inbox::drain(state, S::inbox, tx)
+}
+
+/// How a window Sniplet opens at runtime looks and takes keys.
+pub(crate) struct Window<S: 'static> {
+    pub title: &'static str,
+    /// Logical size, used unless the options set a physical one.
+    pub size: (f32, f32),
+    pub view: fn(&S, &mut Cx<S>) -> El,
+    pub on_key: fn(&mut S, &KeyEvent, &mut Tx) -> bool,
+    pub options: WindowOptions,
+}
+
+/// Open a window with its own state in the running app. Each gets a unique key.
+pub(crate) fn open<S: WindowState>(
+    window: Window<S>,
+    state: S,
+    on_ready: impl FnMut(&WindowHandle) + 'static,
+) -> WindowHandle {
+    open_native(window, state, on_ready, rune::MacWindowOptions::default())
+}
+
+/// `open` with macOS window settings, which other platforms ignore.
+fn open_native<S: WindowState>(
+    window: Window<S>,
+    state: S,
+    on_ready: impl FnMut(&WindowHandle) + 'static,
+    native: rune::MacWindowOptions,
+) -> WindowHandle {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let key = format!("sniplet-window-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let spec = AppSpec {
+        min_size: Some((0.0, 0.0)),
+        setup: Some(setup::<S>),
+        poll: Some(poll::<S>),
+        on_key: Some(window.on_key),
+        ..AppSpec::new(
+            window.title,
+            window.size,
+            || unreachable!("the opener supplies the state"),
+            window.view,
+        )
+    };
+    rune::open_window(
+        WindowSpec::new(key, spec)
+            .state(state)
+            // Translucent dims and labels blend as they did before Rune, in sRGB.
+            .srgb_blend(true)
+            .on_ready(on_ready)
+            .configured_options(window.options.macos(native)),
+    )
+}
+
+/// Open an overlay over `monitor`. macOS places it on the monitor by its display ID, which
+/// is exact across displays of different scales.
+pub(crate) fn open_overlay<S: WindowState>(
+    monitor: &Monitor,
+    window: Window<S>,
+    state: S,
+) -> WindowHandle {
+    // As a pop-up panel: above other apps without activating Sniplet, and on every Space,
+    // including another app's full-screen Space.
+    const POP_UP_LEVEL: isize = 101;
+    const ALL_SPACES_AND_FULL_SCREEN: usize = 1 << 0 | 1 << 8;
+    let native = rune::MacWindowOptions::default()
+        .nonactivating_panel(true)
+        .level(POP_UP_LEVEL)
+        .collection_behavior(ALL_SPACES_AND_FULL_SCREEN);
+    let handle = open_native(
+        window,
+        state,
+        |_handle: &WindowHandle| {
+            #[cfg(target_os = "macos")]
+            crate::macos::focus_capture_under_pointer(_handle);
+        },
+        native,
     );
-
-    if native_display_ids
-        && let Some(display) = displays
-            .iter()
-            .find(|display| u64::from(display.id) as u32 == source_id)
-    {
-        return (display.bounds, Some(display.id));
-    }
-
-    let center = requested.center();
-    let display = displays.iter().min_by(|left, right| {
-        display_distance(left.bounds, center).total_cmp(&display_distance(right.bounds, center))
-    });
-    let Some(display) = display else {
-        return (requested, None);
-    };
-
-    let same_size = (f32::from(display.bounds.size.width) - f32::from(requested.size.width)).abs()
-        <= 2.0
-        && (f32::from(display.bounds.size.height) - f32::from(requested.size.height)).abs() <= 2.0;
-    (
-        if same_size { display.bounds } else { requested },
-        Some(display.id),
-    )
+    #[cfg(target_os = "macos")]
+    handle.place(
+        rune::DisplayTarget::Native(rune::NativeDisplayId::MacOS(monitor.id)),
+        rune::OverlayPlacement::FullScreen,
+    );
+    // Other platforms placed it through its options.
+    let _ = monitor;
+    handle
 }
 
-fn display_distance(bounds: Bounds<Pixels>, point: Point<Pixels>) -> f32 {
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let right = left + f32::from(bounds.size.width);
-    let bottom = top + f32::from(bounds.size.height);
-    let x = f32::from(point.x);
-    let y = f32::from(point.y);
-    let dx = if x < left {
-        left - x
-    } else if x > right {
-        x - right
-    } else {
-        0.0
-    };
-    let dy = if y < top {
-        top - y
-    } else if y > bottom {
-        y - bottom
-    } else {
-        0.0
-    };
-    dx * dx + dy * dy
+/// The translucent black outside a selection.
+pub(crate) fn dim(alpha: u8) -> rune::Color {
+    rune::Color::BLACK.alpha(f32::from(alpha) / 255.0)
 }
 
-fn desktop_point(
-    origin: sniplet_platform::ScreenPoint,
-    scale_factor: f32,
-    position: Point<Pixels>,
-    physical_coordinates: bool,
-) -> sniplet_platform::ScreenPoint {
-    let scale = if physical_coordinates {
-        scale_factor.max(1.0)
-    } else {
-        1.0
-    };
-    sniplet_platform::ScreenPoint {
-        x: origin
-            .x
-            .saturating_add((f32::from(position.x) * scale).floor() as i32),
-        y: origin
-            .y
-            .saturating_add((f32::from(position.y) * scale).floor() as i32),
-    }
+/// The dark pill behind overlay hints and labels.
+pub(crate) fn pill() -> rune::Color {
+    crate::ui::rgb(0x202020).alpha(232.0 / 255.0)
 }
 
-fn window_bounds(
-    origin: sniplet_platform::ScreenPoint,
-    scale_factor: f32,
-    window: &sniplet_platform::WindowInfo,
-    physical_coordinates: bool,
-) -> Bounds<Pixels> {
-    let scale = if physical_coordinates {
-        scale_factor.max(1.0)
-    } else {
-        1.0
-    };
-    Bounds::new(
-        point(
-            px((i64::from(window.x) - i64::from(origin.x)) as f32 / scale),
-            px((i64::from(window.y) - i64::from(origin.y)) as f32 / scale),
-        ),
-        size(
-            px(window.width as f32 / scale),
-            px(window.height as f32 / scale),
-        ),
-    )
+/// The hint centered near the bottom of an overlay.
+pub(crate) fn hint(label: &str) -> El {
+    rune::row()
+        .pin(Some(12.0), None, Some(12.0), Some(36.0))
+        .justify_center()
+        .child(
+            rune::el().px(16.0).py(8.0).radius(8.0).fill(pill()).child(
+                rune::text(label.to_owned())
+                    .font(crate::ui::BODY)
+                    .color(rune::Color::WHITE)
+                    .single_line(),
+            ),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn geometry(id: u64, x: f32, y: f32, width: f32, height: f32) -> DisplayGeometry {
-        DisplayGeometry {
-            id: DisplayId::new(id),
-            bounds: Bounds::new(point(px(x), px(y)), size(px(width), px(height))),
+    fn window(x: i32, y: i32, width: u32, height: u32) -> Rect {
+        Rect::new(x as f32, y as f32, width as f32, height as f32)
+    }
+
+    #[test]
+    fn desktop_and_overlay_coordinates_round_trip_at_fractional_scale() {
+        // A 3840 × 2160 monitor at 150 % shows a 2560 × 1440 point overlay.
+        let bounds = Rect::new(-2880.0, 120.0, 3840.0, 2160.0);
+        let viewport = (2560.0, 1440.0);
+        assert_eq!(
+            to_desktop(bounds, viewport, 100.0, 40.0),
+            ImagePoint::new(-2730.0, 180.0)
+        );
+        assert_eq!(
+            to_local(bounds, viewport, window(-2730, 180, 600, 300)),
+            Rect::new(100.0, 40.0, 400.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn point_desktops_do_not_scale_window_geometry() {
+        let bounds = Rect::new(-1440.0, 180.0, 1440.0, 900.0);
+        let viewport = (1440.0, 900.0);
+        assert_eq!(
+            to_desktop(bounds, viewport, 100.0, 40.0),
+            ImagePoint::new(-1340.0, 220.0)
+        );
+        assert_eq!(
+            to_local(bounds, viewport, window(-1340, 220, 400, 200)),
+            Rect::new(100.0, 40.0, 400.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn overlays_cover_the_monitor_in_physical_pixels() {
+        let monitor = Monitor::from_frame(&sniplet_platform::CapturedFrame {
+            image: image::RgbaImage::new(3840, 2160),
+            origin: sniplet_platform::ScreenPoint { x: 3840, y: 0 },
+            scale_factor: 1.5,
+            source: sniplet_platform::CaptureSource::Monitor { index: 1, id: 9 },
+        });
+        let options = monitor.window_options(false);
+        assert_eq!(options.physical_size, Some((3840, 2160)));
+        if !cfg!(target_os = "macos") {
+            assert_eq!(monitor.bounds, Rect::new(3840.0, 0.0, 3840.0, 2160.0));
+            assert_eq!(options.position, Some((3840, 0)));
+            assert_eq!(initial_viewport(&monitor, 1.5), (2560.0, 1440.0));
         }
     }
 
-    fn window(x: i32, y: i32, width: u32, height: u32) -> sniplet_platform::WindowInfo {
-        sniplet_platform::WindowInfo {
-            id: 1,
-            process_id: 2,
-            app_name: "Example".into(),
-            title: "Document".into(),
-            x,
-            y,
-            width,
-            height,
-            z_order: 0,
-            is_minimized: false,
-            is_maximized: false,
-            is_focused: false,
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn windows_physical_origin_is_converted_to_gpui_coordinates() {
-        let (bounds, display) = overlay_placement(
-            1,
-            sniplet_platform::ScreenPoint { x: 3840, y: 0 },
-            (3840, 2160),
-            1.5,
-            &[],
-            false,
-            true,
-        );
-
-        assert_eq!(f32::from(bounds.origin.x), 2560.0);
-        assert_eq!(f32::from(bounds.size.width), 2560.0);
-        assert_eq!(display, None);
-    }
-
-    #[::core::prelude::v1::test]
-    fn native_monitor_id_selects_its_exact_gpui_display() {
-        let expected = geometry(42, 0.0, 0.0, 1728.0, 1117.0);
-        let other = geometry(7, 0.0, 0.0, 1920.0, 1080.0);
-        let (bounds, display) = overlay_placement(
-            42,
-            sniplet_platform::ScreenPoint { x: 4000, y: 0 },
-            (3456, 2234),
-            2.0,
-            &[other, expected],
-            true,
-            false,
-        );
-
-        assert_eq!(bounds, expected.bounds);
-        assert_eq!(display, Some(expected.id));
-    }
-
-    #[::core::prelude::v1::test]
-    fn native_desktop_and_overlay_coordinates_round_trip() {
-        let origin = sniplet_platform::ScreenPoint { x: -2880, y: 120 };
-        let position = point(px(100.0), px(40.0));
-        assert_eq!(
-            desktop_point(origin, 1.5, position, true),
-            sniplet_platform::ScreenPoint { x: -2730, y: 180 }
-        );
-        assert_eq!(
-            window_bounds(origin, 1.5, &window(-2730, 180, 600, 300), true),
-            Bounds::new(point(px(100.0), px(40.0)), size(px(400.0), px(200.0)))
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn logical_desktop_coordinates_do_not_scale_window_geometry() {
-        let origin = sniplet_platform::ScreenPoint { x: -1440, y: 180 };
-        assert_eq!(
-            desktop_point(origin, 2.0, point(px(100.0), px(40.0)), false),
-            sniplet_platform::ScreenPoint { x: -1340, y: 220 }
-        );
-        assert_eq!(
-            window_bounds(origin, 2.0, &window(-1340, 220, 400, 200), false),
-            Bounds::new(point(px(100.0), px(40.0)), size(px(400.0), px(200.0)))
-        );
-    }
-
-    fn area(bounds: Bounds<Pixels>) -> f32 {
-        f32::from(bounds.size.width) * f32::from(bounds.size.height)
-    }
-
-    #[::core::prelude::v1::test]
+    #[test]
     fn rectangle_subtraction_splits_around_a_center_cut_without_overlap() {
-        let source = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(80.0)));
-        let cut = Bounds::new(point(px(20.0), px(10.0)), size(px(50.0), px(40.0)));
+        let source = Rect::new(0.0, 0.0, 100.0, 80.0);
+        let cut = Rect::new(20.0, 10.0, 50.0, 40.0);
         let pieces = subtract_rectangles(source, &[cut]);
 
         assert_eq!(pieces.len(), 4);
-        assert_eq!(pieces.iter().copied().map(area).sum::<f32>(), 6_000.0);
+        assert_eq!(pieces.iter().map(Rect::area).sum::<f32>(), 6_000.0);
         for (index, left) in pieces.iter().enumerate() {
-            assert_eq!(area(left.intersect(&cut)), 0.0);
+            assert_eq!(left.intersect(&cut).area(), 0.0);
             for right in pieces.iter().skip(index + 1) {
-                assert_eq!(area(left.intersect(right)), 0.0);
+                assert_eq!(left.intersect(right).area(), 0.0);
             }
         }
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn rectangle_subtraction_handles_overlapping_cuts_and_full_coverage() {
-        let source = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+        let source = Rect::new(0.0, 0.0, 100.0, 100.0);
         let cuts = [
-            Bounds::new(point(px(20.0), px(0.0)), size(px(40.0), px(100.0))),
-            Bounds::new(point(px(40.0), px(30.0)), size(px(60.0), px(40.0))),
+            Rect::new(20.0, 0.0, 40.0, 100.0),
+            Rect::new(40.0, 30.0, 60.0, 40.0),
         ];
         let pieces = subtract_rectangles(source, &cuts);
 
-        assert_eq!(pieces.iter().copied().map(area).sum::<f32>(), 4_400.0);
+        assert_eq!(pieces.iter().map(Rect::area).sum::<f32>(), 4_400.0);
         assert!(subtract_rectangles(source, &[source]).is_empty());
     }
 }

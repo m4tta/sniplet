@@ -1,18 +1,12 @@
+//! Update checks, downloads and installs, the update card on the canvas, and the Updates
+//! section of Settings. The editor owns the state; background work runs through its inbox.
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use gpui_kit::{
-    base::Disableable,
-    component::{
-        ActiveTheme, Selectable,
-        button::{Button, ButtonVariants},
-    },
-    prelude::*,
-    *,
-};
+use rune::{Color, El, Icon, Tx, col, el, icon, row, text};
 use sniplet_core::{Document, Project};
 use sniplet_platform::{
     SettingsStore,
@@ -20,8 +14,9 @@ use sniplet_platform::{
 };
 
 use crate::{
-    editor::{Editor, tool_icon},
-    settings_window::{card, divider, note, row, section},
+    editor::Editor,
+    settings_window::view,
+    ui::{BODY, Button, Inbox, Palette, SEMIBOLD, SMALL, icons, rgb},
 };
 
 pub(crate) const RESTORE_ARG: &str = "--restore-update";
@@ -31,11 +26,18 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 
 /// A release found by a check.
+#[derive(Debug)]
 pub(crate) struct Release {
     version: String,
     size: u64,
     /// Absent for test doubles, which cannot build a signed platform release.
     package: Option<UpdateRelease>,
+}
+
+impl PartialEq for Release {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version && self.size == other.size
+    }
 }
 
 impl From<UpdateRelease> for Release {
@@ -119,8 +121,9 @@ impl Backend for Platform {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) enum Phase {
+    #[default]
     Idle,
     Checking,
     UpToDate,
@@ -133,6 +136,17 @@ pub(crate) enum Phase {
     InstallFailed(Arc<Release>, String),
     /// The new version is on disk, but the new process did not start.
     RestartFailed(Arc<Release>, String),
+}
+
+impl Phase {
+    fn busy(&self) -> bool {
+        matches!(self, Self::Downloading(_) | Self::Installing(_))
+    }
+
+    /// A download is running or done, so a check would only replace it.
+    fn transferring(&self) -> bool {
+        self.busy() || matches!(self, Self::Ready(_))
+    }
 }
 
 pub(crate) struct Updates {
@@ -171,21 +185,13 @@ impl Updates {
         }
     }
 
-    fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Downloading(_) | Phase::Installing(_))
-    }
-
     pub(crate) fn installing(&self) -> bool {
         matches!(self.phase, Phase::Installing(_))
     }
 
-    fn transferring(&self) -> bool {
-        self.busy() || matches!(self.phase, Phase::Ready(_))
-    }
-
     fn automatic_check_due(&self) -> bool {
         !self.check_running
-            && !self.transferring()
+            && !self.phase.transferring()
             && self
                 .next_automatic
                 .is_none_or(|next| Instant::now() >= next)
@@ -199,35 +205,32 @@ enum InstallError {
     Restart(anyhow::Error),
 }
 
-/// Check at startup and once a day. Debug and test builds only check when asked.
-pub(crate) fn schedule(cx: &mut Context<Editor>) {
-    if cfg!(any(test, debug_assertions)) {
-        return;
-    }
-    cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(FIRST_CHECK_DELAY).await;
-        loop {
-            let alive = this.update(cx, |editor, cx| {
-                if editor.settings.check_for_updates && editor.updates.automatic_check_due() {
-                    editor.check_for_updates(true, cx);
-                }
-            });
-            if alive.is_err() {
-                return;
-            }
-            cx.background_executor().timer(RETRY_INTERVAL).await;
-        }
-    })
-    .detach();
-}
-
 impl Editor {
-    pub(crate) fn check_for_updates(&mut self, automatic: bool, cx: &mut Context<Self>) {
-        if self.updates.transferring() {
+    /// Check at startup and once a day. Debug and test builds only check when asked.
+    pub(crate) fn schedule_updates(&mut self) {
+        if cfg!(any(test, debug_assertions)) {
+            return;
+        }
+        let inbox = self.inbox.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(FIRST_CHECK_DELAY);
+            loop {
+                inbox.send(|editor, _| {
+                    if editor.settings.check_for_updates && editor.updates.automatic_check_due() {
+                        editor.check_for_updates(true);
+                    }
+                });
+                std::thread::sleep(RETRY_INTERVAL);
+            }
+        });
+    }
+
+    /// An automatic check downloads what it finds; a check from Settings only shows it.
+    pub(crate) fn check_for_updates(&mut self, automatic: bool) {
+        if self.updates.phase.transferring() {
             return;
         }
         self.updates.phase = Phase::Checking;
-        cx.notify();
         if self.updates.check_running {
             self.updates.check_pending = Some(automatic);
             return;
@@ -237,16 +240,10 @@ impl Editor {
         let channel = self.settings.update_channel;
         let current = self.updates.current.clone();
         let backend = self.updates.backend.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { backend.check(channel, &current) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.finish_check(generation, automatic, result, cx)
-            });
-        })
-        .detach();
+        self.inbox.spawn(
+            move || backend.check(channel, &current),
+            move |editor, result, _| editor.finish_check(generation, automatic, result),
+        );
     }
 
     fn finish_check(
@@ -254,14 +251,13 @@ impl Editor {
         generation: u64,
         automatic: bool,
         result: anyhow::Result<Option<Release>>,
-        cx: &mut Context<Self>,
     ) {
         let updates = &mut self.updates;
         updates.check_running = false;
         let pending = updates.check_pending.take();
         if generation != updates.generation {
             if let Some(automatic) = pending {
-                self.check_for_updates(automatic, cx);
+                self.check_for_updates(automatic);
             }
             return;
         }
@@ -279,13 +275,12 @@ impl Editor {
             Ok(None) => Phase::UpToDate,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
-        cx.notify();
         if automatic && matches!(self.updates.phase, Phase::Available(_)) {
-            self.download_update(cx);
+            self.download_update();
         }
     }
 
-    pub(crate) fn download_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn download_update(&mut self) {
         let release = match &self.updates.phase {
             Phase::Available(release)
             | Phase::DownloadFailed(release, _)
@@ -293,38 +288,31 @@ impl Editor {
             _ => return,
         };
         self.updates.phase = Phase::Downloading(release.clone());
-        cx.notify();
         let generation = self.updates.generation;
         let backend = self.updates.backend.clone();
-        let task = {
-            let release = release.clone();
-            cx.background_executor()
-                .spawn(async move { backend.download(&release) })
-        };
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.updates.generation != generation {
+        let package = release.clone();
+        self.inbox.spawn(
+            move || backend.download(&package),
+            move |editor, result, _| {
+                if editor.updates.generation != generation {
                     return;
                 }
                 match result {
                     Ok(staged) => {
-                        this.updates.staged = Some(staged);
-                        this.updates.phase = Phase::Ready(release);
-                        this.updates.notice_dismissed = false;
+                        editor.updates.staged = Some(staged);
+                        editor.updates.phase = Phase::Ready(release);
+                        editor.updates.notice_dismissed = false;
                     }
                     Err(error) => {
-                        this.updates.phase = Phase::DownloadFailed(release, error.to_string())
+                        editor.updates.phase = Phase::DownloadFailed(release, error.to_string())
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// Save settings and the open screenshot, install, then start the new version.
-    pub(crate) fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restart_to_update(&mut self) {
         let (release, installed) = match &self.updates.phase {
             Phase::Ready(release) | Phase::InstallFailed(release, _) => (release.clone(), false),
             Phase::RestartFailed(release, _) => (release.clone(), true),
@@ -332,62 +320,61 @@ impl Editor {
         };
         let staged = self.updates.staged.take();
         if !installed && staged.is_none() {
-            self.download_update(cx);
+            self.download_update();
             return;
         }
         self.updates.phase = Phase::Installing(release.clone());
-        cx.notify();
+        self.install_when_saved(release, staged);
+    }
+
+    /// The single settings writer finishes first, so the final snapshot is the last write.
+    fn install_when_saved(&mut self, release: Arc<Release>, staged: Option<Box<dyn Staged>>) {
+        if self.settings_save_running {
+            self.inbox.spawn(
+                || std::thread::sleep(Duration::from_millis(10)),
+                move |editor, (), _| editor.install_when_saved(release, staged),
+            );
+            return;
+        }
         let settings = self.settings.clone();
         let store = self.settings_store();
         let document = self.document.clone();
         let backend = self.updates.backend.clone();
-        cx.spawn(async move |this, cx| {
-            // Let the single settings writer finish before the final snapshot.
-            while this
-                .read_with(cx, |editor, _| editor.settings_save_running)
-                .unwrap_or(false)
-            {
-                cx.background_executor()
-                    .timer(Duration::from_millis(10))
-                    .await;
-            }
-            let task = cx.background_executor().spawn(async move {
-                let prepared = store.and_then(|store| {
-                    store.save(&settings)?;
-                    document
-                        .map(|document| save_recovery(&recovery_path(&store), &document))
-                        .transpose()
-                });
-                let recovery = match prepared {
-                    Ok(recovery) => recovery,
-                    Err(error) => return Err(InstallError::Prepare(error, staged)),
-                };
-                if let Some(staged) = staged
-                    && let Err(error) = staged.install()
-                {
-                    return Err(InstallError::Install(error));
-                }
-                backend
-                    .relaunch(recovery.is_some())
-                    .map_err(InstallError::Restart)?;
-                Ok(())
+        let install = move || {
+            let prepared = store.and_then(|store| {
+                store.save(&settings)?;
+                document
+                    .map(|document| save_recovery(&recovery_path(&store), &document))
+                    .transpose()
             });
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| this.finish_install(release, result, cx));
-        })
-        .detach();
+            let recovery = match prepared {
+                Ok(recovery) => recovery,
+                Err(error) => return Err(InstallError::Prepare(error, staged)),
+            };
+            if let Some(staged) = staged
+                && let Err(error) = staged.install()
+            {
+                return Err(InstallError::Install(error));
+            }
+            backend
+                .relaunch(recovery.is_some())
+                .map_err(InstallError::Restart)
+        };
+        self.inbox.spawn(install, move |editor, result, tx| {
+            editor.finish_install(release, result, tx)
+        });
     }
 
     fn finish_install(
         &mut self,
         release: Arc<Release>,
         result: Result<(), InstallError>,
-        cx: &mut Context<Self>,
+        tx: &mut Tx,
     ) {
         match result {
             Ok(()) => {
                 self.updates.phase = Phase::Idle;
-                cx.quit();
+                tx.quit();
             }
             Err(InstallError::Prepare(error, staged)) => {
                 let message = format!("Sniplet could not save your work first: {error}");
@@ -406,114 +393,87 @@ impl Editor {
             }
         }
         self.updates.notice_dismissed = false;
-        cx.notify();
     }
 
-    pub(crate) fn set_update_channel(&mut self, channel: ReleaseChannel, cx: &mut Context<Self>) {
-        if self.settings.update_channel == channel || self.updates.busy() {
+    /// A new channel drops what the old one found, and checks again.
+    pub(crate) fn set_update_channel(&mut self, channel: ReleaseChannel) {
+        if self.settings.update_channel == channel || self.updates.phase.busy() {
             return;
         }
         self.settings.update_channel = channel;
-        self.persist_settings(cx);
+        self.persist_settings();
         self.updates.generation += 1;
         self.updates.staged = None;
         self.updates.phase = Phase::Idle;
         self.updates.next_automatic = None;
-        self.check_for_updates(false, cx);
+        self.check_for_updates(false);
     }
 
-    pub(crate) fn dismiss_update_notice(&mut self, cx: &mut Context<Self>) {
-        self.updates.notice_dismissed = true;
-        cx.notify();
-    }
-
-    /// A notice over the canvas while an update is ready or failed to install.
-    pub(crate) fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A card over the canvas while an update is ready, installs, or failed to install.
+    pub(crate) fn render_update_notice(&self, p: &Palette) -> Option<El> {
         if self.updates.notice_dismissed {
             return None;
         }
-        let (title, description, icon, failed) = match &self.updates.phase {
+        let phase = &self.updates.phase;
+        let (title, description, glyph, failed) = match phase {
             Phase::Ready(release) => (
                 format!("Sniplet {} is ready", release.version),
                 "Sniplet restarts. Your screenshot and edits come back.".to_owned(),
-                "download",
+                &icons::DOWNLOAD,
                 false,
             ),
             Phase::Installing(release) => (
                 format!("Installing Sniplet {}…", release.version),
                 "Sniplet restarts when it is done.".to_owned(),
-                "download",
+                &icons::DOWNLOAD,
                 false,
             ),
             Phase::InstallFailed(_, error) | Phase::RestartFailed(_, error) => (
-                failure_title(&self.updates.phase).to_owned(),
+                failure_title(phase).to_owned(),
                 error.clone(),
-                "circle-alert",
+                &icons::CIRCLE_ALERT,
                 true,
             ),
             _ => return None,
         };
-        let installing = matches!(self.updates.phase, Phase::Installing(_));
-        let notice = div()
-            .id("update-notice")
-            .occlude()
-            .absolute()
-            .right(px(12.0))
-            .top(px(12.0))
-            .w(px(440.0))
-            .p_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_lg()
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(status_icon(icon, failed, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(note(description, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .flex_shrink_0()
-                    .child(
-                        Button::new("update-later")
-                            .ghost()
-                            .label("Later")
-                            .disabled(installing)
-                            .on_click(cx.listener(|this, _, _, cx| this.dismiss_update_notice(cx))),
-                    )
-                    .child(
-                        Button::new("update-restart")
-                            .primary()
-                            .label(if failed {
-                                "Try again"
-                            } else {
-                                "Restart & update"
-                            })
-                            .loading(installing)
-                            .disabled(installing)
-                            .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx))),
-                    ),
-            );
-        #[cfg(feature = "ui-tests")]
-        let notice = {
-            use gpui_kit::test::TestSupportExt;
-            notice.test_support()
-        };
-        Some(notice.into_any_element())
+        let installing = matches!(phase, Phase::Installing(_));
+        Some(
+            row()
+                .key("update-notice")
+                .pin(None, Some(12.0), Some(12.0), None)
+                .w(440.0)
+                .padding(12.0)
+                .gap(12.0)
+                .center_y()
+                .fill(p.popover)
+                .border(1.0, p.border)
+                .radius(8.0)
+                .shadow(8.0, 24.0, Color::BLACK.alpha(0.18))
+                .on_press(|_: &mut Editor| {})
+                .child(status_icon(p, glyph, failed))
+                .child(status_text(p, title, description))
+                .child(
+                    row()
+                        .gap(4.0)
+                        .child(
+                            Button::new("update-later")
+                                .label("Later")
+                                .disabled(installing)
+                                .build(p, |s: &mut Editor, _| s.updates.notice_dismissed = true),
+                        )
+                        .child(
+                            Button::new("update-restart")
+                                .primary()
+                                .label(if failed {
+                                    "Try again"
+                                } else {
+                                    "Restart & update"
+                                })
+                                .disabled(installing)
+                                .build(p, |s: &mut Editor, _| s.restart_to_update()),
+                        ),
+                ),
+        )
     }
 
     /// After Later, the app menu shows a dot and this row label until the update is used.
@@ -531,75 +491,97 @@ impl Editor {
         }
     }
 
-    pub(crate) fn show_update_notice(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn show_update_notice(&mut self) {
         self.panel = None;
         self.updates.notice_dismissed = false;
-        cx.notify();
+    }
+
+    pub(crate) fn update_summary(&self) -> UpdateSummary {
+        UpdateSummary {
+            version: self.updates.current.version.clone(),
+            channel: self.settings.update_channel,
+            automatic: self.settings.check_for_updates,
+            phase: self.updates.phase.clone(),
+            last_check: self.updates.last_check,
+        }
     }
 }
 
-/// Prevent edits after the recovery snapshot until replacement has finished.
-pub(crate) fn installing_screen(cx: &App) -> AnyElement {
-    div()
-        .id("update-installing")
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .p_6()
-        .bg(cx.theme().background)
-        .text_color(cx.theme().foreground)
-        .child("Installing update…")
-        .child(note(
-            "Sniplet saves your work and opens again after the update.",
-            cx,
-        ))
-        .into_any_element()
+/// The whole editor window while an update installs, so nothing changes after the recovery
+/// snapshot.
+pub(crate) fn installing_screen(p: &Palette) -> El {
+    col()
+        .key("update-installing")
+        .w_full()
+        .h_full()
+        .center()
+        .gap(12.0)
+        .padding(24.0)
+        .fill(p.background)
+        .child(text("Installing update…").font(BODY).color(p.foreground))
+        .child(
+            text("Sniplet saves your work and opens again after the update.")
+                .font(SMALL)
+                .color(p.muted_foreground),
+        )
 }
 
-pub(crate) fn settings_section(editor: &Entity<Editor>, cx: &App) -> AnyElement {
-    let editor_state = editor.read(cx);
-    let updates = &editor_state.updates;
-    let channel = editor_state.settings.update_channel;
-    let automatic = editor_state.settings.check_for_updates;
-    let current = format!(
-        "You have {}. Checking {}.",
-        updates.current.version,
-        channel.label()
-    );
-    let last_check = updates
+/// What the Settings window shows about updates. The editor owns the update state; Settings
+/// gets this copy whenever it changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct UpdateSummary {
+    /// The running version.
+    pub(crate) version: String,
+    pub(crate) channel: ReleaseChannel,
+    /// Check for updates automatically.
+    pub(crate) automatic: bool,
+    pub(crate) phase: Phase,
+    pub(crate) last_check: Option<Instant>,
+}
+
+// Settings receives the summary through its window's inbox, from the editor's thread.
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<UpdateSummary>()
+};
+
+/// The Updates section of Settings. Its buttons send their actions to the editor's inbox, so it
+/// works in any window's state `S`.
+pub(crate) fn settings_section<S: 'static>(
+    p: &Palette,
+    summary: &UpdateSummary,
+    editor: &Inbox<Editor>,
+) -> El {
+    let phase = &summary.phase;
+    let version = &summary.version;
+    let current = format!("You have {version}. Checking {}.", summary.channel.label());
+    let last_check = summary
         .last_check
         .map(|time| format!(" Last check: {}.", elapsed_label(time.elapsed())))
         .unwrap_or_default();
-    let phase = updates.phase.clone();
-    let checking = matches!(phase, Phase::Checking);
-    let transferring = updates.transferring();
-    let busy = updates.busy();
-    let (title, description, icon, failed): (String, String, &str, bool) = match &phase {
+    let (title, description, glyph, failed): (String, String, &'static Icon, bool) = match phase {
         Phase::Idle => (
-            format!("Sniplet {}", updates.current.version),
+            format!("Sniplet {version}"),
             format!("{current}{last_check}"),
-            "refresh-cw",
+            &icons::REFRESH_CW,
             false,
         ),
         Phase::Checking => (
             "Checking for updates…".into(),
             current.clone(),
-            "refresh-cw",
+            &icons::REFRESH_CW,
             false,
         ),
         Phase::UpToDate => (
             "No newer update is available".into(),
             format!("{current}{last_check}"),
-            "circle-check",
+            &icons::CIRCLE_CHECK,
             false,
         ),
         Phase::Available(release) => (
             format!("Sniplet {} is available", release.version),
             format!("{current} Size: {}.{last_check}", size_label(release.size)),
-            "download",
+            &icons::DOWNLOAD,
             false,
         ),
         Phase::Downloading(release) => (
@@ -608,172 +590,169 @@ pub(crate) fn settings_section(editor: &Entity<Editor>, cx: &App) -> AnyElement 
                 "Size: {}. You can use Sniplet while you wait.",
                 size_label(release.size)
             ),
-            "download",
+            &icons::DOWNLOAD,
             false,
         ),
         Phase::Ready(release) => (
             format!("Sniplet {} is ready", release.version),
             "Sniplet restarts. Your screenshot and edits come back.".into(),
-            "circle-check",
+            &icons::CIRCLE_CHECK,
             false,
         ),
         Phase::Installing(release) => (
             format!("Installing {}…", release.version),
             "Sniplet restarts when it is done.".into(),
-            "download",
+            &icons::DOWNLOAD,
             false,
         ),
         Phase::CheckFailed(error) => (
-            failure_title(&phase).into(),
+            failure_title(phase).into(),
             format!("Make sure that you are connected to the internet. Then try again. ({error})"),
-            "circle-alert",
+            &icons::CIRCLE_ALERT,
             true,
         ),
         Phase::DownloadFailed(_, error) => (
-            failure_title(&phase).into(),
+            failure_title(phase).into(),
             format!("Check your internet connection. Then try again. ({error})"),
-            "circle-alert",
+            &icons::CIRCLE_ALERT,
             true,
         ),
         Phase::InstallFailed(_, error) => (
-            failure_title(&phase).into(),
+            failure_title(phase).into(),
             format!("{current} Try again, or get the new version from the website. ({error})"),
-            "circle-alert",
+            &icons::CIRCLE_ALERT,
             true,
         ),
         Phase::RestartFailed(_, error) => (
-            failure_title(&phase).into(),
+            failure_title(phase).into(),
             format!("Close Sniplet and open it again to use the new version. ({error})"),
-            "circle-alert",
+            &icons::CIRCLE_ALERT,
             true,
         ),
     };
-    let action =
-        |id: &'static str, label: &'static str, run: fn(&mut Editor, &mut Context<Editor>)| {
-            let editor = editor.clone();
-            Button::new(id)
-                .label(label)
-                .on_click(move |_, _, cx| editor.update(cx, run))
-        };
-    let check: fn(&mut Editor, &mut Context<Editor>) =
-        |editor, cx| editor.check_for_updates(false, cx);
-    let download: fn(&mut Editor, &mut Context<Editor>) = Editor::download_update;
-    let install: fn(&mut Editor, &mut Context<Editor>) = Editor::restart_to_update;
-    let mut controls = div().flex().items_center().gap_2().flex_shrink_0();
-    if !transferring {
+    // A button that runs `run` on the editor.
+    let send = |run: fn(&mut Editor)| {
+        let editor = editor.clone();
+        move |_: &mut S, _: &mut Tx| editor.send(move |editor, _| run(editor))
+    };
+    let check: fn(&mut Editor) = |editor| editor.check_for_updates(false);
+    let download: fn(&mut Editor) = Editor::download_update;
+    let install: fn(&mut Editor) = Editor::restart_to_update;
+    let mut controls = row().gap(8.0).center_y();
+    if !phase.transferring() {
+        let checking = matches!(phase, Phase::Checking);
         controls = controls.child(
-            action("update-check", "Check now", check)
-                .ghost()
-                .icon(tool_icon("refresh-cw"))
-                .loading(checking)
-                .disabled(checking),
+            Button::new("update-check")
+                .icon(&icons::REFRESH_CW)
+                .label("Check now")
+                .disabled(checking)
+                .build(p, send(check)),
         );
     }
-    controls = match &phase {
-        Phase::Available(_) => controls.child(
-            action("update-download", "Download", download)
+    controls = match phase {
+        Phase::Available(_) | Phase::Downloading(_) => controls.child(
+            Button::new("update-download")
                 .primary()
-                .icon(tool_icon("download")),
+                .icon(&icons::DOWNLOAD)
+                .label("Download")
+                .disabled(matches!(phase, Phase::Downloading(_)))
+                .build(p, send(download)),
         ),
-        Phase::Downloading(_) => controls.child(
-            action("update-download", "Download", download)
-                .primary()
-                .loading(true)
-                .disabled(true),
+        Phase::DownloadFailed(..) => controls.child(
+            Button::new("update-download-retry")
+                .label("Try again")
+                .build(p, send(download)),
         ),
-        Phase::DownloadFailed(..) => {
-            controls.child(action("update-download-retry", "Try again", download))
-        }
         Phase::Ready(_) | Phase::Installing(_) => controls.child(
-            action("update-install", "Restart & update", install)
+            Button::new("update-install")
                 .primary()
-                .loading(matches!(phase, Phase::Installing(_)))
-                .disabled(matches!(phase, Phase::Installing(_))),
+                .label("Restart & update")
+                .disabled(matches!(phase, Phase::Installing(_)))
+                .build(p, send(install)),
         ),
         Phase::InstallFailed(..) => controls
             .child(
                 Button::new("update-website")
-                    .ghost()
-                    .icon(tool_icon("globe"))
+                    .icon(&icons::GLOBE)
                     .label("Open website")
-                    .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                    .build(p, |_: &mut S, tx: &mut Tx| {
+                        let _ = tx.open_url(RELEASES_URL);
+                    }),
             )
-            .child(action("update-install-retry", "Try again", install)),
-        Phase::RestartFailed(..) => {
-            controls.child(action("update-install-retry", "Restart", install))
-        }
+            .child(
+                Button::new("update-install-retry")
+                    .label("Try again")
+                    .build(p, send(install)),
+            ),
+        Phase::RestartFailed(..) => controls.child(
+            Button::new("update-install-retry")
+                .label("Restart")
+                .build(p, send(install)),
+        ),
         _ => controls,
     };
-    let channels = div().flex().gap_1().children(
+    let busy = phase.busy();
+    let channels = row().gap(4.0).children(
         [
             ("update-channel-stable", ReleaseChannel::Stable),
             ("update-channel-nightly", ReleaseChannel::Nightly),
         ]
-        .map(|(id, choice)| {
+        .map(|(key, choice)| {
             let editor = editor.clone();
-            Button::new(id)
-                .ghost()
+            Button::new(key)
                 .label(choice.label())
-                .selected(channel == choice)
+                .selected(summary.channel == choice)
                 .disabled(busy)
-                .on_click(move |_, _, cx| {
-                    editor.update(cx, |editor, cx| editor.set_update_channel(choice, cx))
+                .build(p, move |_: &mut S, _: &mut Tx| {
+                    editor.send(move |editor, _| editor.set_update_channel(choice))
                 })
         }),
     );
-    let toggle = {
+    let automatic = {
         let editor = editor.clone();
-        gpui_kit::component::switch::Switch::new("check-for-updates")
-            .checked(automatic)
-            .accessibility_label("Check for updates automatically")
-            .on_click(move |value: &bool, _, cx| {
-                let value = *value;
-                editor.update(cx, |editor, cx| {
-                    editor.settings.check_for_updates = value;
-                    editor.persist_settings(cx);
+        let on = summary.automatic;
+        rune_kit::Switch::new(on)
+            .label("Check for updates automatically")
+            .hide_label()
+            .on_toggle(move |_: &mut S| {
+                editor.send(move |editor, _| {
+                    editor.settings.check_for_updates = !on;
+                    editor.persist_settings();
                 })
             })
+            .build(&view::kit(p))
+            .key("check-for-updates")
     };
-    let status = div()
-        .id("update-status")
-        .test_support()
-        .p_4()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(status_icon(icon, failed, cx))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                .child(note(description, cx)),
-        )
-        .child(controls);
-    section(
+    view::section(
+        p,
         "Updates",
-        card(cx)
-            .child(status)
-            .child(divider(cx))
-            .child(row(
+        view::card(p)
+            .key("settings-updates")
+            .child(
+                row()
+                    .key("update-status")
+                    .padding(16.0)
+                    .gap(12.0)
+                    .center_y()
+                    .child(status_icon(p, glyph, failed))
+                    .child(status_text(p, title, description))
+                    .child(controls),
+            )
+            .child(view::rule(p))
+            .child(view::setting_row(
+                p,
                 "Update channel",
                 "Stable is tested. Nightly can have bugs. Switching channels never installs an older version.",
                 channels,
-                cx,
             ))
-            .child(divider(cx))
-            .child(row(
+            .child(view::rule(p))
+            .child(view::setting_row(
+                p,
                 "Check for updates automatically",
                 "One time each day. Sniplet asks before it installs.",
-                toggle,
-                cx,
+                automatic,
             )),
-        cx,
     )
-    .into_any_element()
 }
 
 fn failure_title(phase: &Phase) -> &'static str {
@@ -785,24 +764,31 @@ fn failure_title(phase: &Phase) -> &'static str {
     }
 }
 
-fn status_icon(name: &'static str, failed: bool, cx: &App) -> Div {
-    let color: Hsla = if failed {
-        cx.theme().danger
-    } else if name == "circle-check" {
-        cx.theme().success
+/// A status's title over its description, taking the row's spare width.
+fn status_text(p: &Palette, title: String, description: String) -> El {
+    col()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(text(title).font(SEMIBOLD).color(p.foreground).wrap())
+        .child(view::note(p, description))
+}
+
+/// The status's icon on a tinted square: red for failures, green for done, else the accent.
+fn status_icon(p: &Palette, glyph: &'static Icon, failed: bool) -> El {
+    let color = if failed {
+        p.danger
+    } else if std::ptr::eq(glyph, &icons::CIRCLE_CHECK) {
+        rgb(0x22c55e)
     } else {
-        rgb(crate::theme::ACCENT).into()
+        p.accent
     };
-    div()
-        .size(px(30.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .bg(color.opacity(0.16))
-        .text_color(color)
-        .child(tool_icon(name).size(px(16.0)))
+    el().size(30.0, 30.0)
+        .center()
+        .radius(8.0)
+        .fill(color.alpha(0.16))
+        .child(icon(glyph, 16.0).color(color))
 }
 
 fn size_label(bytes: u64) -> String {
@@ -836,11 +822,6 @@ fn save_recovery(project: &Path, document: &Document) -> anyhow::Result<PathBuf>
     Ok(project.to_owned())
 }
 
-fn remove_recovery(project: &Path) {
-    let _ = std::fs::remove_file(project.with_extension("png"));
-    let _ = std::fs::remove_file(project);
-}
-
 /// Open the screenshot saved before an update. Clear it after the app window opens.
 pub(crate) fn restore(store: &SettingsStore) -> anyhow::Result<Document> {
     let project = recovery_path(store);
@@ -849,15 +830,43 @@ pub(crate) fn restore(store: &SettingsStore) -> anyhow::Result<Document> {
 }
 
 pub(crate) fn clear_recovery(store: &SettingsStore) {
-    remove_recovery(&recovery_path(store));
+    let project = recovery_path(store);
+    let _ = std::fs::remove_file(project.with_extension("png"));
+    let _ = std::fs::remove_file(project);
 }
 
-#[cfg(all(test, feature = "ui-tests"))]
+type Scene = (&'static str, fn(&mut Editor));
+
+/// Headless scenes for `--snap --scene NAME`: the update card, the waiting app menu, and the
+/// install screen, with a made-up release.
+pub(crate) const SCENES: &[Scene] = &[
+    ("update-ready", |s| {
+        s.updates.phase = Phase::Ready(scene_release())
+    }),
+    ("update-failed", |s| {
+        s.updates.phase = Phase::InstallFailed(scene_release(), "Disk is full".into())
+    }),
+    ("update-waiting", |s| {
+        s.updates.phase = Phase::Ready(scene_release());
+        s.updates.notice_dismissed = true;
+        s.panel = Some(crate::editor::Panel::Menu);
+    }),
+    ("update-installing", |s| {
+        s.updates.phase = Phase::Installing(scene_release())
+    }),
+];
+
+fn scene_release() -> Arc<Release> {
+    Arc::new(Release {
+        version: "9.0.0".into(),
+        size: 6_400_000,
+        package: None,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_window::Page;
-    use gpui_kit::test::TestWindowExt;
-    use std::prelude::v1::test;
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -875,11 +884,7 @@ mod tests {
 
     impl Staged for FakeStaged {
         fn install(self: Box<Self>) -> anyhow::Result<()> {
-            self.0
-                .log
-                .lock()
-                .unwrap()
-                .push(format!("install {}", self.1));
+            self.0.record(format!("install {}", self.1));
             if self.0.fail_install.load(Ordering::SeqCst) {
                 anyhow::bail!("disk is full");
             }
@@ -889,17 +894,23 @@ mod tests {
 
     struct FakeBackend(Arc<Fake>);
 
+    impl Fake {
+        fn record(&self, entry: String) {
+            self.log.lock().unwrap().push(entry);
+        }
+
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.log.lock().unwrap())
+        }
+    }
+
     impl Backend for FakeBackend {
         fn check(
             &self,
             channel: ReleaseChannel,
             _: &BuildIdentity,
         ) -> anyhow::Result<Option<Release>> {
-            self.0
-                .log
-                .lock()
-                .unwrap()
-                .push(format!("check {}", channel.label()));
+            self.0.record(format!("check {}", channel.label()));
             if self.0.fail_check.load(Ordering::SeqCst) {
                 anyhow::bail!("offline");
             }
@@ -914,11 +925,7 @@ mod tests {
         }
 
         fn download(&self, release: &Release) -> anyhow::Result<Box<dyn Staged>> {
-            self.0
-                .log
-                .lock()
-                .unwrap()
-                .push(format!("download {}", release.version));
+            self.0.record(format!("download {}", release.version));
             Ok(Box::new(FakeStaged(
                 self.0.clone(),
                 release.version.clone(),
@@ -926,11 +933,7 @@ mod tests {
         }
 
         fn relaunch(&self, restore: bool) -> anyhow::Result<()> {
-            self.0
-                .log
-                .lock()
-                .unwrap()
-                .push(format!("relaunch {restore}"));
+            self.0.record(format!("relaunch {restore}"));
             if self.0.fail_restart.load(Ordering::SeqCst) {
                 anyhow::bail!("Could not start the new process");
             }
@@ -938,240 +941,212 @@ mod tests {
         }
     }
 
-    fn fixture(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Editor>, Arc<Fake>, PathBuf) {
-        let directory = std::env::temp_dir().join(format!(
-            "sniplet-updates-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let path = directory.join("settings.json");
+    /// An editor with an image, a fake backend, and settings in a new temporary folder.
+    fn fixture() -> (Editor, Arc<Fake>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
         let fake = Arc::new(Fake::default());
-        let (handle, editor) = cx.update(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(Default::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    let mut editor = Editor::new(
-                        Some(Document::new(image::RgbaImage::from_pixel(
-                            80,
-                            60,
-                            image::Rgba([20, 40, 60, 255]),
-                        ))),
-                        Default::default(),
-                        window,
-                        cx,
-                    );
-                    editor.settings_path = Some(path.clone());
-                    editor.updates = Updates::with_backend(Arc::new(FakeBackend(fake.clone())));
-                    editor
-                })
-            })
-            .unwrap()
-        });
-        (handle, editor, fake, path)
+        let mut editor = Editor::new(
+            Some(Document::new(image::RgbaImage::from_pixel(
+                80,
+                60,
+                image::Rgba([20, 40, 60, 255]),
+            ))),
+            Default::default(),
+            1.0,
+        );
+        editor.settings_path = Some(directory.path().join("settings.json"));
+        editor.updates = Updates::with_backend(Arc::new(FakeBackend(fake.clone())));
+        (editor, fake, directory)
     }
 
-    fn open_settings(
-        cx: &mut TestAppContext,
-        handle: AnyWindowHandle,
-        editor: &Entity<Editor>,
-    ) -> AnyWindowHandle {
-        handle
-            .update(cx, |_, window, cx| {
-                editor.update(cx, |editor, cx| {
-                    editor.open_settings(Page::General, window, cx)
-                })
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let settings = cx.read(|cx| editor.read(cx).settings_window.as_ref().unwrap().0);
-        settings
-            .update(cx, |_, window, cx| {
-                window.resize(size(px(900.0), px(710.0)));
-                window.scroll(
-                    ("settings-content", Page::General as usize),
-                    ScrollDelta::Pixels(point(px(0.0), px(-3000.0))),
-                    cx,
-                );
-            })
-            .unwrap();
-        settings
+    /// Run the editor's inbox with `tx` until its background work is done.
+    fn settle(editor: &mut Editor, tx: &mut Tx) {
+        for _ in 0..5000 {
+            Inbox::drain(editor, |editor| &editor.inbox, tx);
+            let updates = &editor.updates;
+            let running = updates.check_running
+                || matches!(updates.phase, Phase::Downloading(_) | Phase::Installing(_))
+                || editor.settings_save_running;
+            if !running {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the background work did not finish");
     }
 
-    fn log(fake: &Fake) -> Vec<String> {
-        std::mem::take(&mut *fake.log.lock().unwrap())
+    /// The Settings section in its own runtime, sending to `editor`'s inbox.
+    struct Section {
+        summary: UpdateSummary,
+        editor: Inbox<Editor>,
     }
 
-    #[gpui_kit::test]
-    fn a_channel_change_drops_the_old_result_and_locks_while_downloading(cx: &mut TestAppContext) {
-        let (handle, editor, fake, path) = fixture(cx);
-        let settings = open_settings(cx, handle, &editor);
+    fn section_view(s: &Section, _: &mut rune::Cx<Section>) -> El {
+        let p = Palette::new(true);
+        col()
+            .w_full()
+            .h_full()
+            .padding(16.0)
+            .fill(p.background)
+            .child(settings_section::<Section>(&p, &s.summary, &s.editor))
+    }
+
+    fn env() -> rune::Env {
+        rune::Env::new(true, 2.0)
+    }
+
+    fn click<S: 'static>(rt: &mut rune::Runtime<S>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("{key} is not shown"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn a_channel_change_drops_the_old_result_and_locks_while_downloading() {
+        let (mut editor, fake, directory) = fixture();
+        let mut settings = rune::Runtime::new(
+            Section {
+                summary: editor.update_summary(),
+                editor: editor.inbox.clone(),
+            },
+            section_view,
+            (900.0, 600.0),
+            env(),
+        );
+        settings.frame(0.0);
+        // Settings shows the editor's latest summary after each change.
+        let show = |editor: &mut Editor, settings: &mut rune::Runtime<Section>| {
+            let summary = editor.update_summary();
+            settings.update(|s, _| s.summary = summary);
+            settings.settle_all();
+            settings.frame(1.0 / 60.0);
+        };
+        let sync = |editor: &mut Editor, settings: &mut rune::Runtime<Section>| {
+            settle(editor, &mut Tx::default());
+            show(editor, settings);
+        };
+
         fake.fail_check.store(true, Ordering::SeqCst);
-        settings
-            .update(cx, |_, window, cx| window.click("update-check", cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(matches!(
-            cx.read(|cx| editor.read(cx).updates.phase.clone()),
-            Phase::CheckFailed(_)
-        ));
+        click(&mut settings, "update-check");
+        sync(&mut editor, &mut settings);
+        assert!(matches!(editor.updates.phase, Phase::CheckFailed(_)));
+
         fake.fail_check.store(false, Ordering::SeqCst);
-        settings
-            .update(cx, |_, window, cx| {
-                window.click("update-check", cx);
-                window.click("update-channel-nightly", cx);
-                assert!(matches!(editor.read(cx).updates.phase, Phase::Checking));
-            })
-            .unwrap();
-        cx.run_until_parked();
+        click(&mut settings, "update-check");
+        click(&mut settings, "update-channel-nightly");
+        Inbox::drain(&mut editor, |e| &e.inbox, &mut Tx::default());
+        assert!(matches!(editor.updates.phase, Phase::Checking));
+        sync(&mut editor, &mut settings);
         assert_eq!(
-            log(&fake),
+            fake.take(),
             ["check Stable", "check Stable", "check Nightly"]
         );
-        let Phase::Available(release) = cx.read(|cx| editor.read(cx).updates.phase.clone()) else {
+        let Phase::Available(release) = editor.updates.phase.clone() else {
             panic!("the Nightly check must show its release");
         };
         assert_eq!(release.version, "9.1.0-nightly.20261104.1");
-        settings
-            .update(cx, |_, window, cx| {
-                window.click("update-download", cx);
-                window.click("update-channel-stable", cx);
-                assert_eq!(
-                    editor.read(cx).settings.update_channel,
-                    ReleaseChannel::Nightly
-                );
-                assert!(window.try_find("update-check").is_none());
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(log(&fake), ["download 9.1.0-nightly.20261104.1"]);
-        assert!(cx.read(|cx| matches!(editor.read(cx).updates.phase, Phase::Ready(_))));
+
+        click(&mut settings, "update-download");
+        Inbox::drain(&mut editor, |e| &e.inbox, &mut Tx::default());
+        assert!(matches!(editor.updates.phase, Phase::Downloading(_)));
+        show(&mut editor, &mut settings);
+        assert!(
+            settings.find("update-check").is_none(),
+            "no check while downloading"
+        );
+        click(&mut settings, "update-channel-stable");
+        sync(&mut editor, &mut settings);
+        assert_eq!(editor.settings.update_channel, ReleaseChannel::Nightly);
+        assert_eq!(fake.take(), ["download 9.1.0-nightly.20261104.1"]);
+        assert!(matches!(editor.updates.phase, Phase::Ready(_)));
+        let store = SettingsStore::at(directory.path().join("settings.json"));
         assert_eq!(
-            SettingsStore::at(&path).load().unwrap().update_channel,
+            store.load().unwrap().update_channel,
             ReleaseChannel::Nightly
         );
-        handle
-            .update(cx, |_, window, cx| {
-                window.render_frame(cx);
-                assert!(window.find("update-notice").visible());
-            })
-            .unwrap();
-        settings
-            .update(cx, |_, window, cx| {
-                window.click("update-channel-stable", cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(log(&fake), ["check Stable"]);
-        let Phase::Available(release) = cx.read(|cx| editor.read(cx).updates.phase.clone()) else {
+        assert!(editor.render_update_notice(&Palette::new(true)).is_some());
+
+        click(&mut settings, "update-channel-stable");
+        sync(&mut editor, &mut settings);
+        assert_eq!(fake.take(), ["check Stable"]);
+        let Phase::Available(release) = editor.updates.phase.clone() else {
             panic!("a channel change must replace the ready Nightly update");
         };
         assert_eq!(release.version, "9.0.0");
-        handle
-            .update(cx, |_, window, cx| {
-                window.render_frame(cx);
-                assert!(window.try_find("update-notice").is_none());
-            })
-            .unwrap();
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert!(editor.render_update_notice(&Palette::new(true)).is_none());
     }
 
-    #[gpui_kit::test]
-    fn later_leaves_a_menu_dot_and_the_menu_brings_the_notice_back(cx: &mut TestAppContext) {
-        let (handle, editor, _, path) = fixture(cx);
-        handle
-            .update(cx, |_, _, cx| {
-                editor.update(cx, |editor, cx| editor.check_for_updates(true, cx))
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.read(|cx| matches!(editor.read(cx).updates.phase, Phase::Ready(_))));
-        handle
-            .update(cx, |_, window, cx| {
-                window.click("update-later", cx);
-                assert!(window.try_find("update-notice").is_none());
-                assert!(window.find("update-dot").visible());
-                window.click("app-menu", cx);
-                window.click("menu-update", cx);
-                window.render_frame(cx);
-                assert!(window.find("update-notice").visible());
-                assert!(window.try_find("update-dot").is_none());
-            })
-            .unwrap();
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    #[test]
+    fn later_leaves_a_menu_dot_and_the_menu_brings_the_notice_back() {
+        let (mut editor, _fake, _directory) = fixture();
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        assert!(matches!(editor.updates.phase, Phase::Ready(_)));
+        let mut rt = rune::Runtime::new(editor, crate::editor::view, (1280.0, 850.0), env());
+        rt.frame(0.0);
+        assert!(rt.find("update-notice").is_some());
+        click(&mut rt, "update-later");
+        assert!(rt.find("update-notice").is_none());
+        assert!(rt.find("update-dot").is_some());
+        click(&mut rt, "app-menu");
+        click(&mut rt, "menu-update");
+        assert!(rt.find("update-notice").is_some());
+        assert!(rt.find("update-dot").is_none());
+        assert!(rt.find("app-menu-popover").is_none());
     }
 
-    #[gpui_kit::test]
-    fn a_failed_install_keeps_the_document_and_a_retry_restarts_with_recovery(
-        cx: &mut TestAppContext,
-    ) {
-        let (handle, editor, fake, path) = fixture(cx);
-        let original = cx.read(|cx| editor.read(cx).export_pixels().unwrap());
-        handle
-            .update(cx, |_, _, cx| {
-                editor.update(cx, |editor, cx| {
-                    editor.settings.check_for_updates = false;
-                    editor.check_for_updates(true, cx);
-                })
-            })
-            .unwrap();
-        cx.run_until_parked();
-        log(&fake);
+    #[test]
+    fn a_failed_install_keeps_the_document_and_a_retry_restarts_with_recovery() {
+        let (mut editor, fake, directory) = fixture();
+        let store = SettingsStore::at(directory.path().join("settings.json"));
+        let original = editor.export_pixels().unwrap();
+        editor.settings.check_for_updates = false;
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        fake.take();
+        let mut rt = rune::Runtime::new(editor, crate::editor::view, (1280.0, 850.0), env());
+        rt.frame(0.0);
+        // Press the card's button, then let the install finish.
+        let restart = |rt: &mut rune::Runtime<Editor>| {
+            click(rt, "update-restart");
+            rt.update(settle);
+            rt.frame(1.0 / 60.0);
+        };
+
         fake.fail_install.store(true, Ordering::SeqCst);
-        handle
-            .update(cx, |_, window, cx| window.click("update-restart", cx))
-            .unwrap();
-        cx.run_until_parked();
-        let store = SettingsStore::at(&path);
-        assert_eq!(log(&fake), ["install 9.0.0"]);
-        assert!(matches!(
-            cx.read(|cx| editor.read(cx).updates.phase.clone()),
-            Phase::InstallFailed(..)
-        ));
-        assert_eq!(
-            cx.read(|cx| editor.read(cx).export_pixels().unwrap()),
-            original
-        );
+        restart(&mut rt);
+        assert_eq!(fake.take(), ["install 9.0.0"]);
+        assert!(matches!(rt.state.updates.phase, Phase::InstallFailed(..)));
+        assert_eq!(rt.state.export_pixels().unwrap(), original);
         assert!(!store.load().unwrap().check_for_updates);
         assert!(recovery_path(&store).exists());
 
         fake.fail_install.store(false, Ordering::SeqCst);
-        handle
-            .update(cx, |_, window, cx| window.click("update-restart", cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(log(&fake), ["download 9.0.0"]);
+        restart(&mut rt);
+        assert_eq!(fake.take(), ["download 9.0.0"]);
         fake.fail_restart.store(true, Ordering::SeqCst);
-        handle
-            .update(cx, |_, window, cx| window.click("update-restart", cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(log(&fake), ["install 9.0.0", "relaunch true"]);
+        restart(&mut rt);
+        assert_eq!(fake.take(), ["install 9.0.0", "relaunch true"]);
         assert!(recovery_path(&store).exists());
-        assert!(cx.read(|cx| matches!(editor.read(cx).updates.phase, Phase::RestartFailed(..))));
+        assert!(matches!(rt.state.updates.phase, Phase::RestartFailed(..)));
+        assert_eq!(rt.shell_request, None);
+
         // Edits made after a failed restart must replace the earlier snapshot.
-        handle
-            .update(cx, |_, _, cx| {
-                editor.update(cx, |editor, cx| {
-                    editor
-                        .document
-                        .as_mut()
-                        .unwrap()
-                        .set_crop(sniplet_core::ImageRect::new(0.0, 0.0, 30.0, 20.0));
-                    cx.notify();
-                });
-            })
-            .unwrap();
-        let latest = cx.read(|cx| editor.read(cx).export_pixels().unwrap());
+        rt.update(|editor, _| {
+            editor
+                .document
+                .as_mut()
+                .unwrap()
+                .set_crop(sniplet_core::ImageRect::new(0.0, 0.0, 30.0, 20.0));
+        });
+        let latest = rt.state.export_pixels().unwrap();
         assert_ne!(latest.dimensions(), original.dimensions());
         fake.fail_restart.store(false, Ordering::SeqCst);
-        handle
-            .update(cx, |_, window, cx| window.click("update-restart", cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(log(&fake), ["relaunch true"]);
+        rt.frame(1.0 / 60.0);
+        restart(&mut rt);
+        assert_eq!(fake.take(), ["relaunch true"]);
+        assert_eq!(rt.shell_request, Some(rune::Shell::Quit));
         let restored = restore(&store).unwrap();
         assert_eq!(
             restored.render(&crate::editor::render_options()).unwrap(),
@@ -1181,24 +1156,5 @@ mod tests {
         assert!(!recovery_path(&store).exists());
         assert!(!recovery_path(&store).with_extension("png").exists());
         assert!(restore(&store).is_err());
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn update_icons_are_bundled() {
-        for icon in [
-            "download",
-            "refresh-cw",
-            "circle-check",
-            "circle-alert",
-            "globe",
-        ] {
-            assert!(
-                AssetSource::load(&gpui_kit::assets::AllAssets, &format!("icons/{icon}.svg"))
-                    .unwrap()
-                    .is_some(),
-                "{icon}"
-            );
-        }
     }
 }

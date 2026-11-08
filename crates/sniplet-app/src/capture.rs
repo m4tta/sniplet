@@ -1,12 +1,20 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+//! Screen, window, delayed and scrolling captures, and pinned images. Area selection lives in
+//! `area_capture`, and the window picker in `window_picker`.
+use std::{sync::Arc, time::Duration};
 
-use gpui_kit::{prelude::*, *};
+use image::RgbaImage;
+use rune::{
+    Color, Cursor, Cx, El, Key, KeyEvent, Pixels, SurfaceFit, Tx, WheelEvent, WindowOptions, el,
+    icon, row, text,
+};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
 
-use crate::editor::{Command, Editor, display_image};
+use crate::{
+    capture_overlay::{self, WindowState},
+    editor::{Command, Editor},
+    shell::{self, EscapeSession},
+    ui::{BODY, Inbox, icons},
+};
 
 pub struct CaptureRequest {
     pub command: Command,
@@ -31,161 +39,218 @@ impl CaptureTarget {
     }
 }
 
-pub fn start(
-    request: CaptureRequest,
-    editor: Entity<Editor>,
-    window: &mut Window,
-    cx: &mut Context<Editor>,
-) -> Result<(), String> {
-    if matches!(
-        request.command,
-        Command::Area | Command::AddCapture | Command::CaptureOcr | Command::Repeat
-    ) {
-        return crate::area_capture::start(
-            request.command,
-            request.last_capture,
-            editor,
-            window,
-            cx,
-        );
-    }
-    let capture_started = Instant::now();
-    let trace_capture = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
+/// What the capture worker hands back: the frame, a stitched manual scrolling capture, or
+/// the screen as a document.
+type Captured = (
+    sniplet_platform::CapturedFrame,
+    Option<Stitched>,
+    Option<Document>,
+);
+type Stitched = (Vec<Arc<RgbaImage>>, sniplet_core::Result<Document>, u64);
+
+/// Start the capture `request` names. Results reach the editor through its inbox.
+pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String> {
     let CaptureRequest {
         command,
         monitor,
         region,
-        ..
+        last_capture,
     } = request;
-    let handle = window.window_handle();
-    let escape = crate::runtime::begin_escape_session(cx);
-    let manual_region = if matches!(command, Command::ManualScroll) {
-        region
-    } else {
-        None
-    };
-    let manual = manual_region.map(|rect| {
-        let current = editor.read(cx);
-        (rect, current.scroll_frames.clone(), current.load_revision)
-    });
+    if matches!(
+        command,
+        Command::Area | Command::AddCapture | Command::CaptureOcr | Command::Repeat
+    ) {
+        return crate::area_capture::start(command, last_capture, editor);
+    }
+    let escape = shell::begin_escape_session();
+    let manual = region
+        .filter(|_| matches!(command, Command::ManualScroll))
+        .map(|rect| (rect, editor.scroll_frames.clone(), editor.load_revision));
     let target = CaptureTarget::for_command(command, monitor);
-    let hide_delay = crate::runtime::hide_for_capture(window);
-    cx.spawn(async move |_, cx| {
-        if trace_capture { eprintln!("capture: task started in {:?}", capture_started.elapsed()); }
-        let delay = if matches!(command, Command::Delayed) { Duration::from_secs(3) } else { hide_delay };
-        if !delay.is_zero() { cx.background_executor().timer(delay).await; }
-        if escape.is_cancelled() {
-            cx.update(|cx| {
-                crate::runtime::end_escape_session(&escape, cx);
-            });
-            return;
-        }
-        let frame = cx.background_executor().spawn(async move {
-            if trace_capture { eprintln!("capture: backend started in {:?}", capture_started.elapsed()); }
-            let mut frame = match target {
-                CaptureTarget::UnderPointer => sniplet_platform::capture_monitor_under_pointer(),
-                CaptureTarget::Monitor(index) => sniplet_platform::capture_monitor(index),
-            }?;
-            let stitched = manual.map(|(rect, mut frames, revision)| {
-                frames.push(Arc::new(crop_image(&frame.image, rect)));
-                let refs = frames.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                let result = sniplet_core::stitch_vertical_refs(&refs, Default::default()).map(Document::new);
-                (frames, result, revision)
-            });
-            let document = matches!(command, Command::Screen | Command::Delayed)
-                .then(|| Document::new(std::mem::take(&mut frame.image)));
-            Ok::<_, sniplet_platform::PlatformError>((frame, stitched, document))
-        }).await;
-        if trace_capture { eprintln!("capture: pixels ready in {:?}", capture_started.elapsed()); }
-        cx.update(|cx| {
-            if escape.is_cancelled() {
-                crate::runtime::end_escape_session(&escape, cx);
-                return;
+    let hide_delay = shell::hide_for_capture();
+    let delay = if matches!(command, Command::Delayed) {
+        Duration::from_secs(3)
+    } else {
+        hide_delay
+    };
+    let screen = matches!(command, Command::Screen | Command::Delayed);
+    let session = escape.clone();
+    editor.inbox.spawn(
+        move || {
+            std::thread::sleep(delay);
+            if session.is_cancelled() {
+                return None;
             }
-            match frame {
-            Ok((frame, stitched, document)) => {
-                if let Some((frames, result, revision)) = stitched {
-                    editor.update(cx, |this, cx| {
-                        if this.load_revision != revision { return; }
+            Some((|| {
+                let mut frame = match target {
+                    CaptureTarget::UnderPointer => sniplet_platform::capture_monitor_under_pointer(),
+                    CaptureTarget::Monitor(index) => sniplet_platform::capture_monitor(index),
+                }?;
+                let stitched = manual.map(|(rect, mut frames, revision)| {
+                    frames.push(Arc::new(crop_image(&frame.image, rect)));
+                    let refs = frames.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                    let result = sniplet_core::stitch_vertical_refs(&refs, Default::default())
+                        .map(Document::new);
+                    (frames, result, revision)
+                });
+                let document = screen.then(|| Document::new(std::mem::take(&mut frame.image)));
+                Ok::<Captured, sniplet_platform::PlatformError>((frame, stitched, document))
+            })())
+        },
+        move |editor, result, _| {
+            let Some(result) = result.filter(|_| !escape.is_cancelled()) else {
+                shell::end_escape_session(&escape);
+                return;
+            };
+            match result {
+                Ok((frame, Some((frames, result, revision)), _)) => {
+                    if editor.load_revision == revision {
                         match result {
                             Ok(document) => {
                                 let count = frames.len();
-                                this.scroll_frames = frames;
-                                copy_capture_if_enabled(this, &document, cx);
-                                this.load(document, &format!("Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"), cx);
-                                this.set_measure_scale(frame.scale_factor);
-                            },
-                            Err(error) => { this.status = format!("Could not stitch frame: {error}. Scroll less so frames overlap."); cx.notify(); },
-                        }
-                    });
-                    crate::runtime::end_escape_session(&escape, cx);
-                    restore(handle, cx);
-                } else if matches!(command, Command::Screen | Command::Delayed) {
-                    if trace_capture {
-                        eprintln!("capture: screen source={:?}; image={:?}; origin={:?}; scale={}", frame.source, document.as_ref().unwrap().original().dimensions(), frame.origin, frame.scale_factor);
-                    }
-                    editor.update(cx, |this, cx| {
-                        let document = document.unwrap();
-                        copy_capture_if_enabled(this, &document, cx);
-                        this.load(document, "Screen captured", cx);
-                        this.set_measure_scale(frame.scale_factor);
-                    });
-                    crate::runtime::end_escape_session(&escape, cx);
-                    restore(handle, cx);
-                    if trace_capture {
-                        eprintln!("capture: screen editor loaded in {:?}", capture_started.elapsed());
-                        let _ = handle.update(cx, |_, window, _| {
-                            window.on_next_frame(move |_, _| eprintln!("capture: screen first frame in {:?}", capture_started.elapsed()));
-                        });
-                    }
-                } else {
-                    let (bounds, display_id) =
-                        crate::capture_overlay::captured_frame_placement(&frame, cx);
-                    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: None, kind: WindowKind::PopUp,
-                        is_movable: false, is_resizable: false, is_minimizable: false, display_id, show: !cfg!(target_os = "macos"), ..Default::default() };
-                    let overlay_escape = escape.clone();
-                    match gpui_kit::open_window(options, cx, |window, cx| {
-                        #[cfg(target_os = "macos")]
-                        crate::macos::prepare_capture_overlay(window, display_id);
-                        window.set_window_title("Sniplet — Capture area");
-                        cx.new(|cx| Overlay::new(frame, editor, handle, command, overlay_escape, window, cx))
-                    }) {
-                        Ok((overlay, _)) => {
-                            crate::runtime::attach_escape_window(&escape, overlay, cx);
-                            let _ = overlay.update(cx, |_, window, _| window.activate_window());
-                            if trace_capture {
-                                let _ = overlay.update(cx, |_, window, _| {
-                                    eprintln!("capture: overlay created in {:?}; requested={bounds:?}; actual={:?}; viewport={:?}", capture_started.elapsed(), window.bounds(), window.viewport_size());
-                                    #[cfg(target_os = "macos")]
-                                    crate::macos::trace_capture_geometry(window);
-                                    window.on_next_frame(move |_, _| eprintln!("capture: next display frame in {:?}", capture_started.elapsed()));
-                                });
+                                editor.scroll_frames = frames;
+                                copy_capture_if_enabled(editor, &document);
+                                editor.load(
+                                    document,
+                                    &format!(
+                                        "Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"
+                                    ),
+                                );
+                                editor.set_measure_scale(frame.scale_factor);
                             }
-                        }
-                        Err(error) => {
-                            eprintln!("Could not open capture overlay: {error}");
-                            crate::runtime::end_escape_session(&escape, cx);
-                            restore(handle, cx);
+                            Err(error) => {
+                                editor.status = format!(
+                                    "Could not stitch frame: {error}. Scroll less so frames overlap."
+                                )
+                            }
                         }
                     }
                 }
+                Ok((frame, None, Some(document))) => {
+                    copy_capture_if_enabled(editor, &document);
+                    editor.load(document, "Screen captured");
+                    editor.set_measure_scale(frame.scale_factor);
+                }
+                Ok((frame, None, None)) => {
+                    // Scrolling captures start by selecting the area that scrolls.
+                    crate::area_capture::open_scroll(frame, command, &editor.inbox, &escape);
+                    return;
+                }
+                Err(error) => editor.status = error.to_string(),
             }
-            Err(error) => {
-                editor.update(cx, |this, cx| { this.status = error.to_string(); cx.notify(); });
-                crate::runtime::end_escape_session(&escape, cx);
-                restore(handle, cx);
-            },
-        }
-        });
-    }).detach();
+            shell::end_escape_session(&escape);
+            shell::show_editor();
+        },
+    );
     Ok(())
 }
 
-pub fn active_window(
-    editor: &Editor,
-    window: &mut Window,
-    cx: &mut Context<Editor>,
-) -> Result<(), String> {
+/// The area a scrolling capture selected, in pixels of the monitor image `source`.
+pub(crate) struct ScrollSelection<'a> {
+    pub command: Command,
+    pub monitor: usize,
+    pub scale_factor: f32,
+    pub source: &'a RgbaImage,
+    pub rect: ImageRect,
+}
+
+/// The scrolling area is selected: scroll and stitch it automatically, or keep the first
+/// frame of a manual scrolling capture.
+pub(crate) fn scroll_selected(
+    selection: ScrollSelection,
+    editor: &Inbox<Editor>,
+    escape: &EscapeSession,
+) {
+    let ScrollSelection {
+        command,
+        monitor,
+        scale_factor,
+        source,
+        rect,
+    } = selection;
+    let Some(rect) = physical_capture_rect(rect, source.width(), source.height()) else {
+        return;
+    };
+    let escape = escape.clone();
+    if !matches!(command, Command::Scroll | Command::ScrollUp) {
+        let document = Document::new(crop_image(source, rect));
+        editor.send(move |editor, _| {
+            copy_capture_if_enabled(editor, &document);
+            editor.scroll_region = Some(rect);
+            editor.scroll_frames = vec![document.shared_original()];
+            editor.load(
+                document,
+                "Scrolling capture · scroll the source, then choose Append scrolling frame from the Sniplet menu",
+            );
+            editor.set_measure_scale(scale_factor);
+            shell::show_editor();
+            shell::end_escape_session(&escape);
+        });
+        return;
+    }
+    // The overlays are closing; Escape still stops the scrolling.
+    shell::detach_escape_window(&escape);
+    editor.send(move |editor, _| {
+        let settings = &editor.settings;
+        let mut options = sniplet_platform::AutomaticScrollOptions {
+            max_frames: settings.scroll_max_frames.clamp(2, 200),
+            settle_delay: Duration::from_millis(settings.scroll_settle_ms.clamp(100, 700)),
+            ..Default::default()
+        };
+        if matches!(command, Command::ScrollUp) {
+            options.scroll_clicks = -options.scroll_clicks;
+        }
+        let cancel = escape.cancellation().clone();
+        editor.inbox.spawn(
+            move || {
+                // Let the overlays leave the screen before the first frame.
+                std::thread::sleep(Duration::from_millis(220));
+                sniplet_platform::capture_scrolling_region(
+                    monitor,
+                    rect.x as u32,
+                    rect.y as u32,
+                    rect.width as u32,
+                    rect.height as u32,
+                    options,
+                    &cancel,
+                )
+                .map(|capture| {
+                    (
+                        Document::new(capture.image),
+                        capture.frame_count,
+                        capture.stop,
+                    )
+                })
+            },
+            move |editor, result, _| {
+                let cancelled = escape.is_cancelled();
+                shell::end_escape_session(&escape);
+                if cancelled {
+                    return;
+                }
+                match result {
+                    Ok((document, frame_count, stop)) => {
+                        copy_capture_if_enabled(editor, &document);
+                        editor.load(
+                            document,
+                            &format!("Scrolling capture · {frame_count} frames · {stop:?}"),
+                        );
+                        editor.set_measure_scale(scale_factor);
+                    }
+                    Err(error) => {
+                        editor.status = format!(
+                            "Scrolling capture failed: {error}. Try manual scrolling from the Sniplet menu."
+                        )
+                    }
+                }
+                shell::show_editor();
+            },
+        );
+    });
+}
+
+/// Capture the focused window of another app.
+pub fn active_window(editor: &mut Editor) -> Result<(), String> {
     let windows = sniplet_platform::list_windows().map_err(|error| error.to_string())?;
     let active = windows
         .into_iter()
@@ -194,96 +259,55 @@ pub fn active_window(
                 && (cfg!(target_os = "macos") || candidate.process_id != std::process::id())
         })
         .ok_or_else(|| "No focused window is available for capture".to_owned())?;
-    let id = active.id;
-    #[cfg(target_os = "macos")]
-    let id = if active.process_id == std::process::id() {
-        // xcap marks every window of the active Mac app as focused. A system
-        // capture-status window can sit above the editor, so use its native ID.
-        crate::macos::capture_window_id(window).unwrap_or(id)
-    } else {
-        id
-    };
-    self::window(id, editor, window, cx);
+    window(active.id, editor);
     Ok(())
 }
 
-pub fn window(id: u32, editor: &Editor, window: &mut Window, cx: &mut Context<Editor>) {
+/// Capture the window `id` with the window capture style from Settings.
+pub(crate) fn window(id: u32, editor: &mut Editor) {
     let style = editor.settings.window_capture.clone();
-    let editor = cx.entity();
-    let handle = window.window_handle();
-    let escape = crate::runtime::begin_escape_session(cx);
-    let hide_delay = crate::runtime::hide_for_capture(window);
-    cx.spawn(async move |_, cx| {
-        if !hide_delay.is_zero() {
-            cx.background_executor().timer(hide_delay).await;
-        }
-        if escape.is_cancelled() {
-            cx.update(|cx| {
-                crate::runtime::end_escape_session(&escape, cx);
-            });
-            return;
-        }
-        let frame = cx
-            .background_executor()
-            .spawn(async move {
-                let (frame, warning) =
-                    sniplet_platform::capture_window_with_background(id, &style)?;
-                if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
-                    eprintln!(
-                        "window capture: captured id={id}; image={:?}; origin={:?}",
-                        frame.image.dimensions(),
-                        frame.origin
-                    );
-                }
-                Ok::<_, sniplet_platform::PlatformError>((
-                    Document::new(frame.image),
-                    frame.scale_factor,
-                    warning,
-                ))
+    let escape = shell::begin_escape_session();
+    let delay = shell::hide_for_capture();
+    let session = escape.clone();
+    editor.inbox.spawn(
+        move || {
+            std::thread::sleep(delay);
+            (!session.is_cancelled()).then(|| {
+                sniplet_platform::capture_window_with_background(id, &style).map(
+                    |(frame, warning)| (Document::new(frame.image), frame.scale_factor, warning),
+                )
             })
-            .await;
-        cx.update(|cx| {
-            if escape.is_cancelled() {
-                crate::runtime::end_escape_session(&escape, cx);
+        },
+        move |editor, result, _| {
+            let Some(result) = result.filter(|_| !escape.is_cancelled()) else {
+                shell::end_escape_session(&escape);
                 return;
-            }
-            editor.update(cx, |this, cx| match frame {
+            };
+            match result {
                 Ok((document, scale_factor, warning)) => {
-                    copy_capture_if_enabled(this, &document, cx);
-                    this.load(
-                        document,
-                        warning.as_deref().unwrap_or("Window captured"),
-                        cx,
-                    );
-                    this.set_measure_scale(scale_factor);
+                    copy_capture_if_enabled(editor, &document);
+                    editor.load(document, warning.as_deref().unwrap_or("Window captured"));
+                    editor.set_measure_scale(scale_factor);
                 }
-                Err(error) => {
-                    this.status = error.to_string();
-                    cx.notify();
-                }
-            });
-            crate::runtime::end_escape_session(&escape, cx);
-            restore(handle, cx);
-        });
-    })
-    .detach();
+                Err(error) => editor.status = error.to_string(),
+            }
+            shell::end_escape_session(&escape);
+            shell::show_editor();
+        },
+    );
 }
 
-pub(crate) fn restore(handle: AnyWindowHandle, cx: &mut App) {
-    let _ = handle.update(cx, |_, w, cx| crate::runtime::show_editor(w, cx));
-}
-
-pub(crate) fn copy_capture_if_enabled(editor: &Editor, document: &Document, cx: &App) {
+/// Copy a new capture's original pixels when Settings asks for it.
+pub(crate) fn copy_capture_if_enabled(editor: &Editor, document: &Document) {
     if editor.settings.auto_copy {
-        crate::clipboard_jobs::copy(
-            crate::clipboard_jobs::Source::Original(document.clone()),
-            cx,
-        )
-        .detach();
+        editor.inbox.spawn(
+            crate::clipboard_jobs::copy(crate::clipboard_jobs::Source::Original(document.clone())),
+            |_, _, _| {},
+        );
     }
 }
 
-fn crop_image(image: &image::RgbaImage, rect: ImageRect) -> image::RgbaImage {
+fn crop_image(image: &RgbaImage, rect: ImageRect) -> RgbaImage {
     let rect = rect.clipped(image.width(), image.height());
     let x = rect.x.floor() as u32;
     let y = rect.y.floor() as u32;
@@ -292,6 +316,7 @@ fn crop_image(image: &image::RgbaImage, rect: ImageRect) -> image::RgbaImage {
     image::imageops::crop_imm(image, x, y, width, height).to_image()
 }
 
+/// `rect` rounded outward to whole pixels inside a `width` × `height` image.
 fn physical_capture_rect(rect: ImageRect, width: u32, height: u32) -> Option<ImageRect> {
     let rect = rect.clipped(width, height);
     let left = rect.x.floor();
@@ -301,6 +326,7 @@ fn physical_capture_rect(rect: ImageRect, width: u32, height: u32) -> Option<Ima
     (right > left && bottom > top).then(|| ImageRect::new(left, top, right - left, bottom - top))
 }
 
+/// The end of a Shift drag: a square along the longest drag axis.
 pub(crate) fn square_end(start: ImagePoint, end: ImagePoint) -> ImagePoint {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
@@ -308,497 +334,202 @@ pub(crate) fn square_end(start: ImagePoint, end: ImagePoint) -> ImagePoint {
     ImagePoint::new(start.x + side.copysign(dx), start.y + side.copysign(dy))
 }
 
-struct Overlay {
-    source: image::RgbaImage,
-    image: Arc<RenderImage>,
-    editor: Entity<Editor>,
-    editor_window: AnyWindowHandle,
-    command: Command,
-    monitor: usize,
-    scale_factor: f32,
-    escape: crate::runtime::EscapeSession,
-    start: Option<ImagePoint>,
-    end: ImagePoint,
-    focus: FocusHandle,
-    preserve_escape_on_release: bool,
-}
-
-impl Overlay {
-    fn new(
-        frame: sniplet_platform::CapturedFrame,
-        editor: Entity<Editor>,
-        editor_window: AnyWindowHandle,
-        command: Command,
-        escape: crate::runtime::EscapeSession,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let monitor = match frame.source {
-            sniplet_platform::CaptureSource::Monitor { index, .. }
-            | sniplet_platform::CaptureSource::MonitorRegion { index, .. } => index,
-            sniplet_platform::CaptureSource::Window { .. } => {
-                unreachable!("area overlays use monitor captures")
-            }
-        };
-        let source = frame.image;
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        cx.on_release(|overlay, cx| {
-            if !overlay.preserve_escape_on_release {
-                crate::runtime::cancel_escape_session(&overlay.escape, cx);
-            }
-        })
-        .detach();
-        Self {
-            image: display_image(source.clone()),
-            source,
-            editor,
-            editor_window,
-            monitor,
-            scale_factor: frame.scale_factor,
-            command,
-            escape,
-            start: None,
-            end: ImagePoint::default(),
-            focus,
-            preserve_escape_on_release: false,
-        }
-    }
-
-    fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(start) = self.start else {
-            return;
-        };
-        let size = window.viewport_size();
-        let rect = ImageRect::from_corners(start, self.end);
-        if rect.width < 2.0 || rect.height < 2.0 {
-            return;
-        }
-        let sx = self.source.width() as f32 / f32::from(size.width);
-        let sy = self.source.height() as f32 / f32::from(size.height);
-        let rect = ImageRect::new(rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy);
-        let Some(rect) = physical_capture_rect(rect, self.source.width(), self.source.height())
-        else {
-            return;
-        };
-        let image = crop_image(&self.source, rect);
-        if matches!(self.command, Command::Scroll | Command::ScrollUp) {
-            let settings = &self.editor.read(cx).settings;
-            let mut options = sniplet_platform::AutomaticScrollOptions {
-                max_frames: settings.scroll_max_frames.clamp(2, 200),
-                settle_delay: Duration::from_millis(settings.scroll_settle_ms.clamp(100, 700)),
-                ..Default::default()
-            };
-            if matches!(self.command, Command::ScrollUp) {
-                options.scroll_clicks = -options.scroll_clicks;
-            }
-            let scale_factor = self.scale_factor;
-            self.preserve_escape_on_release = true;
-            crate::runtime::detach_escape_window(&self.escape, cx);
-            let escape = self.escape.clone();
-            let cancel = escape.cancellation().clone();
-            let editor = self.editor.clone();
-            let handle = self.editor_window;
-            let monitor = self.monitor;
-            window.remove_window();
-            cx.spawn(async move |_, cx| {
-                cx.background_executor().timer(Duration::from_millis(220)).await;
-                let result = cx.background_executor().spawn(async move {
-                    sniplet_platform::capture_scrolling_region(monitor, rect.x as u32, rect.y as u32, rect.width as u32, rect.height as u32, options, &cancel)
-                        .map(|capture| (Document::new(capture.image), capture.frame_count, capture.stop))
-                }).await;
-                cx.update(|cx| {
-                    let cancelled = escape.is_cancelled();
-                    crate::runtime::end_escape_session(&escape, cx);
-                    if cancelled {
-                        return;
-                    }
-                    editor.update(cx, |editor, cx| match result { Ok((document, frame_count, stop)) => {
-                        copy_capture_if_enabled(editor, &document, cx);
-                        editor.load(document, &format!("Scrolling capture · {} frames · {:?}", frame_count, stop), cx);
-                        editor.set_measure_scale(scale_factor);
-                    }, Err(error) => { editor.status = format!("Scrolling capture failed: {error}. Try manual scrolling from the Sniplet menu."); cx.notify(); } });
-                    restore(handle, cx);
-                });
-            }).detach();
-            return;
-        }
-        let command = self.command;
-        let scroll = matches!(command, Command::Scroll | Command::ManualScroll);
-        let append = matches!(command, Command::AddCapture);
-        let recognize = matches!(command, Command::CaptureOcr);
-        let editor = self.editor.clone();
-        let scale_factor = self.scale_factor;
-        let updated = self.editor_window.update(cx, |_, editor_window, cx| {
-            editor.update(cx, |editor, cx| {
-                let document = Document::new(image);
-                copy_capture_if_enabled(editor, &document, cx);
-                if scroll {
-                    editor.scroll_region = Some(rect);
-                    editor.scroll_frames = vec![document.shared_original()];
-                } else {
-                    editor.scroll_region = None;
-                    editor.scroll_frames.clear();
-                }
-                if append {
-                    editor.add_image(document.original().clone(), "Added capture", true, cx);
-                } else {
-                    editor.load(
-                        document,
-                        if scroll {
-                            "Scrolling capture · scroll the source, then choose Append scrolling frame from the Sniplet menu"
-                        } else {
-                            "Area captured"
-                        },
-                        cx,
-                    );
-                    editor.set_measure_scale(scale_factor);
-                    if recognize {
-                        editor.command(Command::Ocr, editor_window, cx);
-                    }
-                }
-            });
-            crate::runtime::show_editor(editor_window, cx);
-        });
-        if updated.is_err() {
-            return;
-        }
-        crate::runtime::end_escape_session(&self.escape, cx);
-        window.remove_window();
-    }
-
-    fn cancel(&self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::runtime::cancel_escape_session(&self.escape, cx);
-        window.remove_window();
-    }
-}
-
-impl Render for Overlay {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let size = window.viewport_size();
-        let width = f32::from(size.width);
-        let height = f32::from(size.height);
-        let rect = self
-            .start
-            .map(|start| ImageRect::from_corners(start, self.end));
-        let mut overlay = div()
-            .id("capture-overlay")
-            .relative()
-            .size_full()
-            .track_focus(&self.focus)
-            .cursor_crosshair()
-            .child(img(self.image.clone()).absolute().inset_0().size_full())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    this.start = Some(ImagePoint::new(e.position.x.into(), e.position.y.into()));
-                    this.end = this.start.unwrap();
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                let end = ImagePoint::new(e.position.x.into(), e.position.y.into());
-                this.end = if e.modifiers.shift {
-                    this.start.map_or(end, |start| square_end(start, end))
-                } else {
-                    end
-                };
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, w, cx| this.finish(w, cx)),
-            )
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
-                if e.keystroke.key == "escape" {
-                    this.cancel(w, cx);
-                } else if e.keystroke.key == "enter" {
-                    this.finish(w, cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _, window, cx| this.cancel(window, cx)),
-            );
-        if let Some(rect) = rect {
-            for (x, y, w, h) in [
-                (0.0, 0.0, width, rect.y),
-                (
-                    0.0,
-                    rect.y + rect.height,
-                    width,
-                    height - rect.y - rect.height,
-                ),
-                (0.0, rect.y, rect.x, rect.height),
-                (
-                    rect.x + rect.width,
-                    rect.y,
-                    width - rect.x - rect.width,
-                    rect.height,
-                ),
-            ] {
-                overlay = overlay.child(
-                    div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(w.max(0.0)))
-                        .h(px(h.max(0.0)))
-                        .bg(rgba(0x00000065)),
-                );
-            }
-            overlay = overlay
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(rect.x))
-                        .top(px(rect.y))
-                        .w(px(rect.width))
-                        .h(px(rect.height))
-                        .border_1()
-                        .border_color(rgb(0xffffff)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(rect.x))
-                        .top(px((rect.y - 35.0).max(8.0)))
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(rgba(0x202020e8))
-                        .text_color(rgb(0xffffff))
-                        .text_sm()
-                        .child(format!(
-                            "{:.0} × {:.0} px",
-                            rect.width * self.source.width() as f32 / width,
-                            rect.height * self.source.height() as f32 / height
-                        )),
-                );
-        } else {
-            overlay = overlay.child(div().absolute().inset_0().bg(rgba(0x00000045)));
-        }
-        overlay.child(
-            div()
-                .absolute()
-                .bottom(px(36.0))
-                .left(px(width / 2.0 - 185.0))
-                .px_4()
-                .py_2()
-                .rounded_lg()
-                .bg(rgba(0x202020e8))
-                .text_color(rgb(0xffffff))
-                .text_sm()
-                .child("Drag to capture an area · Esc to cancel"),
-        )
-    }
-}
-
-pub fn pin(image: image::RgbaImage, window: &mut Window, cx: &mut Context<Editor>) {
-    let aspect = image.height() as f32 / image.width() as f32;
-    let bounds = Bounds::centered(None, size(px(420.0), px((420.0 * aspect).min(650.0))), cx);
-    let editor = cx.entity();
-    let editor_window = window.window_handle();
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        kind: WindowKind::PopUp,
-        is_resizable: false,
-        is_minimizable: false,
-        app_owns_titlebar_drag: true,
-        window_background: WindowBackgroundAppearance::Transparent,
-        window_decorations: Some(WindowDecorations::Client),
-        ..Default::default()
-    };
-    let _ = gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Pinned::new(image, editor, editor_window, window, cx))
-    });
-}
-
-struct Pinned {
-    source: image::RgbaImage,
-    image: Arc<RenderImage>,
-    editor: Entity<Editor>,
-    editor_window: AnyWindowHandle,
-    focus: FocusHandle,
+/// An image pinned on screen in its own always-on-top window. Drag moves it, the wheel
+/// resizes it, Ctrl/Cmd and the wheel change its opacity, and Escape or a right-click
+/// closes it.
+pub(crate) struct Pinned {
+    inbox: Inbox<Pinned>,
+    editor: Inbox<Editor>,
+    source: RgbaImage,
+    pixels: Pixels,
     opacity: f32,
     hovered: bool,
+    size: (f32, f32),
+}
+
+impl WindowState for Pinned {
+    fn inbox(&self) -> &Inbox<Self> {
+        &self.inbox
+    }
 }
 
 impl Pinned {
-    fn new(
-        source: image::RgbaImage,
-        editor: Entity<Editor>,
-        editor_window: AnyWindowHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
+    fn new(source: RgbaImage, editor: &Inbox<Editor>) -> Self {
+        let pixels = Pixels::new();
+        let (width, height, rgba) = crate::editor::display_pixels(&source);
+        pixels.set(width, height, rgba);
+        let aspect = source.height() as f32 / source.width().max(1) as f32;
         Self {
-            image: display_image(source.clone()),
+            inbox: Inbox::default(),
+            editor: editor.clone(),
             source,
-            editor,
-            editor_window,
-            focus,
+            pixels,
             opacity: 1.0,
             hovered: false,
+            size: (420.0, (420.0 * aspect).min(650.0)),
         }
     }
 
-    fn adjust_opacity(&mut self, amount: f32, cx: &mut Context<Self>) {
+    fn adjust_opacity(&mut self, amount: f32) {
         self.opacity = pin_opacity(self.opacity, amount);
-        cx.notify();
     }
 
-    fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the pinned pixels in the editor and close the pin.
+    fn edit(&mut self, tx: &mut Tx) {
         let source = self.source.clone();
-        let editor = self.editor.clone();
-        if self
-            .editor_window
-            .update(cx, |_, editor_window, cx| {
-                editor.update(cx, |editor, cx| {
-                    editor.load(Document::new(source), "Pinned image opened for editing", cx);
-                });
-                crate::runtime::show_editor(editor_window, cx);
-            })
-            .is_ok()
-        {
-            window.remove_window();
+        self.editor.send(move |editor, _| {
+            editor.load(Document::new(source), "Pinned image opened for editing");
+            shell::show_editor();
+        });
+        tx.close_window();
+    }
+
+    fn wheel(&mut self, event: WheelEvent, tx: &mut Tx) {
+        // A wheel notch is 40 points; a trackpad scrolls by its own points.
+        let amount = event.dy / if event.precise { 30.0 } else { 40.0 };
+        if event.mods.cmd || event.mods.ctrl {
+            self.adjust_opacity(amount.signum() * 0.1);
+        } else {
+            self.size = pin_size_after_scroll(self.size, amount);
+            tx.resize_window_instant(self.size);
         }
     }
+}
+
+/// Pin `image` on screen in its own always-on-top window.
+pub fn pin(image: RgbaImage, editor: &Inbox<Editor>) {
+    let pinned = Pinned::new(image, editor);
+    let window = capture_overlay::open(
+        capture_overlay::Window {
+            title: "Sniplet — Pinned image",
+            size: pinned.size,
+            view: pin_view,
+            on_key: pin_key,
+            options: WindowOptions {
+                transparent: true,
+                borderless: true,
+                always_on_top: true,
+                resizable: false,
+                min_size: Some((40.0, 30.0)),
+                ..Default::default()
+            },
+        },
+        pinned,
+        |_: &rune::WindowHandle| {},
+    );
+    window.center();
 }
 
 fn pin_opacity(current: f32, amount: f32) -> f32 {
     ((current + amount) * 10.0).round().clamp(2.0, 10.0) / 10.0
 }
 
-fn pin_size_after_scroll(current: Size<Pixels>, amount: f32) -> Size<Pixels> {
-    let width = f32::from(current.width).max(1.0);
-    let height = f32::from(current.height).max(1.0);
+fn pin_size_after_scroll(current: (f32, f32), amount: f32) -> (f32, f32) {
+    let width = current.0.max(1.0);
+    let height = current.1.max(1.0);
     let desired = (amount * 0.06).exp();
     let minimum = (80.0 / width).max(60.0 / height);
     let maximum = (1600.0 / width).min(1200.0 / height);
     let factor = desired.clamp(minimum.min(maximum), maximum.max(minimum));
-    size(px(width * factor), px(height * factor))
+    (width * factor, height * factor)
 }
 
-impl Render for Pinned {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut root = div()
-            .id("pinned-image")
-            .size_full()
-            .relative()
-            .track_focus(&self.focus)
-            .child(
-                img(self.image.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .opacity(self.opacity),
-            )
-            .on_mouse_down(MouseButton::Left, |_, w, _| w.start_window_move())
-            .on_key_down(cx.listener(|_, e: &KeyDownEvent, w, _| {
-                if e.keystroke.key == "escape" {
-                    w.remove_window();
-                }
-            }))
-            .on_mouse_down(MouseButton::Right, |_, w, _| w.remove_window())
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.hovered = *hovered;
-                cx.notify();
-            }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-                let amount = match event.delta {
-                    ScrollDelta::Lines(p) => p.y,
-                    ScrollDelta::Pixels(p) => f32::from(p.y) / 30.0,
-                };
-                if event.modifiers.secondary() {
-                    this.adjust_opacity(amount.signum() * 0.1, cx);
-                } else {
-                    window.resize(pin_size_after_scroll(window.viewport_size(), amount));
-                }
-                cx.stop_propagation();
-            }));
-
-        if self.hovered {
-            root = root.child(
-                div()
-                    .absolute()
-                    .top(px(10.0))
-                    .right(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .p_1()
-                    .rounded_lg()
-                    .bg(rgba(0x18181be8))
-                    .shadow_lg()
-                    .text_color(rgb(0xffffff))
-                    .text_sm()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .id("pin-opacity-down")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgba(0xffffff28)))
-                            .child("−")
-                            .on_click(cx.listener(|this, _, _, cx| this.adjust_opacity(-0.1, cx))),
-                    )
-                    .child(
-                        div()
-                            .w(px(42.0))
-                            .text_center()
-                            .child(format!("{:.0}%", self.opacity * 100.0)),
-                    )
-                    .child(
-                        div()
-                            .id("pin-opacity-up")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgba(0xffffff28)))
-                            .child("+")
-                            .on_click(cx.listener(|this, _, _, cx| this.adjust_opacity(0.1, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("pin-edit")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(28.0))
-                            .px_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgba(0xffffff28)))
-                            .child("✎ Edit")
-                            .on_click(cx.listener(|this, _, window, cx| this.edit(window, cx))),
-                    ),
-            );
-        }
-
-        root
+fn pin_key(_: &mut Pinned, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if event.key != Key::Escape {
+        return false;
     }
+    tx.close_window();
+    true
+}
+
+fn pin_view(s: &Pinned, _: &mut Cx<Pinned>) -> El {
+    let root = el()
+        .key("pinned-image")
+        .w_full()
+        .h_full()
+        .on_layout(|s: &mut Pinned, rect: [f32; 4]| s.size = (rect[2], rect[3]))
+        .on_hover_change(|s: &mut Pinned, inside: bool, _: &mut Tx| s.hovered = inside)
+        .on_wheel(|s: &mut Pinned, event: WheelEvent, tx: &mut Tx| {
+            s.wheel(event, tx);
+            true
+        })
+        .on_secondary_press(|_: &mut Pinned, _, tx: &mut Tx| tx.close_window())
+        .child(
+            el().w_full()
+                .h_full()
+                .window_drag()
+                .pixels_fit(&s.pixels, SurfaceFit::Fit)
+                .opacity(s.opacity),
+        );
+    if !s.hovered {
+        return root;
+    }
+    let hover = Color::WHITE.alpha(40.0 / 255.0);
+    let button = |key: &str, content: El, on_press: fn(&mut Pinned, &mut Tx)| {
+        row()
+            .key(key)
+            .role("button")
+            .h(28.0)
+            .min_w(28.0)
+            .px(6.0)
+            .gap(4.0)
+            .center()
+            .radius(6.0)
+            .hover(hover)
+            .cursor(Cursor::Pointer)
+            .child(content)
+            .on_press_tx(on_press)
+    };
+    let white = |glyph| icon(glyph, 16.0).color(Color::WHITE);
+    root.child(
+        row()
+            .key("pin-toolbar")
+            .pin(None, Some(10.0), Some(10.0), None)
+            .center_y()
+            .gap(4.0)
+            .padding(4.0)
+            .radius(8.0)
+            .fill(crate::ui::rgb(0x18181b).alpha(232.0 / 255.0))
+            .shadow(4.0, 12.0, Color::BLACK.alpha(0.3))
+            .child(
+                button("pin-opacity-down", white(&icons::MINUS), |s, _| {
+                    s.adjust_opacity(-0.1)
+                })
+                .label("Less opaque"),
+            )
+            .child(
+                el().w(42.0).center().child(
+                    text(format!("{:.0}%", s.opacity * 100.0))
+                        .font(BODY)
+                        .color(Color::WHITE)
+                        .single_line(),
+                ),
+            )
+            .child(
+                button("pin-opacity-up", white(&icons::PLUS), |s, _| {
+                    s.adjust_opacity(0.1)
+                })
+                .label("More opaque"),
+            )
+            .child(button(
+                "pin-edit",
+                row()
+                    .gap(4.0)
+                    .center_y()
+                    .child(white(&icons::PENCIL))
+                    .child(text("Edit").font(BODY).color(Color::WHITE).single_line()),
+                |s, tx| s.edit(tx),
+            )),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    // GPUI's test macro expands to Rust's built-in test attribute.
-    #[cfg(feature = "ui-tests")]
-    use std::prelude::v1::test;
+    use rune::{Env, Runtime};
 
-    #[::core::prelude::v1::test]
+    use super::*;
+
+    #[test]
     fn screen_capture_uses_pointer_instead_of_cached_primary_display() {
         for command in [Command::Screen, Command::Delayed] {
             assert_eq!(
@@ -812,28 +543,17 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "ui-tests")]
-    fn monitor_frame(image: image::RgbaImage) -> sniplet_platform::CapturedFrame {
-        sniplet_platform::CapturedFrame {
-            image,
-            origin: sniplet_platform::ScreenPoint { x: 0, y: 0 },
-            scale_factor: 1.0,
-            source: sniplet_platform::CaptureSource::Monitor { index: 0, id: 7 },
-        }
-    }
-
-    #[::core::prelude::v1::test]
+    #[test]
     fn pin_opacity_and_resize_keep_their_user_facing_limits() {
         assert_eq!(pin_opacity(1.0, 0.1), 1.0);
         assert_eq!(pin_opacity(0.2, -0.1), 0.2);
         assert_eq!(pin_opacity(0.56, 0.1), 0.7);
 
-        let resized = pin_size_after_scroll(size(px(400.0), px(200.0)), 2.0);
-        let ratio = f32::from(resized.width) / f32::from(resized.height);
-        assert!((ratio - 2.0).abs() < 0.001);
+        let resized = pin_size_after_scroll((400.0, 200.0), 2.0);
+        assert!((resized.0 / resized.1 - 2.0).abs() < 0.001);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn shift_constraint_uses_the_longest_drag_axis() {
         assert_eq!(
             square_end(ImagePoint::new(10.0, 10.0), ImagePoint::new(35.0, 20.0)),
@@ -845,208 +565,56 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "ui-tests")]
-    #[gpui_kit::test]
-    fn area_overlay_drag_produces_exact_source_pixels(cx: &mut TestAppContext) {
-        use gpui_kit::test::TestWindowExt;
-        let (owner, editor) = cx.update(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Editor::new(
-                        None,
-                        sniplet_platform::Settings {
-                            auto_copy: false,
-                            ..Default::default()
-                        },
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-        let source = sniplet_core::demo_image(800, 600);
-        let expected = image::imageops::crop_imm(&source, 100, 80, 230, 120).to_image();
-        let (handle, _) = cx.update(|cx| {
-            gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        point(px(0.0), px(0.0)),
-                        size(px(800.0), px(600.0)),
-                    ))),
-                    titlebar: None,
-                    ..Default::default()
-                },
-                cx,
-                |window, cx| {
-                    cx.new(|cx| {
-                        Overlay::new(
-                            monitor_frame(source),
-                            editor.clone(),
-                            owner,
-                            Command::Area,
-                            crate::runtime::EscapeSession::detached(),
-                            window,
-                            cx,
-                        )
-                    })
-                },
-            )
-            .unwrap()
-        });
-        cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.drag(point(px(100.0), px(80.0)), point(px(330.0), px(200.0)), cx);
-            assert_eq!(cx.active_window(), Some(owner));
-            assert_eq!(
-                editor.read(cx).document.as_ref().unwrap().original(),
-                &expected
-            );
-        })
-        .unwrap();
+    #[test]
+    fn capture_rects_round_outward_to_whole_pixels_inside_the_image() {
+        assert_eq!(
+            physical_capture_rect(ImageRect::new(10.4, 5.6, 20.2, 10.0), 100, 100),
+            Some(ImageRect::new(10.0, 5.0, 21.0, 11.0))
+        );
+        assert_eq!(
+            physical_capture_rect(ImageRect::new(95.0, 0.0, 20.0, 10.0), 100, 100),
+            Some(ImageRect::new(95.0, 0.0, 5.0, 10.0))
+        );
+        assert_eq!(
+            physical_capture_rect(ImageRect::new(120.0, 0.0, 20.0, 10.0), 100, 100),
+            None
+        );
     }
 
-    #[cfg(feature = "ui-tests")]
-    #[gpui_kit::test]
-    fn cancelling_overlay_keeps_the_existing_document(cx: &mut TestAppContext) {
-        use gpui_kit::test::TestWindowExt;
-        let (owner, editor) = cx.update(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Editor::new(
-                        Some(Document::new(sniplet_core::demo_image(80, 60))),
-                        sniplet_platform::Settings {
-                            auto_copy: false,
-                            ..Default::default()
-                        },
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-        let escape = crate::runtime::EscapeSession::detached();
-        let observed_escape = escape.clone();
-        let (handle, _) = cx.update(|cx| {
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Overlay::new(
-                        monitor_frame(sniplet_core::demo_image(800, 600)),
-                        editor.clone(),
-                        owner,
-                        Command::Area,
-                        escape,
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-        cx.update_window(handle, |_, window, cx| {
-            window.activate_window();
-            window.render_frame(cx);
-            window.press("escape", cx);
-            assert!(observed_escape.is_cancelled());
-            assert_ne!(cx.active_window(), Some(owner));
-            assert_eq!(editor.read(cx).document.as_ref().unwrap().width(), 80);
-            assert_eq!(editor.read(cx).document.as_ref().unwrap().height(), 64);
-        })
-        .unwrap();
-    }
+    #[test]
+    fn editing_a_pin_returns_the_unmodified_rgba_pixels_and_hover_shows_its_controls() {
+        let env = Env {
+            system_dark: true,
+            scale: 2.0,
+        };
+        let editor = Editor::new(None, Default::default(), 1.0);
+        let mut editor = Runtime::new(editor, crate::editor::view, (1280.0, 850.0), env);
+        let source = RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 78]));
+        let mut pin = Runtime::new(
+            Pinned::new(source.clone(), &editor.state.inbox),
+            pin_view,
+            (420.0, 280.0),
+            env,
+        );
+        pin.frame(0.0);
+        assert!(pin.find("pin-edit").is_none());
+        pin.pointer_move(200.0, 140.0);
+        pin.frame(1.0 / 60.0);
+        let (x, y) = pin
+            .find("pin-opacity-down")
+            .expect("hover shows the controls");
+        pin.pointer_down(x, y);
+        pin.pointer_up(x, y);
+        pin.frame(1.0 / 60.0);
+        assert_eq!(pin.state.opacity, 0.9);
 
-    #[cfg(feature = "ui-tests")]
-    #[gpui_kit::test]
-    fn removing_overlay_releases_its_escape_session(cx: &mut TestAppContext) {
-        let (owner, editor) = cx.update(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Editor::new(
-                        Some(Document::new(sniplet_core::demo_image(80, 60))),
-                        sniplet_platform::Settings {
-                            auto_copy: false,
-                            ..Default::default()
-                        },
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
+        let (x, y) = pin.find("pin-edit").unwrap();
+        pin.pointer_down(x, y);
+        pin.pointer_up(x, y);
+        pin.frame(1.0 / 60.0);
+        editor.update(|editor, tx| {
+            Inbox::drain(editor, |editor| &editor.inbox, tx);
         });
-        let escape = crate::runtime::EscapeSession::detached();
-        let observed_escape = escape.clone();
-        let (overlay, _) = cx.update(|cx| {
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Overlay::new(
-                        monitor_frame(sniplet_core::demo_image(800, 600)),
-                        editor.clone(),
-                        owner,
-                        Command::Area,
-                        escape,
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-
-        cx.update_window(overlay, |_, window, _| window.remove_window())
-            .unwrap();
-        cx.run_until_parked();
-
-        assert!(observed_escape.is_cancelled());
-        cx.update(|cx| {
-            assert_ne!(cx.active_window(), Some(owner));
-            assert_eq!(editor.read(cx).document.as_ref().unwrap().width(), 80);
-            assert_eq!(editor.read(cx).document.as_ref().unwrap().height(), 64);
-        });
-    }
-
-    #[cfg(feature = "ui-tests")]
-    #[gpui_kit::test]
-    fn editing_a_pin_returns_the_unmodified_rgba_pixels(cx: &mut TestAppContext) {
-        let (owner, editor) = cx.update(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| {
-                    Editor::new(
-                        None,
-                        sniplet_platform::Settings {
-                            auto_copy: false,
-                            ..Default::default()
-                        },
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-        let source = image::RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 78]));
-        let expected = source.clone();
-        let (handle, pinned) = cx.update(|cx| {
-            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| Pinned::new(source, editor.clone(), owner, window, cx))
-            })
-            .unwrap()
-        });
-        cx.update_window(handle, |_, window, cx| {
-            pinned.update(cx, |pinned, cx| pinned.edit(window, cx));
-        })
-        .unwrap();
-
-        cx.update(|cx| {
-            assert_eq!(
-                editor.read(cx).document.as_ref().unwrap().original(),
-                &expected
-            );
-        });
+        assert_eq!(editor.state.document.as_ref().unwrap().original(), &source);
     }
 }
