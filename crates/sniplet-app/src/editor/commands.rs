@@ -157,9 +157,9 @@ impl Editor {
                 if let Ok(document) = self.export_document() {
                     self.inbox.spawn(
                         move || document.render(&render_options()),
-                        |_, image, _| {
+                        |editor, image, _| {
                             if let Ok(image) = image {
-                                capture::pin(image);
+                                capture::pin(image, &editor.inbox);
                             }
                         },
                     );

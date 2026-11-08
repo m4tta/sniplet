@@ -672,7 +672,7 @@ impl Editor {
 }
 
 /// An image as the canvas draws it: unchanged, or scaled down to fit Rune's texture limit.
-fn display_pixels(image: &image::RgbaImage) -> (u32, u32, Vec<u8>) {
+pub(crate) fn display_pixels(image: &image::RgbaImage) -> (u32, u32, Vec<u8>) {
     let (width, height) = image.dimensions();
     let longest = width.max(height);
     if longest <= MAX_TEXTURE {

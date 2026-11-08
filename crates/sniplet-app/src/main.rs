@@ -6,9 +6,12 @@
 mod area_capture;
 mod arrow_palette;
 mod capture;
+mod capture_overlay;
 mod clipboard_jobs;
 mod drag_out;
 mod editor;
+#[cfg(target_os = "macos")]
+mod macos;
 mod menu_bar;
 mod quick_menu;
 mod self_test;
@@ -111,8 +114,8 @@ fn main() -> anyhow::Result<()> {
     }
     let smoke = args.iter().any(|arg| arg == "--smoke");
     SMOKE.store(smoke, Ordering::Relaxed);
-    let login_launch = false;
-    let minimized = !smoke && startup::start_minimized(&args, login_launch);
+    // macOS reports a login launch only once its event loop runs; `setup` checks it there.
+    let minimized = !smoke && startup::start_minimized(&args, false);
     #[cfg(target_os = "linux")]
     let minimized = minimized && startup::tray_host_available();
     MINIMIZED.store(minimized, Ordering::Relaxed);
@@ -178,6 +181,13 @@ fn setup(editor: &mut Editor, waker: Waker) {
         return;
     }
     shell::install(editor);
+    #[cfg(target_os = "macos")]
+    if startup::start_minimized(rune::extra_args(), macos::launched_at_login()) {
+        MINIMIZED.store(true, Ordering::Relaxed);
+        if shell::has_tray() {
+            shell::hide_editor();
+        }
+    }
     if MINIMIZED.load(Ordering::Relaxed) && !shell::has_tray() {
         shell::show_editor();
     }
