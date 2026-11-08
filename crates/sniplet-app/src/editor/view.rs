@@ -168,8 +168,10 @@ fn canvas(s: &Editor, p: &Palette) -> El {
     if s.document.is_some() && s.image_size.0 > 0 {
         canvas = image_layers(s, p, canvas, height);
         if let Some(properties) = super::panels::properties(s, p) {
+            // Keyed, so overlays added before it (a measurement, handles) do not remount it.
             canvas = canvas.child(
                 row()
+                    .key("properties-bar")
                     .pin(
                         Some(0.0),
                         None,
@@ -330,6 +332,7 @@ fn dock(s: &Editor, p: &Palette) -> El {
             .build(p, move |s: &mut Editor, _| s.select_tool(tool))
     });
     row()
+        .key("dock-bar")
         .pin(Some(0.0), None, Some(0.0), Some(DOCK_BOTTOM))
         .justify_center()
         .child(

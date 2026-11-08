@@ -142,6 +142,7 @@ pub(super) fn properties(s: &Editor, p: &Palette) -> Option<El> {
                     size.label(),
                     size.fraction(value),
                     |s: &mut Editor, fraction, phase, _| s.slide_size(fraction, phase),
+                    Editor::cancel_size_edit,
                 ))
                 .child(
                     el().key("size-value")
@@ -302,7 +303,8 @@ pub(super) fn floating_panel(s: &Editor, p: &Palette, canvas_height: f32) -> Opt
                         .color(p.foreground)
                         .placeholder("Type your annotation…", p.muted_foreground)
                         .label("Annotation text")
-                        .on_edit(|s: &mut Editor| &mut s.text_input),
+                        .on_edit(|s: &mut Editor| &mut s.text_input)
+                        .on_submit(|s: &mut Editor, tx| s.commit_text(tx)),
                 )
                 .child(
                     Button::new("add-text")
@@ -465,10 +467,7 @@ pub(super) fn recognized_text(s: &Editor, p: &Palette) -> Option<El> {
                     Button::new("close-recognized-text")
                         .icon(&icons::X)
                         .help("Close · Escape")
-                        .build(p, |s: &mut Editor, tx| {
-                            s.recognized_text = None;
-                            tx.blur();
-                        }),
+                        .build(p, |s: &mut Editor, _| s.recognized_text = None),
                 ),
         )
         .child(
@@ -487,7 +486,16 @@ pub(super) fn recognized_text(s: &Editor, p: &Palette) -> Option<El> {
                 .fill(p.background)
                 .color(p.foreground)
                 .label("Recognized text")
-                .on_edit(|s: &mut Editor| s.recognized_text.as_mut().expect("the dialog is open")),
+                .on_edit(|s: &mut Editor| s.recognized_text.as_mut().expect("the dialog is open"))
+                // Return breaks the line, as in any text editor; the dialog has no submit.
+                .on_submit(|s: &mut Editor, _| {
+                    if let Some(edit) = &mut s.recognized_text {
+                        edit.insert(
+                            "
+",
+                        );
+                    }
+                }),
         )
         .child(
             row()

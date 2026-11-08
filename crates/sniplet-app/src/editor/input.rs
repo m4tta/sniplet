@@ -532,22 +532,16 @@ impl Editor {
     pub(super) fn key(&mut self, event: &Keystroke, tx: &mut Tx) -> bool {
         let key = event.key.as_str();
         if self.recognized_text.is_some() {
+            // The dialog's field leaves with it. A blur here would ask Rune to edit a field
+            // whose text is gone.
             if key == "escape" {
                 self.recognized_text = None;
-                tx.blur();
                 return true;
             }
             return false;
         }
         if key == "escape" {
-            if let Some(edit) = self.size_edit.take() {
-                if edit.grouped
-                    && let Some(doc) = &mut self.document
-                {
-                    let _ = doc.cancel_group();
-                }
-                self.sizes.set(edit.size, edit.before);
-            }
+            // Rune ends a slider drag on Escape before keys arrive: see `cancel_size_edit`.
             if let Some(drag) = self.drag.take()
                 && drag.moving.is_some()
                 && let Some(doc) = &mut self.document
