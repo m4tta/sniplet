@@ -20,6 +20,8 @@ use crate::{
 mod commands;
 mod input;
 mod panels;
+#[cfg(test)]
+mod tests;
 mod view;
 
 pub(crate) use commands::Command;
