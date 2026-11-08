@@ -1,26 +1,29 @@
 //! The editor window: the toolbar in the title bar, and the canvas with its dock.
 use rune::{Color, Cursor, Cx, El, KeyEvent, PointerButton, Tx, col, el, icon, row, text};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Keybind, Kit,
+    WindowTitlebar,
+};
 use sniplet_core::{ColorFormat, Point as ImagePoint};
 
 use super::{BAR, DOCK_BOTTOM, DOCK_HEIGHT, Editor, Keystroke, Panel};
 use crate::{
     tools::Tool,
-    ui::{BODY, Button, Palette, SMALL, core_color, divider, icons, rgb},
+    ui::{self, core_color, icons, rgb},
 };
 
 /// The editor window's view.
 pub(crate) fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
-    let p = Palette::for_preference(s.settings.theme, cx.system_dark());
-    cx.caption_color(p.foreground);
+    let k = ui::window_kit(cx, s.settings.theme);
     if s.updates.installing() {
-        return crate::updates::installing_screen(&p);
+        return crate::updates::installing_screen(&k);
     }
     let insets = cx.chrome_insets();
     let mut root = col()
         .key("editor")
         .w_full()
         .h_full()
-        .fill(p.background)
+        .fill(k.c.page)
         .on_key_up(|s: &mut Editor, event: &KeyEvent, tx: &mut Tx| {
             Keystroke::new(event, tx.key_base(), false).is_some_and(|key| s.key_up(&key))
         })
@@ -34,12 +37,15 @@ pub(crate) fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
                 s.load_path(path.clone());
             }
         })
-        .child(toolbar(s, &p, insets.leading, insets.trailing))
-        .child(canvas(s, &p));
+        .child(toolbar(s, &k, insets))
+        .child(Divider::horizontal().build(&k))
+        .child(canvas(s, &k));
     if s.panel == Some(Panel::Menu) {
-        root = root.child(super::panels::app_menu(s, &p, insets.leading));
+        root = root.child(super::panels::app_menu(s, &k, insets.leading));
     }
-    root.children(super::panels::recognized_text(s, &p))
+    let mut layer = Vec::new();
+    super::panels::recognized_text(s, &k, &mut layer);
+    rune_kit::root(root, layer)
 }
 
 /// Keys nothing focused took, or every key while nothing has focus.
@@ -47,84 +53,102 @@ pub(crate) fn on_key(s: &mut Editor, event: &KeyEvent, tx: &mut Tx) -> bool {
     Keystroke::new(event, tx.key_base(), tx.key_repeat()).is_some_and(|key| s.key(&key, tx))
 }
 
-fn toolbar(s: &Editor, p: &Palette, leading: f32, trailing: f32) -> El {
+/// A ghost icon button in the toolbar's size.
+fn toolbar_icon(glyph: &'static rune::Icon, help: &str) -> IconButton {
+    IconButton::new(glyph)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .help(help)
+}
+
+fn toolbar(s: &Editor, k: &Kit, insets: rune::ChromeInsets) -> El {
     let zoom = s.transform().zoom();
-    let mut menu = Button::new("app-menu")
-        .icon(&icons::SCISSORS)
-        .help("Sniplet · capture and settings")
-        .build(p, |s: &mut Editor, _| {
+    let mut menu = toolbar_icon(&icons::SCISSORS, "Sniplet · capture and settings")
+        .expanded(s.panel == Some(Panel::Menu))
+        .on_press(|s: &mut Editor| {
             s.panel = if s.panel == Some(Panel::Menu) {
                 None
             } else {
                 Some(Panel::Menu)
             };
-        });
+        })
+        .build(k)
+        .key("app-menu");
     if s.waiting_update_label().is_some() {
         menu = el().child(menu).child(
             el().key("update-dot")
                 .size(7.0, 7.0)
                 .radius(3.5)
-                .fill(p.accent)
-                .pin(None, Some(5.0), Some(5.0), None),
+                .fill(k.c.bg_accent)
+                .pin(None, Some(3.0), Some(3.0), None),
         );
     }
-    row()
+    let ghost = |label: String| {
+        Button::new(label)
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Large)
+    };
+    WindowTitlebar::from_insets(insets, 1.0)
         .key("editor-toolbar")
-        .w_full()
-        .h(BAR)
-        .pl(leading + 8.0)
-        .pr(trailing + 8.0)
-        .gap(2.0)
-        .center_y()
-        .fill(p.title_bar)
-        .child(menu)
-        .child(el().grow(1.0).h_full().window_drag())
-        .child(
-            Button::new("zoom-fit")
-                .label(format!("{:.0}%", zoom * 100.0))
-                .help(format!("{} · Fit · Ctrl/Cmd 1", s.image_size_label()))
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Fit, tx)),
+        .height(BAR)
+        .leading_padding(8.0)
+        .trailing_padding(8.0)
+        .gap(4.0)
+        .fill(k.c.bg_base)
+        .leading(menu)
+        .trailing(
+            ghost(format!("{:.0}%", zoom * 100.0))
+                .help(format!("{} · Fit", s.image_size_label()))
+                .shortcut("mod+1")
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Fit, tx))
+                .build(k)
+                .key("zoom-fit"),
         )
-        .child(divider(p, 24.0).mx(8.0))
-        .child(
-            Button::new("backdrop")
+        .trailing(Divider::vertical().build(k).h(20.0).mx(4.0))
+        .trailing(
+            ghost("Backdrop".into())
                 .icon(&icons::LAYERS)
-                .label("Backdrop")
-                .build(p, |s: &mut Editor, _| s.panel = Some(Panel::Backdrop)),
+                .expanded(s.panel == Some(Panel::Backdrop))
+                .on_press(|s: &mut Editor| s.panel = Some(Panel::Backdrop))
+                .build(k)
+                .key("backdrop"),
         )
-        .child(drag_file(s, p))
-        .child(
-            Button::new("pin")
-                .icon(&icons::PIN)
-                .help("Pin image on screen")
-                .size(34.0, 36.0)
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Pin, tx)),
+        .trailing(drag_file(s, k))
+        .trailing(
+            toolbar_icon(&icons::PIN, "Pin image on screen")
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Pin, tx))
+                .build(k)
+                .key("pin"),
         )
-        .child(
-            Button::new("save")
-                .icon(&icons::SAVE)
-                .help("Save image · Ctrl/Cmd S")
-                .size(34.0, 36.0)
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Save, tx)),
+        .trailing(
+            toolbar_icon(&icons::SAVE, "Save image")
+                .shortcut("mod+s")
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Save, tx))
+                .build(k)
+                .key("save"),
         )
-        .child(
-            Button::new("copy")
-                .accent()
+        .trailing(
+            Button::new("Copy")
+                .variant(ButtonVariant::Contrast)
+                .control_size(ControlSize::Large)
                 .icon(&icons::COPY)
-                .label("Copy")
-                .help("Copy image · Ctrl/Cmd C")
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Copy, tx))
+                .help("Copy image")
+                .shortcut("mod+c")
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Copy, tx))
+                .build(&ui::accent(k))
+                .key("copy")
                 .ml(4.0),
         )
+        .build(k)
 }
 
 /// The pill that drags the exported image into another app as a PNG file.
-fn drag_file(s: &Editor, p: &Palette) -> El {
+fn drag_file(s: &Editor, k: &Kit) -> El {
     let grip = || {
         row().gap(2.5).children((0..2).map(|_| {
             col()
                 .gap(2.5)
-                .children((0..3).map(|_| el().size(1.5, 1.5).radius(0.75).fill(p.muted_foreground)))
+                .children((0..3).map(|_| el().size(1.5, 1.5).radius(0.75).fill(k.c.icon_faint)))
         }))
     };
     let control = row()
@@ -137,15 +161,20 @@ fn drag_file(s: &Editor, p: &Palette) -> El {
         .gap(3.0)
         .center()
         .radius(13.0)
-        .fill(p.foreground.alpha(0.08))
+        .fill(k.c.layer_02)
+        .box_shadow(rune::Shadow {
+            spread: 0.5,
+            color: k.c.border_base,
+            ..Default::default()
+        })
         .child(grip())
-        .child(icon(&icons::FILE, 17.0).color(p.foreground))
+        .child(icon(&icons::FILE, 16.0).color(k.c.icon_base))
         .child(grip());
     if s.document.is_none() {
-        return control.opacity(0.4);
+        return control.layer_opacity(0.5);
     }
     crate::drag_out::source(
-        control.hover(p.foreground.alpha(0.12)).cursor(Cursor::Grab),
+        k.interactive(control).cursor(Cursor::Grab),
         |s: &Editor| match s.export_drag_file() {
             Ok(path) => Ok(path),
             Err(error) => Err(format!("Could not drag image: {error}")),
@@ -154,14 +183,14 @@ fn drag_file(s: &Editor, p: &Palette) -> El {
     )
 }
 
-fn canvas(s: &Editor, p: &Palette) -> El {
+fn canvas(s: &Editor, k: &Kit) -> El {
     let (width, height) = s.canvas;
     let mut canvas = el()
         .key("editor-canvas")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .fill(p.muted)
+        .fill(k.c.layer_02)
         .clip_rounded(0.0)
         .pointer_buttons([PointerButton::Middle])
         .on_layout(|s: &mut Editor, rect: [f32; 4]| s.canvas = (rect[2], rect[3]))
@@ -171,8 +200,8 @@ fn canvas(s: &Editor, p: &Palette) -> El {
         })
         .on_wheel(|s: &mut Editor, event: rune::WheelEvent, _: &mut Tx| s.wheel(event));
     if s.document.is_some() && s.image_size.0 > 0 {
-        canvas = image_layers(s, p, canvas, height);
-        if let Some(properties) = super::panels::properties(s, p) {
+        canvas = image_layers(s, k, canvas, height);
+        if let Some(properties) = super::panels::properties(s, k) {
             // Keyed, so overlays added before it (a measurement, handles) do not remount it.
             canvas = canvas.child(
                 row()
@@ -188,28 +217,29 @@ fn canvas(s: &Editor, p: &Palette) -> El {
             );
         }
         canvas = canvas
-            .child(dock(s, p))
-            .children(color_peek(s, p, width, height));
+            .child(dock(s, k))
+            .children(color_peek(s, k, width, height));
     } else if s.document.is_none() {
-        canvas = canvas.child(welcome(p));
+        canvas = canvas.child(welcome(s, k));
     }
     canvas = canvas.child(
-        el().key("status")
-            .absolute(12.0, 12.0)
-            .max_w((width - 24.0).max(0.0))
-            .px(12.0)
-            .py(4.0)
-            .radius(6.0)
-            .fill(p.popover.alpha(0.95))
-            .child(text(s.status.clone()).font(SMALL).color(p.muted_foreground)),
+        ui::chip(
+            k,
+            text(s.status.clone())
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_muted),
+        )
+        .key("status")
+        .absolute(12.0, 12.0)
+        .max_w((width - 24.0).max(0.0)),
     );
     canvas
-        .children(s.render_update_notice(p))
-        .children(super::panels::floating_panel(s, p, height))
+        .children(s.render_update_notice(k))
+        .children(super::panels::floating_panel(s, k, height))
 }
 
 /// The image, the measurement overlay, and the selection or edit handles.
-fn image_layers(s: &Editor, p: &Palette, mut canvas: El, height: f32) -> El {
+fn image_layers(s: &Editor, k: &Kit, mut canvas: El, height: f32) -> El {
     let transform = s.transform();
     let (pan, zoom) = (transform.pan(), transform.zoom());
     canvas = canvas.child(
@@ -229,6 +259,7 @@ fn image_layers(s: &Editor, p: &Palette, mut canvas: El, height: f32) -> El {
                 .pixels(&s.measure_pixels),
         );
     }
+    // Handles sit on the image, so they keep one look in both appearances.
     let handle = |key: String, point: ImagePoint, size: f32| {
         el().key(key)
             .absolute(point.x - size / 2.0, point.y - size / 2.0)
@@ -276,7 +307,7 @@ fn image_layers(s: &Editor, p: &Palette, mut canvas: El, height: f32) -> El {
             .key("selection")
             .absolute(origin.x, origin.y)
             .size(w.max(1.0), h.max(1.0))
-            .border(1.0, p.accent);
+            .border(1.0, k.c.bg_accent);
         for (index, (x, y)) in [
             (0.0, 0.0),
             (w / 2.0, 0.0),
@@ -306,56 +337,49 @@ fn image_layers(s: &Editor, p: &Palette, mut canvas: El, height: f32) -> El {
             ""
         };
         canvas = canvas.child(outline).child(
-            el().key("selection-size")
-                .absolute(origin.x, (origin.y + h + 10.0).min(height - 30.0))
-                .px(8.0)
-                .py(4.0)
-                .radius(6.0)
-                .fill(p.popover.alpha(0.95))
-                .child(
-                    text(format!("{:.0} × {:.0} px{hint}", rect.width, rect.height))
-                        .font(SMALL)
-                        .color(p.foreground)
-                        .single_line(),
-                ),
+            ui::chip(
+                k,
+                text(format!("{:.0} × {:.0} px{hint}", rect.width, rect.height))
+                    .font(k.ty.text_xsmall)
+                    .color(k.c.text_base)
+                    .single_line(),
+            )
+            .key("selection-size")
+            .absolute(origin.x, (origin.y + h + 10.0).min(height - 30.0)),
         );
     }
     canvas
 }
 
 /// Every tool, in a dock at the bottom center of the canvas.
-fn dock(s: &Editor, p: &Palette) -> El {
+fn dock(s: &Editor, k: &Kit) -> El {
     let tools = Tool::ALL.map(|tool| {
-        Button::new(format!("tool-{}", tool as usize))
-            .icon(tool.icon())
-            .size(36.0, 36.0)
-            .selected(s.tool == tool)
-            .help(tool.shortcut().map_or_else(
-                || tool.label().to_owned(),
-                |key| format!("{} · {key}", tool.label()),
-            ))
-            .build(p, move |s: &mut Editor, _| s.select_tool(tool))
+        let mut button = IconButton::new(tool.icon())
+            .variant(IconButtonVariant::Ghost)
+            .control_size(ControlSize::ExtraLarge)
+            .help(tool.label());
+        if let Some(key) = tool.shortcut() {
+            button = button.shortcut(key);
+        }
+        let button = button
+            .on_press(move |s: &mut Editor| s.select_tool(tool))
+            .build(k);
+        ui::selected(button, k, s.tool == tool).key(format!("tool-{}", tool as usize))
     });
     row()
         .key("dock-bar")
         .pin(Some(0.0), None, Some(0.0), Some(DOCK_BOTTOM))
         .justify_center()
         .child(
-            row()
+            ui::surface::<Editor>(k, row().gap(2.0).padding(5.0))
                 .key("tool-dock")
-                .gap(2.0)
-                .padding(5.0)
-                .fill(p.popover)
-                .border(1.0, p.border)
                 .radius(14.0)
-                .shadow(8.0, 24.0, Color::BLACK.alpha(0.18))
-                .on_press(|_: &mut Editor| {})
                 .children(tools),
         )
 }
 
 /// The sampled color next to the pointer, shown while Tab or C is held.
-fn color_peek(s: &Editor, p: &Palette, width: f32, height: f32) -> Option<El> {
+fn color_peek(s: &Editor, k: &Kit, width: f32, height: f32) -> Option<El> {
     if !s.color_peek {
         return None;
     }
@@ -374,32 +398,30 @@ fn color_peek(s: &Editor, p: &Palette, width: f32, height: f32) -> Option<El> {
         point.y + 18.0
     };
     Some(
-        row()
-            .key("color-peek")
-            .absolute(x, y)
-            .gap(8.0)
-            .center_y()
-            .px(8.0)
-            .py(4.0)
-            .radius(6.0)
-            .fill(p.popover)
-            .border(1.0, p.border)
-            .child(
-                el().size(14.0, 14.0)
-                    .radius(7.0)
-                    .fill(core_color(s.sampled))
-                    .border(1.0, p.border),
-            )
-            .child(
-                text(s.sampled.format(ColorFormat::HexRgb))
-                    .font(SMALL)
-                    .color(p.foreground),
-            ),
+        ui::chip(
+            k,
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    el().size(14.0, 14.0)
+                        .radius(7.0)
+                        .fill(core_color(s.sampled))
+                        .border(1.0, k.c.border_base),
+                )
+                .child(
+                    text(s.sampled.format(ColorFormat::HexRgb))
+                        .font(k.ty.mono)
+                        .color(k.c.text_base),
+                ),
+        )
+        .key("color-peek")
+        .absolute(x, y),
     )
 }
 
-fn welcome(p: &Palette) -> El {
-    col()
+fn welcome(s: &Editor, k: &Kit) -> El {
+    let mut welcome = col()
         .key("welcome")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .center()
@@ -407,28 +429,43 @@ fn welcome(p: &Palette) -> El {
         .child(
             text("Sniplet")
                 .font(rune::TextStyle::new(30.0, 600.0))
-                .color(p.foreground),
+                .color(k.c.text_base),
         )
         .child(
             text("Capture. Annotate. Copy.")
-                .font(BODY)
-                .color(p.muted_foreground),
+                .font(k.ty.body)
+                .color(k.c.text_muted),
         )
         .child(
-            Button::new("welcome-capture")
-                .primary()
+            Button::new("Capture an area")
+                .variant(ButtonVariant::Contrast)
+                .control_size(ControlSize::ExtraLarge)
                 .icon(&icons::SCAN)
-                .label("Capture an area")
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Area, tx)),
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Area, tx))
+                .build(k)
+                .key("welcome-capture"),
         )
         .child(
-            Button::new("welcome-open")
-                .label("Open an image…")
-                .build(p, |s: &mut Editor, tx| s.command(super::Command::Open, tx)),
-        )
-        .child(
-            text("Ctrl/Cmd + Shift + 2 · available anywhere")
-                .font(SMALL)
-                .color(p.muted_foreground),
-        )
+            Button::new("Open an image…")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Large)
+                .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Open, tx))
+                .build(k)
+                .key("welcome-open"),
+        );
+    let keys = crate::quick_menu::keycaps(&s.settings.hotkeys.capture_area);
+    if !keys.is_empty() {
+        welcome = welcome.child(
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(Keybind::new(&keys).build(k))
+                .child(
+                    text("available anywhere")
+                        .font(k.ty.text_xsmall)
+                        .color(k.c.text_muted),
+                ),
+        );
+    }
+    welcome
 }

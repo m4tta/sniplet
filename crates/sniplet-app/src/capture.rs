@@ -4,16 +4,16 @@ use std::{sync::Arc, time::Duration};
 
 use image::RgbaImage;
 use rune::{
-    Color, Cursor, Cx, El, Key, KeyEvent, Pixels, SurfaceFit, Tx, WheelEvent, WindowOptions, el,
-    icon, row, text,
+    Cx, El, Key, KeyEvent, Pixels, SurfaceFit, Tx, WheelEvent, WindowOptions, el, row, text,
 };
+use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
 
 use crate::{
     capture_overlay::{self, WindowState},
     editor::{Command, Editor},
     shell::{self, EscapeSession},
-    ui::{BODY, Inbox, icons},
+    ui::{self, Inbox, icons},
 };
 
 pub struct CaptureRequest {
@@ -464,62 +464,38 @@ fn pin_view(s: &Pinned, _: &mut Cx<Pinned>) -> El {
     if !s.hovered {
         return root;
     }
-    let hover = Color::WHITE.alpha(40.0 / 255.0);
-    let button = |key: &str, content: El, on_press: fn(&mut Pinned, &mut Tx)| {
-        row()
+    // The toolbar floats over any image, so it keeps the dark kit in both appearances.
+    let k = ui::hud();
+    let step = |key: &str, glyph, label: &str, by: f32| {
+        IconButton::new(glyph)
+            .variant(IconButtonVariant::Ghost)
+            .label(label)
+            .on_press(move |s: &mut Pinned| s.adjust_opacity(by))
+            .build(&k)
             .key(key)
-            .role("button")
-            .h(28.0)
-            .min_w(28.0)
-            .px(6.0)
-            .gap(4.0)
-            .center()
-            .radius(6.0)
-            .hover(hover)
-            .cursor(Cursor::Pointer)
-            .child(content)
-            .on_press_tx(on_press)
     };
-    let white = |glyph| icon(glyph, 16.0).color(Color::WHITE);
     root.child(
-        row()
+        ui::surface::<Pinned>(&k, row().center_y().gap(2.0).padding(4.0))
             .key("pin-toolbar")
             .pin(None, Some(10.0), Some(10.0), None)
-            .center_y()
-            .gap(4.0)
-            .padding(4.0)
-            .radius(8.0)
-            .fill(crate::ui::rgb(0x18181b).alpha(232.0 / 255.0))
-            .shadow(4.0, 12.0, Color::BLACK.alpha(0.3))
-            .child(
-                button("pin-opacity-down", white(&icons::MINUS), |s, _| {
-                    s.adjust_opacity(-0.1)
-                })
-                .label("Less opaque"),
-            )
+            .child(step("pin-opacity-down", &icons::MINUS, "Less opaque", -0.1))
             .child(
                 el().w(42.0).center().child(
                     text(format!("{:.0}%", s.opacity * 100.0))
-                        .font(BODY)
-                        .color(Color::WHITE)
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base)
                         .single_line(),
                 ),
             )
+            .child(step("pin-opacity-up", &icons::PLUS, "More opaque", 0.1))
             .child(
-                button("pin-opacity-up", white(&icons::PLUS), |s, _| {
-                    s.adjust_opacity(0.1)
-                })
-                .label("More opaque"),
-            )
-            .child(button(
-                "pin-edit",
-                row()
-                    .gap(4.0)
-                    .center_y()
-                    .child(white(&icons::PENCIL))
-                    .child(text("Edit").font(BODY).color(Color::WHITE).single_line()),
-                |s, tx| s.edit(tx),
-            )),
+                Button::new("Edit")
+                    .variant(ButtonVariant::Ghost)
+                    .icon(&icons::PENCIL)
+                    .on_press_tx(|s: &mut Pinned, tx| s.edit(tx))
+                    .build(&k)
+                    .key("pin-edit"),
+            ),
     )
 }
 

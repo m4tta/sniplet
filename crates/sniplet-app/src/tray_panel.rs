@@ -12,7 +12,7 @@ use sniplet_platform::{HotkeySettings, ThemePreference};
 use crate::{
     editor::Editor,
     quick_menu::{self, Action},
-    ui::{Inbox, Palette},
+    ui::{self, Inbox},
 };
 
 /// Distance kept between the panel, the tray icon, and the display edges.
@@ -271,9 +271,9 @@ impl TrayPanel {
 }
 
 fn view(s: &TrayPanel, cx: &mut Cx<TrayPanel>) -> El {
-    let p = Palette::for_preference(s.theme, cx.system_dark());
+    let k = ui::window_kit(cx, s.theme);
     quick_menu::view(
-        &p,
+        &k,
         &quick_menu::TRAY,
         &s.hotkeys,
         |s: &mut TrayPanel, action, tx: &mut Tx| s.choose(action, tx),

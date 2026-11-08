@@ -1,10 +1,13 @@
 use std::rc::Rc;
 
-use rune::{El, Icon, Tx, col, el, icon, row, text};
+use rune::{El, Icon, Tx, col, icon, row, text};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Keybind, Kit,
+};
 use sniplet_platform::HotkeySettings;
 
 use crate::editor::Command;
-use crate::ui::{Button, Palette, SMALL, icons};
+use crate::ui::icons;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Action {
@@ -159,14 +162,22 @@ fn shortcut(action: Action, hotkeys: &HotkeySettings) -> Option<String> {
         .map(|key| shortcut_label(key, cfg!(target_os = "macos")))
 }
 
-fn divider(p: &Palette) -> El {
-    el().h(1.0).w_full().fill(p.border)
+/// A settings shortcut as keycaps for `rune_kit::Keybind`, such as `["Ctrl", "Shift", "2"]`.
+/// Empty for a shortcut that is turned off.
+pub(crate) fn keycaps(key: &str) -> Vec<String> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    shortcut_label(key, cfg!(target_os = "macos"))
+        .split('+')
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The quick menu shared by the tray panel and the editor's app menu. `choose` runs when an
 /// item is pressed; closing the menu is up to the host.
 pub(crate) fn view<S: 'static>(
-    p: &Palette,
+    k: &Kit,
     layout: &'static Layout,
     hotkeys: &HotkeySettings,
     choose: impl Fn(&mut S, Action, &mut Tx) + 'static,
@@ -176,9 +187,8 @@ pub(crate) fn view<S: 'static>(
         let choose = choose.clone();
         move |s: &mut S, tx: &mut Tx| choose(s, action, tx)
     };
-    let tile_fill = p.border;
     let tiles = layout.tiles.iter().enumerate().map(|(index, item)| {
-        col()
+        let mut tile = col()
             .key(format!("menu-tile-{index}"))
             .role("button")
             .label(item.label)
@@ -186,23 +196,16 @@ pub(crate) fn view<S: 'static>(
             .min_w(0.0)
             .h(TILE_HEIGHT)
             .center()
-            .gap(4.0)
-            .radius(6.0)
-            .fill(tile_fill)
-            .hover(tile_fill.mix(p.foreground, 0.08))
+            .gap(6.0)
+            .radius(k.radius.md)
+            .fill(k.c.layer_02)
             .cursor(rune::Cursor::Pointer)
-            .child(icon(item.icon, 24.0).color(p.foreground))
-            .child(
-                text(item.label)
-                    .font(rune::TextStyle::new(14.0, 500.0))
-                    .color(p.foreground),
-            )
-            .child(
-                text(shortcut(item.action, hotkeys).unwrap_or_default())
-                    .font(SMALL)
-                    .color(p.muted_foreground),
-            )
-            .on_press_tx(on_press(item.action))
+            .child(icon(item.icon, 24.0).color(k.c.icon_base))
+            .child(text(item.label).font(k.ty.ui_medium).color(k.c.text_base));
+        if let Some(key) = shortcut(item.action, hotkeys) {
+            tile = tile.child(Keybind::new(&key.split('+').collect::<Vec<_>>()).build(k));
+        }
+        k.interactive(tile).on_press_tx(on_press(item.action))
     });
     // Every icon row shares one slot pitch, so a shorter row lines up under the one above.
     let slots = layout.more.len().max(layout.image.len()) as f32;
@@ -212,15 +215,18 @@ pub(crate) fn view<S: 'static>(
         row()
             .gap(slot_gap)
             .children(items.iter().enumerate().map(|(index, item)| {
-                let help = match shortcut(item.action, hotkeys) {
-                    Some(key) => format!("{} · {key}", item.label),
-                    None => item.label.to_owned(),
-                };
-                Button::new(format!("{id}-{index}"))
-                    .icon(item.icon)
-                    .help(help)
+                let mut button = IconButton::new(item.icon)
+                    .variant(IconButtonVariant::Ghost)
+                    .control_size(ControlSize::ExtraLarge)
+                    .help(item.label);
+                if let Some(key) = shortcut(item.action, hotkeys) {
+                    button = button.shortcut(key);
+                }
+                button
+                    .on_press_tx(on_press(item.action))
+                    .build(k)
+                    .key(format!("{id}-{index}"))
                     .size(SLOT_WIDTH, ROW_HEIGHT)
-                    .build(p, on_press(item.action))
             }))
     };
     let mut footer: Vec<El> = layout
@@ -228,34 +234,38 @@ pub(crate) fn view<S: 'static>(
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            Button::new(format!("menu-footer-{index}"))
+            Button::new(item.label)
+                .variant(ButtonVariant::GhostMuted)
                 .icon(item.icon)
-                .label(item.label)
-                .compact()
-                .build(p, on_press(item.action))
+                .on_press_tx(on_press(item.action))
+                .build(k)
+                .key(format!("menu-footer-{index}"))
         })
         .collect();
     let last = footer.pop();
+    let divider = || Divider::horizontal().build(k);
     let mut menu = col()
         .key("quick-menu")
         .w(WIDTH)
         .gap(GAP)
         .padding(PADDING)
-        .fill(p.popover)
-        .border(BORDER, p.border)
-        .radius(8.0)
+        .fill(k.c.layer_01)
+        .border(BORDER, k.c.border_base)
+        .radius(k.radius.lg)
         .child(row().gap(GAP).children(tiles))
-        .child(divider(p))
+        .child(divider())
         .child(icon_row("menu-more", layout.more));
     if !layout.image.is_empty() {
         menu = menu
-            .child(divider(p))
+            .child(divider())
             .child(icon_row("menu-image", layout.image));
     }
-    menu.child(divider(p)).child(
+    menu.child(divider()).child(
         row()
             .justify_between()
-            .child(row().children(footer))
+            .center_y()
+            .h(ROW_HEIGHT)
+            .child(row().gap(2.0).children(footer))
             .children(last),
     )
 }

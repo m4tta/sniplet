@@ -2,16 +2,14 @@
 //! window under the pointer. A click captures that window; Escape or a right-click cancels.
 use std::{cell::RefCell, rc::Rc};
 
-use rune::{
-    Color, Cursor, Cx, El, Key, KeyEvent, Pixels, PointerPress, Tx, WindowHandle, el, text,
-};
+use rune::{Color, Cursor, Cx, El, Key, KeyEvent, Pixels, PointerPress, Tx, WindowHandle, el};
 use sniplet_platform::{CapturedFrame, ScreenPoint, WindowInfo};
 
 use crate::{
     capture_overlay::{self, Monitor, Rect, WindowState, subtract_rectangles},
     editor::Editor,
     shell::{self, EscapeSession},
-    ui::{BODY, Inbox, rgb},
+    ui::{Inbox, rgb},
 };
 
 /// What a click on a window does with its ID.
@@ -375,13 +373,7 @@ fn view(s: &Picker, _: &mut Cx<Picker>) -> El {
                     .py(4.0)
                     .radius(6.0)
                     .fill(rgb(0x075ca8).alpha(0xeb as f32 / 255.0))
-                    .child(
-                        text(label)
-                            .font(BODY)
-                            .color(Color::WHITE)
-                            .single_line()
-                            .truncate(),
-                    ),
+                    .child(capture_overlay::text(label).truncate()),
             );
         }
     } else {
