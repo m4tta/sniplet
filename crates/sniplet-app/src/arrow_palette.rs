@@ -1,7 +1,7 @@
 use rune::{Color, Drag, El, LineCap, Path, Phase, Shape, Tx, canvas, el};
 use sniplet_core::ArrowVariant;
 
-use crate::ui::Palette;
+use rune_kit::Kit;
 
 const TRACK_WIDTH: f32 = 140.0;
 const THUMB_SIZE: f32 = 18.0;
@@ -12,7 +12,7 @@ const THUMB_SIZE: f32 = 18.0;
 /// step and close the group on `Phase::Up`. `cancel` hears a drag that Escape or a lost
 /// pointer ended instead, so the host can put the size back.
 pub(crate) fn size_slider<S: 'static>(
-    p: &Palette,
+    k: &Kit,
     label: &'static str,
     fraction: f32,
     change: impl Fn(&mut S, f32, Phase, &mut Tx) + 'static,
@@ -23,13 +23,17 @@ pub(crate) fn size_slider<S: 'static>(
     } else {
         0.0
     };
-    let track = canvas(tapered_track(p.muted_foreground)).size(TRACK_WIDTH, THUMB_SIZE);
-    let thumb = el()
-        .key("size-thumb")
-        .size(THUMB_SIZE, THUMB_SIZE)
-        .radius(THUMB_SIZE / 2.0)
-        .fill(Color::WHITE)
-        .border(1.0, p.border)
+    let track = canvas(tapered_track(k.c.icon_muted)).size(TRACK_WIDTH, THUMB_SIZE);
+    // The kit's raised knob, as its switches draw theirs.
+    let thumb = k
+        .elevate(
+            el().key("size-thumb")
+                .size(THUMB_SIZE, THUMB_SIZE)
+                .radius(THUMB_SIZE / 2.0)
+                .fill(k.c.knob),
+            &k.elevation.knob,
+        )
+        .border(0.5, k.c.border_strong)
         .absolute(fraction * TRACK_WIDTH, 7.0);
     el().key("size-slider")
         .role("slider")

@@ -4,7 +4,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use image::{Rgba, RgbaImage};
-use rune::{Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Pixels, Tx, WindowHandle, el, text};
+use rune::{Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Pixels, Tx, WindowHandle, el};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     capture_overlay::{self, Monitor, Rect, WindowState},
     editor::{Command, Editor},
     shell::{self, EscapeSession},
-    ui::{BODY, Inbox},
+    ui::Inbox,
 };
 
 /// Desktop coordinates and display geometry are retained for Repeat Capture.
@@ -700,12 +700,11 @@ fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
                     .py(4.0)
                     .radius(6.0)
                     .fill(capture_overlay::pill())
-                    .child(
-                        text(format!("{:.0} × {:.0} px", rect.w * scale, rect.h * scale))
-                            .font(BODY)
-                            .color(rune::Color::WHITE)
-                            .single_line(),
-                    ),
+                    .child(capture_overlay::text(format!(
+                        "{:.0} × {:.0} px",
+                        rect.w * scale,
+                        rect.h * scale
+                    ))),
             );
     }
     overlay.child(capture_overlay::hint(

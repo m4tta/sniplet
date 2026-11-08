@@ -299,7 +299,8 @@ Second line"
     // Ctrl/Cmd O reads the selection again; the close button closes it.
     h.press("ctrl-o");
     assert_eq!(text(&h).as_deref(), Some("Selected text"));
-    h.click("close-recognized-text");
+    // The kit dialog's own close button.
+    h.click("recognized-text-dialog/header/close");
     assert!(!h.shows("recognized-text-dialog"));
 
     // A click without a region does not start reading the whole image.

@@ -335,18 +335,26 @@ pub(crate) fn pill() -> rune::Color {
     crate::ui::rgb(0x202020).alpha(232.0 / 255.0)
 }
 
+/// White text over the screen, in the dark kit's type, for overlay hints and labels.
+pub(crate) fn text(value: impl Into<String>) -> El {
+    rune::text(value.into())
+        .font(crate::ui::hud().ty.body_medium)
+        .color(rune::Color::WHITE)
+        .single_line()
+}
+
 /// The hint centered near the bottom of an overlay.
 pub(crate) fn hint(label: &str) -> El {
     rune::row()
         .pin(Some(12.0), None, Some(12.0), Some(36.0))
         .justify_center()
         .child(
-            rune::el().px(16.0).py(8.0).radius(8.0).fill(pill()).child(
-                rune::text(label.to_owned())
-                    .font(crate::ui::BODY)
-                    .color(rune::Color::WHITE)
-                    .single_line(),
-            ),
+            rune::el()
+                .px(16.0)
+                .py(8.0)
+                .radius(8.0)
+                .fill(pill())
+                .child(text(label)),
         )
 }
 

@@ -236,3 +236,16 @@ fn text_entry_keeps_editor_shortcuts_out_and_adds_one_annotation() {
     h.undo();
     assert_eq!(h.only(), text);
 }
+
+#[test]
+fn space_drag_pans_after_a_dock_click() {
+    let mut h = editor();
+    // A dock or toolbar button must not keep the keyboard, or Space presses it.
+    h.click(&tool(Tool::Rectangle));
+    let before = h.editor().transform().pan();
+    h.press("space");
+    h.drag_image((70.0, 30.0), (180.0, 120.0));
+    h.release("space");
+    assert!(h.annotations().is_empty(), "Space-drag must not draw");
+    assert_ne!(h.editor().transform().pan(), before, "Space-drag pans");
+}

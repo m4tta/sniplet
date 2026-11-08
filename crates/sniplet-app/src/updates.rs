@@ -6,7 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rune::{Color, El, Icon, Tx, col, el, icon, row, text};
+use rune::{El, Icon, Tx, col, el, icon, row, text};
+use rune_kit::{Button, ButtonVariant, Card, Kit, SegmentedControl, State, Switch};
 use sniplet_core::{Document, Project};
 use sniplet_platform::{
     SettingsStore,
@@ -16,7 +17,7 @@ use sniplet_platform::{
 use crate::{
     editor::Editor,
     settings_window::view,
-    ui::{BODY, Button, Inbox, Palette, SEMIBOLD, SMALL, icons, rgb},
+    ui::{self, Inbox, icons},
 };
 
 pub(crate) const RESTORE_ARG: &str = "--restore-update";
@@ -410,7 +411,7 @@ impl Editor {
     }
 
     /// A card over the canvas while an update is ready, installs, or failed to install.
-    pub(crate) fn render_update_notice(&self, p: &Palette) -> Option<El> {
+    pub(crate) fn render_update_notice(&self, k: &Kit) -> Option<El> {
         if self.updates.notice_dismissed {
             return None;
         }
@@ -437,42 +438,40 @@ impl Editor {
             _ => return None,
         };
         let installing = matches!(phase, Phase::Installing(_));
+        let card = Card::new()
+            .accent(if failed {
+                k.c.danger.icon
+            } else {
+                k.c.bg_accent
+            })
+            .title(title, Some(glyph))
+            .description(description)
+            .action(
+                Button::new("Later")
+                    .variant(ButtonVariant::Ghost)
+                    .disabled(installing)
+                    .on_press(|s: &mut Editor| s.updates.notice_dismissed = true)
+                    .build(k)
+                    .key("update-later"),
+            )
+            .action(
+                Button::new(if failed {
+                    "Try again"
+                } else {
+                    "Restart & update"
+                })
+                .variant(ButtonVariant::Contrast)
+                .disabled(installing)
+                .on_press(|s: &mut Editor| s.restart_to_update())
+                .build(k)
+                .key("update-restart"),
+            )
+            .build(k);
         Some(
-            row()
+            ui::surface::<Editor>(k, el().w(440.0).padding(4.0))
                 .key("update-notice")
                 .pin(None, Some(12.0), Some(12.0), None)
-                .w(440.0)
-                .padding(12.0)
-                .gap(12.0)
-                .center_y()
-                .fill(p.popover)
-                .border(1.0, p.border)
-                .radius(8.0)
-                .shadow(8.0, 24.0, Color::BLACK.alpha(0.18))
-                .on_press(|_: &mut Editor| {})
-                .child(status_icon(p, glyph, failed))
-                .child(status_text(p, title, description))
-                .child(
-                    row()
-                        .gap(4.0)
-                        .child(
-                            Button::new("update-later")
-                                .label("Later")
-                                .disabled(installing)
-                                .build(p, |s: &mut Editor, _| s.updates.notice_dismissed = true),
-                        )
-                        .child(
-                            Button::new("update-restart")
-                                .primary()
-                                .label(if failed {
-                                    "Try again"
-                                } else {
-                                    "Restart & update"
-                                })
-                                .disabled(installing)
-                                .build(p, |s: &mut Editor, _| s.restart_to_update()),
-                        ),
-                ),
+                .child(card),
         )
     }
 
@@ -509,7 +508,7 @@ impl Editor {
 
 /// The whole editor window while an update installs, so nothing changes after the recovery
 /// snapshot.
-pub(crate) fn installing_screen(p: &Palette) -> El {
+pub(crate) fn installing_screen(k: &Kit) -> El {
     col()
         .key("update-installing")
         .w_full()
@@ -517,12 +516,17 @@ pub(crate) fn installing_screen(p: &Palette) -> El {
         .center()
         .gap(12.0)
         .padding(24.0)
-        .fill(p.background)
-        .child(text("Installing update…").font(BODY).color(p.foreground))
+        .fill(k.c.page)
+        .child(rune_kit::Spinner::new().build(k))
+        .child(
+            text("Installing update…")
+                .font(k.ty.body_medium)
+                .color(k.c.text_base),
+        )
         .child(
             text("Sniplet saves your work and opens again after the update.")
-                .font(SMALL)
-                .color(p.muted_foreground),
+                .font(k.ty.ui)
+                .color(k.c.text_muted),
         )
 }
 
@@ -548,7 +552,7 @@ const _: () = {
 /// The Updates section of Settings. Its buttons send their actions to the editor's inbox, so it
 /// works in any window's state `S`.
 pub(crate) fn settings_section<S: 'static>(
-    p: &Palette,
+    k: &Kit,
     summary: &UpdateSummary,
     editor: &Inbox<Editor>,
 ) -> El {
@@ -639,79 +643,95 @@ pub(crate) fn settings_section<S: 'static>(
     let download: fn(&mut Editor) = Editor::download_update;
     let install: fn(&mut Editor) = Editor::restart_to_update;
     let mut controls = row().gap(8.0).center_y();
+    let button = |label: &str, primary: bool| {
+        Button::new(label).variant(if primary {
+            ButtonVariant::Contrast
+        } else {
+            ButtonVariant::Neutral
+        })
+    };
     if !phase.transferring() {
         let checking = matches!(phase, Phase::Checking);
         controls = controls.child(
-            Button::new("update-check")
+            button("Check now", false)
                 .icon(&icons::REFRESH_CW)
-                .label("Check now")
                 .disabled(checking)
-                .build(p, send(check)),
+                .on_press_tx(send(check))
+                .build(k)
+                .key("update-check"),
         );
     }
     controls = match phase {
         Phase::Available(_) | Phase::Downloading(_) => controls.child(
-            Button::new("update-download")
-                .primary()
+            button("Download", true)
                 .icon(&icons::DOWNLOAD)
-                .label("Download")
                 .disabled(matches!(phase, Phase::Downloading(_)))
-                .build(p, send(download)),
+                .on_press_tx(send(download))
+                .build(k)
+                .key("update-download"),
         ),
         Phase::DownloadFailed(..) => controls.child(
-            Button::new("update-download-retry")
-                .label("Try again")
-                .build(p, send(download)),
+            button("Try again", false)
+                .on_press_tx(send(download))
+                .build(k)
+                .key("update-download-retry"),
         ),
         Phase::Ready(_) | Phase::Installing(_) => controls.child(
-            Button::new("update-install")
-                .primary()
-                .label("Restart & update")
+            button("Restart & update", true)
                 .disabled(matches!(phase, Phase::Installing(_)))
-                .build(p, send(install)),
+                .on_press_tx(send(install))
+                .build(k)
+                .key("update-install"),
         ),
         Phase::InstallFailed(..) => controls
             .child(
-                Button::new("update-website")
+                button("Open website", false)
                     .icon(&icons::GLOBE)
-                    .label("Open website")
-                    .build(p, |_: &mut S, tx: &mut Tx| {
+                    .on_press_tx(|_: &mut S, tx: &mut Tx| {
                         let _ = tx.open_url(RELEASES_URL);
-                    }),
+                    })
+                    .build(k)
+                    .key("update-website"),
             )
             .child(
-                Button::new("update-install-retry")
-                    .label("Try again")
-                    .build(p, send(install)),
+                button("Try again", false)
+                    .on_press_tx(send(install))
+                    .build(k)
+                    .key("update-install-retry"),
             ),
         Phase::RestartFailed(..) => controls.child(
-            Button::new("update-install-retry")
-                .label("Restart")
-                .build(p, send(install)),
+            button("Restart", false)
+                .on_press_tx(send(install))
+                .build(k)
+                .key("update-install-retry"),
         ),
         _ => controls,
     };
     let busy = phase.busy();
-    let channels = row().gap(4.0).children(
-        [
-            ("update-channel-stable", ReleaseChannel::Stable),
-            ("update-channel-nightly", ReleaseChannel::Nightly),
-        ]
-        .map(|(key, choice)| {
-            let editor = editor.clone();
-            Button::new(key)
-                .label(choice.label())
-                .selected(summary.channel == choice)
-                .disabled(busy)
-                .build(p, move |_: &mut S, _: &mut Tx| {
-                    editor.send(move |editor, _| editor.set_update_channel(choice))
-                })
-        }),
-    );
+    let choices = [ReleaseChannel::Stable, ReleaseChannel::Nightly];
+    let mut channels = SegmentedControl::new(
+        &choices.map(ReleaseChannel::label),
+        choices.iter().position(|choice| *choice == summary.channel),
+    )
+    .label("Update channel")
+    .fit()
+    .on_pick({
+        let editor = editor.clone();
+        move |_: &mut S, index, _| {
+            let choice = choices[index];
+            editor.send(move |editor, _| editor.set_update_channel(choice))
+        }
+    });
+    if busy {
+        channels = channels
+            .segment_state(0, State::Disabled)
+            .segment_state(1, State::Disabled);
+    }
+    let channels = channels.build(k).key("update-channel");
     let automatic = {
         let editor = editor.clone();
         let on = summary.automatic;
-        rune_kit::Switch::new(on)
+        Switch::new(on)
             .label("Check for updates automatically")
             .hide_label()
             .on_toggle(move |_: &mut S| {
@@ -720,13 +740,13 @@ pub(crate) fn settings_section<S: 'static>(
                     editor.persist_settings();
                 })
             })
-            .build(&view::kit(p))
+            .build(k)
             .key("check-for-updates")
     };
     view::section(
-        p,
+        k,
         "Updates",
-        view::card(p)
+        view::card(k)
             .key("settings-updates")
             .child(
                 row()
@@ -734,20 +754,20 @@ pub(crate) fn settings_section<S: 'static>(
                     .padding(16.0)
                     .gap(12.0)
                     .center_y()
-                    .child(status_icon(p, glyph, failed))
-                    .child(status_text(p, title, description))
+                    .child(status_icon(k, glyph, failed))
+                    .child(status_text(k, title, description))
                     .child(controls),
             )
-            .child(view::rule(p))
+            .child(view::rule(k))
             .child(view::setting_row(
-                p,
+                k,
                 "Update channel",
                 "Stable is tested. Nightly can have bugs. Switching channels never installs an older version.",
                 channels,
             ))
-            .child(view::rule(p))
+            .child(view::rule(k))
             .child(view::setting_row(
-                p,
+                k,
                 "Check for updates automatically",
                 "One time each day. Sniplet asks before it installs.",
                 automatic,
@@ -765,29 +785,29 @@ fn failure_title(phase: &Phase) -> &'static str {
 }
 
 /// A status's title over its description, taking the row's spare width.
-fn status_text(p: &Palette, title: String, description: String) -> El {
+fn status_text(k: &Kit, title: String, description: String) -> El {
     col()
         .grow(1.0)
         .shrink()
         .min_w(0.0)
         .gap(4.0)
-        .child(text(title).font(SEMIBOLD).color(p.foreground).wrap())
-        .child(view::note(p, description))
+        .child(text(title).font(k.ty.ui_medium).color(k.c.text_base).wrap())
+        .child(view::note(k, description))
 }
 
 /// The status's icon on a tinted square: red for failures, green for done, else the accent.
-fn status_icon(p: &Palette, glyph: &'static Icon, failed: bool) -> El {
-    let color = if failed {
-        p.danger
+fn status_icon(k: &Kit, glyph: &'static Icon, failed: bool) -> El {
+    let (fill, color) = if failed {
+        (k.c.danger.bg, k.c.danger.icon)
     } else if std::ptr::eq(glyph, &icons::CIRCLE_CHECK) {
-        rgb(0x22c55e)
+        (k.c.success.bg, k.c.success.icon)
     } else {
-        p.accent
+        (k.c.bg_accent.alpha(0.16), k.c.bg_accent)
     };
     el().size(30.0, 30.0)
         .center()
-        .radius(8.0)
-        .fill(color.alpha(0.16))
+        .radius(k.radius.lg)
+        .fill(fill)
         .child(icon(glyph, 16.0).color(color))
 }
 
@@ -982,13 +1002,13 @@ mod tests {
     }
 
     fn section_view(s: &Section, _: &mut rune::Cx<Section>) -> El {
-        let p = Palette::new(true);
+        let k = ui::kit(true);
         col()
             .w_full()
             .h_full()
             .padding(16.0)
-            .fill(p.background)
-            .child(settings_section::<Section>(&p, &s.summary, &s.editor))
+            .fill(k.c.page)
+            .child(settings_section::<Section>(&k, &s.summary, &s.editor))
     }
 
     fn env() -> rune::Env {
@@ -1034,7 +1054,7 @@ mod tests {
 
         fake.fail_check.store(false, Ordering::SeqCst);
         click(&mut settings, "update-check");
-        click(&mut settings, "update-channel-nightly");
+        click(&mut settings, "update-channel/segment1");
         Inbox::drain(&mut editor, |e| &e.inbox, &mut Tx::default());
         assert!(matches!(editor.updates.phase, Phase::Checking));
         sync(&mut editor, &mut settings);
@@ -1055,7 +1075,7 @@ mod tests {
             settings.find("update-check").is_none(),
             "no check while downloading"
         );
-        click(&mut settings, "update-channel-stable");
+        click(&mut settings, "update-channel/segment0");
         sync(&mut editor, &mut settings);
         assert_eq!(editor.settings.update_channel, ReleaseChannel::Nightly);
         assert_eq!(fake.take(), ["download 9.1.0-nightly.20261104.1"]);
@@ -1065,16 +1085,16 @@ mod tests {
             store.load().unwrap().update_channel,
             ReleaseChannel::Nightly
         );
-        assert!(editor.render_update_notice(&Palette::new(true)).is_some());
+        assert!(editor.render_update_notice(&ui::kit(true)).is_some());
 
-        click(&mut settings, "update-channel-stable");
+        click(&mut settings, "update-channel/segment0");
         sync(&mut editor, &mut settings);
         assert_eq!(fake.take(), ["check Stable"]);
         let Phase::Available(release) = editor.updates.phase.clone() else {
             panic!("a channel change must replace the ready Nightly update");
         };
         assert_eq!(release.version, "9.0.0");
-        assert!(editor.render_update_notice(&Palette::new(true)).is_none());
+        assert!(editor.render_update_notice(&ui::kit(true)).is_none());
     }
 
     #[test]

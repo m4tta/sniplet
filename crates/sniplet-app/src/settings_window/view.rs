@@ -2,9 +2,13 @@
 //! section and row helpers are shared with the Updates section in `updates.rs`.
 use rune::{
     Color, Cursor, Cx, Drag, El, Phase, Pixels, ScrollSpec, ShortcutError, SurfaceFit, TextEdit,
-    TextStyle, Tx, col, el, icon, row, text,
+    Tx, col, el, icon, row, text,
 };
-use rune_kit::{Kit, SegmentedControl, ShortcutRecorder, ShortcutRecorderState, Switch, TextInput};
+use rune_kit::{
+    Button, ButtonVariant, Card, ControlSize, Divider, Field as KitField, IconButton,
+    IconButtonVariant, Kit, SegmentedControl, ShortcutRecorder, ShortcutRecorderState, Switch,
+    TextInput, Toast, ToastRegion,
+};
 use sniplet_platform::{
     ExportFormat, HotkeySettings, Settings, ThemePreference, WindowBackground, WindowCaptureStyle,
 };
@@ -13,9 +17,7 @@ use super::{
     Field, Page, SHORTCUT_GROUPS, SettingsUi, Slider, UploadKind, hotkey_text, shortcut_name,
     step_limit,
 };
-use crate::ui::{BODY, Button, Palette, SEMIBOLD, SMALL, icons, rgb};
-
-const SMALL_SEMIBOLD: TextStyle = TextStyle::new(12.0, 600.0);
+use crate::ui::{self, icons, rgb};
 
 /// Preset window backgrounds. The hex field still accepts any color.
 pub(super) const SWATCHES: [[u8; 3]; 6] = [
@@ -49,24 +51,22 @@ const UPLOAD_PLACEHOLDERS: [&str; 7] = [
 ];
 
 pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
-    let p = Palette::for_preference(s.settings.theme, cx.system_dark());
-    cx.caption_color(p.foreground);
+    let k = ui::window_kit(cx, s.settings.theme);
     if s.snapshot.installing {
-        return crate::updates::installing_screen(&p);
+        return crate::updates::installing_screen(&k);
     }
-    let k = kit(&p);
     let page = match s.page {
-        Page::General => general(s, &p, &k),
-        Page::Capture => capture(s, &p, &k),
-        Page::Shortcuts => shortcuts(s, &p, &k),
-        Page::Share => share(s, &p, &k),
+        Page::General => general(s, &k),
+        Page::Capture => capture(s, &k),
+        Page::Shortcuts => shortcuts(s, &k),
+        Page::Share => share(s, &k),
     };
     let insets = cx.chrome_insets();
     let mut root = col()
         .key("settings-window")
         .w_full()
         .h_full()
-        .fill(p.background);
+        .fill(k.c.page);
     // Where the native frame stays (Linux), it already shows the title.
     if insets.height > 0.0 {
         root = root.child(
@@ -77,135 +77,108 @@ pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
                 .px(insets.leading.max(insets.trailing))
                 .center()
                 .window_drag()
-                .child(text("Settings").font(SEMIBOLD).color(p.foreground)),
+                .child(text("Settings").font(k.ty.ui_medium).color(k.c.text_base)),
         );
     }
-    root.child(tabs(s, &p))
-        .child(
-            col()
-                .key(format!("settings-content-{}", s.page as usize))
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(col().w_full().padding(24.0).child(page)),
-        )
-        .children(toast(s, &p))
+    let content = col()
+        .key(format!("settings-content-{}", s.page as usize))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(col().w_full().padding(24.0).child(page));
+    root.child(tabs(s, &k))
+        .child(k.scroll_bar(content).w_full().grow(1.0).min_h(0.0))
+        .children(toast(s, &k))
 }
 
-/// Kit components in Sniplet's colors, with white switch knobs in both appearances.
-pub(crate) fn kit(p: &Palette) -> Kit {
-    let mut kit = p.kit();
-    kit.c.knob = Color::WHITE;
-    kit.c.knob_on = Color::WHITE;
-    kit
-}
-
-fn tabs(s: &SettingsUi, p: &Palette) -> El {
+/// The page tabs, as a preferences window's toolbar shows them: an icon over a title.
+fn tabs(s: &SettingsUi, k: &Kit) -> El {
     let mut tabs = row()
         .key("settings-tabs")
+        .role("tablist")
         .w_full()
         .padding(8.0)
         .gap(4.0)
         .justify_center()
-        .fill(p.title_bar);
+        .fill(k.c.bg_deep);
     for (index, page) in Page::ALL.into_iter().enumerate() {
         let selected = s.page == page;
-        let ink = if selected {
-            p.foreground
+        let tab = col()
+            .key(format!("settings-nav-{index}"))
+            .role("tab")
+            .label(page.title())
+            .checked(selected)
+            .size(96.0, 56.0)
+            .radius(k.radius.lg)
+            .center()
+            .gap(4.0)
+            .cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut SettingsUi, tx: &mut Tx| {
+                // Pages switch at once, as tabs do.
+                tx.instant();
+                s.select_page(page);
+            })
+            .child(icon(page.icon(), 20.0).color(if selected {
+                k.c.icon_accent
+            } else {
+                k.c.icon_muted
+            }))
+            .child(
+                text(page.title())
+                    .font(if selected {
+                        k.ty.text_xsmall_medium
+                    } else {
+                        k.ty.text_xsmall
+                    })
+                    .color(if selected {
+                        k.c.text_base
+                    } else {
+                        k.c.text_muted
+                    })
+                    .single_line(),
+            );
+        tabs = tabs.child(if selected {
+            tab.fill(k.c.pressed)
         } else {
-            p.muted_foreground
-        };
-        tabs = tabs.child(
-            col()
-                .key(format!("settings-nav-{index}"))
-                .role("tab")
-                .label(page.title())
-                .checked(selected)
-                .size(96.0, 56.0)
-                .radius(6.0)
-                .center()
-                .gap(4.0)
-                .fill(if selected {
-                    p.foreground.alpha(0.1)
-                } else {
-                    Color::TRANSPARENT
-                })
-                .hover(p.foreground.alpha(0.06))
-                .cursor(Cursor::Pointer)
-                .on_press_tx(move |s: &mut SettingsUi, tx: &mut Tx| {
-                    // Pages switch at once, as tabs do.
-                    tx.instant();
-                    s.select_page(page);
-                })
-                .child(icon(page.icon(), 20.0).color(if selected {
-                    p.accent
-                } else {
-                    p.muted_foreground
-                }))
-                .child(
-                    text(page.title())
-                        .font(if selected { SMALL_SEMIBOLD } else { SMALL })
-                        .color(ink)
-                        .single_line(),
-                ),
-        );
+            k.interactive(tab)
+        });
     }
     col()
         .w_full()
         .child(tabs)
-        .child(el().w_full().h(1.0).fill(p.border))
+        .child(Divider::horizontal().build(k))
 }
 
-fn toast(s: &SettingsUi, p: &Palette) -> Option<El> {
+/// The save result, as a kit toast at the window's bottom right. An error stays until it is
+/// closed.
+fn toast(s: &SettingsUi, k: &Kit) -> Option<El> {
     let notice = s.notice.as_ref().filter(|notice| notice.field.is_none())?;
-    let ink = if notice.error { p.danger } else { p.background };
-    let mut toast = row()
-        .key("settings-toast")
-        .role("status")
-        .pin(None, None, Some(16.0), Some(16.0))
-        .max_w(420.0)
-        .px(12.0)
-        .py(8.0)
-        .radius(8.0)
-        .gap(8.0)
-        .center_y()
-        .shadow(4.0, 16.0, Color::BLACK.alpha(0.2));
-    toast = if notice.error {
-        toast
-            .fill(p.background)
-            .border(1.0, p.danger)
-            .cursor(Cursor::Pointer)
-            .on_press(|s: &mut SettingsUi| s.clear_notice())
+    let (glyph, ink) = if notice.error {
+        (&icons::CIRCLE_ALERT, k.c.danger.icon)
     } else {
-        toast.fill(p.foreground)
+        (&icons::CHECK, k.c.success.icon)
     };
+    // The kit cuts a title to one line, so an error's full text goes in the description.
+    let toast = if notice.error {
+        Toast::new("settings-toast", "Something went wrong")
+            .description(notice.text.clone())
+            .on_close(|s: &mut SettingsUi| s.clear_notice())
+    } else {
+        Toast::new("settings-toast", notice.text.clone())
+    };
+    let toast = toast.lead(icon(glyph, 16.0).color(ink));
     Some(
-        toast
-            .child(
-                icon(
-                    if notice.error {
-                        &icons::CIRCLE_ALERT
-                    } else {
-                        &icons::CHECK
-                    },
-                    14.0,
-                )
-                .color(ink),
-            )
-            .child(
-                text(notice.text.clone())
-                    .font(SMALL)
-                    .color(ink)
-                    .shrink()
-                    .wrap(),
-            ),
+        ToastRegion::new()
+            .toast(toast.build(k))
+            .build(k)
+            .pin(None, None, Some(16.0), Some(16.0)),
     )
 }
 
-fn general(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
+fn general(s: &SettingsUi, k: &Kit) -> El {
     let themes = [
         ("theme-system", "System", ThemePreference::System),
         ("theme-light", "Light", ThemePreference::Light),
@@ -216,11 +189,11 @@ fn general(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
             .flex_wrap()
             .gap(12.0)
             .children(themes.map(|(key, label, preference)| {
-                tile(p, key, s.settings.theme == preference, 132.0, 106.0)
+                tile(k, key, s.settings.theme == preference, 132.0, 106.0)
                     .label(label)
                     .on_press(move |s: &mut SettingsUi| s.change(move |s| s.theme = preference))
                     .child(appearance_preview(preference))
-                    .child(text(label).font(BODY).color(p.foreground))
+                    .child(text(label).font(k.ty.ui).color(k.c.text_base))
             }));
     let startup = Switch::new(s.startup.enabled)
         .label("Launch at startup")
@@ -235,40 +208,40 @@ fn general(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         .gap(8.0)
         .child(
             text(format!("Sniplet {}", sniplet_platform::updates::VERSION))
-                .font(SMALL)
-                .color(p.muted_foreground),
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_muted),
         )
-        .child(text("·").font(SMALL).color(p.muted_foreground))
+        .child(text("·").font(k.ty.text_xsmall).color(k.c.text_muted))
         .child(
-            Button::new("reveal-settings")
-                .label("Show settings file")
-                .compact()
-                .build(p, |_: &mut SettingsUi, _| {
+            Button::new("Show settings file")
+                .variant(ButtonVariant::GhostMuted)
+                .on_press(|_: &mut SettingsUi| {
                     if let Ok(store) = sniplet_platform::SettingsStore::for_app() {
                         super::reveal(store.path());
                     }
-                }),
+                })
+                .build(k)
+                .key("reveal-settings"),
         );
     page()
         .child(section(
-            p,
+            k,
             "Appearance",
-            card(p).padding(12.0).child(appearance),
+            card(k).padding(12.0).child(appearance),
         ))
         .child(section(
-            p,
+            k,
             "App",
-            card(p)
+            card(k)
                 .child(setting_row_with_error(
-                    p,
+                    k,
                     "Launch at startup",
                     "Start in the tray when you sign in. The editor stays closed.",
                     s.field_error(Field::Startup),
                     startup,
                 ))
-                .child(rule(p))
+                .child(rule(k))
                 .child(toggle(
-                    p,
                     k,
                     "always-on-top",
                     "Keep editor on top",
@@ -278,31 +251,33 @@ fn general(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
                 )),
         ))
         .child(crate::updates::settings_section::<SettingsUi>(
-            p,
+            k,
             &s.snapshot.updates,
             &s.editor,
         ))
         .child(about)
 }
 
-fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
+fn capture(s: &SettingsUi, k: &Kit) -> El {
     let limit = s.settings.scroll_max_frames;
     let step = |key: &'static str, glyph, help: &'static str, disabled: bool, up: bool| {
-        Button::new(key)
-            .icon(glyph)
+        IconButton::new(glyph)
+            .variant(IconButtonVariant::Ghost)
             .help(help)
-            .size(28.0, 28.0)
             .disabled(disabled)
-            .build(p, move |s: &mut SettingsUi, _| {
+            .on_press(move |s: &mut SettingsUi| {
                 s.change(move |s| s.scroll_max_frames = step_limit(limit, up))
             })
+            .build(k)
+            .key(key)
     };
     let stepper = row()
-        .h(32.0)
+        .h(28.0)
         .px(2.0)
         .center_y()
-        .radius(6.0)
-        .border(1.0, p.border)
+        .radius(k.radius.md)
+        .fill(k.c.layer_01)
+        .border(1.0, k.c.border_base)
         .child(step(
             "scroll-limit-down",
             &icons::MINUS,
@@ -314,8 +289,8 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
             text(limit.to_string())
                 .key("scroll-limit")
                 .w(40.0)
-                .font(BODY)
-                .color(p.foreground)
+                .font(k.ty.ui_medium)
+                .color(k.c.text_base)
                 .align(rune::Align::Center),
         )
         .child(step(
@@ -330,7 +305,7 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         .gap(8.0)
         .child(slider(
             s,
-            p,
+            k,
             Slider::Speed,
             "scroll-speed",
             "Scrolling speed",
@@ -339,17 +314,16 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         .child(
             row()
                 .justify_between()
-                .child(text("Slower").font(SMALL).color(p.muted_foreground))
-                .child(text("Faster").font(SMALL).color(p.muted_foreground)),
+                .child(text("Slower").font(k.ty.text_xsmall).color(k.c.text_muted))
+                .child(text("Faster").font(k.ty.text_xsmall).color(k.c.text_muted)),
         );
     page()
-        .child(window_background(s, p))
+        .child(window_background(s, k))
         .child(section(
-            p,
+            k,
             "After capture",
-            card(p)
+            card(k)
                 .child(toggle(
-                    p,
                     k,
                     "auto-copy",
                     "Copy captures automatically",
@@ -357,9 +331,8 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
                     s.settings.auto_copy,
                     |s, on| s.auto_copy = on,
                 ))
-                .child(rule(p))
+                .child(rule(k))
                 .child(toggle(
-                    p,
                     k,
                     "hide-after-export",
                     "Hide editor after copy or save",
@@ -369,18 +342,18 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
                 )),
         ))
         .child(section(
-            p,
+            k,
             "Scrolling capture",
-            card(p)
+            card(k)
                 .child(setting_row(
-                    p,
+                    k,
                     "Capture limit",
                     "Most frames in one scrolling capture (2–200).",
                     stepper,
                 ))
-                .child(rule(p))
+                .child(rule(k))
                 .child(setting_row(
-                    p,
+                    k,
                     "Scrolling speed",
                     "Slow down for pages that need time to load.",
                     speed,
@@ -388,7 +361,7 @@ fn capture(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         ))
 }
 
-fn window_background(s: &SettingsUi, p: &Palette) -> El {
+fn window_background(s: &SettingsUi, k: &Kit) -> El {
     let style = &s.settings.window_capture;
     let choices = row()
         .w_full()
@@ -399,7 +372,7 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                 .enumerate()
                 .map(|(index, &(key, title, background))| {
                     let selected = style.background == background;
-                    tile(p, key, selected, 1.0, 110.0)
+                    tile(k, key, selected, 1.0, 110.0)
                         .grow(1.0)
                         .min_w(0.0)
                         .label(title)
@@ -410,7 +383,14 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                             el().size(96.0, 66.0)
                                 .radius(6.0)
                                 .padding(2.0)
-                                .border(2.0, if selected { p.accent } else { p.border })
+                                .border(
+                                    2.0,
+                                    if selected {
+                                        k.c.bg_accent
+                                    } else {
+                                        k.c.border_base
+                                    },
+                                )
                                 .child(
                                     el().w_full()
                                         .h_full()
@@ -418,7 +398,12 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                                         .pixels_fit(&s.previews[index], SurfaceFit::Fit),
                                 ),
                         )
-                        .child(text(title).font(SMALL).color(p.foreground).truncate())
+                        .child(
+                            text(title)
+                                .font(k.ty.text_xsmall)
+                                .color(k.c.text_base)
+                                .truncate(),
+                        )
                 }),
         );
     let swatches = row()
@@ -433,7 +418,7 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                 .border(
                     2.0,
                     if style.color == color {
-                        p.accent
+                        k.c.bg_accent
                     } else {
                         Color::TRANSPARENT
                     },
@@ -444,7 +429,7 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                 .child(
                     el().size(20.0, 20.0)
                         .radius(10.0)
-                        .border(1.0, p.border)
+                        .border(1.0, k.c.border_base)
                         .fill(rgb(color_value(color))),
                 )
         }));
@@ -454,19 +439,19 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
         .invalid(s.field_error(Field::BackgroundColor).is_some())
         .on_edit(color_access)
         .on_submit(|s: &mut SettingsUi, _| s.save_background_color())
-        .build(&kit(p))
+        .build(k)
         .key("window-background-color");
     let wallpaper = style.background == WindowBackground::Wallpaper;
-    let mut card = card(p)
+    let mut card = card(k)
         .child(col().padding(12.0).child(choices))
         .child(col().px(16.0).pb(12.0).child(note(
-            p,
+            k,
             "Applied to window captures. Padded modes add a soft shadow. Trim shadow keeps the window's exact size.",
         )));
     if style.background != WindowBackground::TrimShadow {
         let padding = s.slider_value(Slider::Padding);
-        card = card.child(rule(p)).child(setting_row(
-            p,
+        card = card.child(rule(k)).child(setting_row(
+            k,
             "Padding",
             "Space around the window at 1× resolution.",
             row()
@@ -474,7 +459,7 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                 .gap(12.0)
                 .child(slider(
                     s,
-                    p,
+                    k,
                     Slider::Padding,
                     "window-padding",
                     "Padding",
@@ -483,8 +468,8 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
                 .child(
                     text(format!("{padding} pt"))
                         .w(44.0)
-                        .font(BODY)
-                        .color(p.foreground),
+                        .font(k.ty.ui)
+                        .color(k.c.text_base),
                 ),
         ));
     }
@@ -492,8 +477,8 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
         style.background,
         WindowBackground::Solid | WindowBackground::Wallpaper
     ) {
-        card = card.child(rule(p)).child(setting_row_with_error(
-            p,
+        card = card.child(rule(k)).child(setting_row_with_error(
+            k,
             if wallpaper {
                 "Fallback color"
             } else {
@@ -514,56 +499,59 @@ fn window_background(s: &SettingsUi, p: &Palette) -> El {
             |path| path.display().to_string(),
         );
         card = card
-            .child(rule(p))
+            .child(rule(k))
             .child(setting_row_with_error(
-                p,
+                k,
                 "Wallpaper image",
                 "Use your desktop wallpaper or choose an image.",
                 s.field_error(Field::Wallpaper),
                 row()
                     .gap(8.0)
                     .child(
-                        Button::new("desktop-wallpaper")
-                            .label("Use desktop")
+                        Button::new("Use desktop")
+                            .variant(ButtonVariant::Ghost)
                             .disabled(style.wallpaper.is_none())
-                            .build(p, |s: &mut SettingsUi, _| {
+                            .on_press(|s: &mut SettingsUi| {
                                 s.change(|s| s.window_capture.wallpaper = None)
-                            }),
+                            })
+                            .build(k)
+                            .key("desktop-wallpaper"),
                     )
-                    .child(outlined(
-                        p,
-                        Button::new("choose-wallpaper")
-                            .label("Choose…")
-                            .build(p, |s: &mut SettingsUi, tx: &mut Tx| s.choose_wallpaper(tx)),
-                    )),
+                    .child(
+                        Button::new("Choose…")
+                            .on_press_tx(|s: &mut SettingsUi, tx: &mut Tx| s.choose_wallpaper(tx))
+                            .build(k)
+                            .key("choose-wallpaper"),
+                    ),
             ))
-            .child(path_line(p, path));
+            .child(path_line(k, path));
     }
-    section(p, "Window screenshot background", card)
+    section(k, "Window screenshot background", card)
 }
 
-fn shortcuts(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
+fn shortcuts(s: &SettingsUi, k: &Kit) -> El {
     let recording = s.recorders.iter().any(ShortcutRecorderState::is_recording);
     let mut page = page();
     if let Some(error) = s.snapshot.hotkey_error.as_ref().filter(|_| !recording) {
         page = page.child(
-            el().key("hotkey-error")
+            Card::new()
+                .accent(k.c.danger.icon)
+                .description(error.clone())
+                .build(k)
+                .key("hotkey-error")
                 .role("alert")
-                .padding(12.0)
-                .radius(12.0)
-                .border(1.0, p.danger)
-                .child(text(error.clone()).font(SMALL).color(p.danger).wrap()),
+                .fill(k.c.danger.bg),
         );
     }
     for (group, items) in SHORTCUT_GROUPS {
-        let mut rows = card(p);
+        let mut rows = card(k);
         for (position, &(index, label)) in items.iter().enumerate() {
             if position > 0 {
-                rows = rows.child(rule(p));
+                rows = rows.child(rule(k));
             }
-            rows = rows.child(setting_row(p, label, "", recorder(s, p, k, index)));
+            rows = rows.child(setting_row(k, label, "", recorder(s, k, index)));
         }
-        page = page.child(section(p, group, rows));
+        page = page.child(section(k, group, rows));
     }
     page.child(
         row()
@@ -571,22 +559,23 @@ fn shortcuts(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
             .center_y()
             .gap(16.0)
             .child(el().grow(1.0).shrink().min_w(0.0).child(note(
-                p,
+                k,
                 "Click a shortcut, then press the new keys. Esc cancels. Backspace turns it off.",
             )))
             .child(
-                Button::new("reset-hotkeys")
+                Button::new("Restore all defaults")
                     .icon(&icons::ROTATE_CCW)
-                    .label("Restore all defaults")
-                    .build(p, |s: &mut SettingsUi, _| {
+                    .on_press(|s: &mut SettingsUi| {
                         s.change(|s| s.hotkeys = HotkeySettings::default())
-                    }),
+                    })
+                    .build(k)
+                    .key("reset-hotkeys"),
             ),
     )
 }
 
 /// A click-to-record shortcut field, with buttons to restore its default or turn it off.
-fn recorder(s: &SettingsUi, p: &Palette, k: &Kit, index: usize) -> El {
+fn recorder(s: &SettingsUi, k: &Kit, index: usize) -> El {
     let state = &s.recorders[index];
     let value = s.settings.hotkeys.slots()[index];
     let default = HotkeySettings::default().slots()[index].to_owned();
@@ -604,17 +593,12 @@ fn recorder(s: &SettingsUi, p: &Palette, k: &Kit, index: usize) -> El {
         .build(k);
     // Small icon buttons inside the field's trailing end.
     let action = |key: String, glyph: &'static rune::Icon, help: &'static str| {
-        row()
-            .key(key)
-            .role("button")
-            .label(help)
+        IconButton::new(glyph)
+            .variant(IconButtonVariant::GhostMuted)
+            .control_size(ControlSize::Small)
             .help(help)
-            .size(24.0, 24.0)
-            .center()
-            .radius(4.0)
-            .hover(p.hover)
-            .cursor(Cursor::Pointer)
-            .child(icon(glyph, 14.0).color(p.muted_foreground))
+            .build(k)
+            .key(key)
     };
     let mut actions = row().gap(2.0);
     if state.is_recording() {
@@ -666,7 +650,7 @@ fn upload_access(index: usize) -> impl for<'a> Fn(&'a mut SettingsUi) -> &'a mut
     move |s| &mut s.upload[index]
 }
 
-fn share(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
+fn share(s: &SettingsUi, k: &Kit) -> El {
     let settings = &s.settings;
     let directory = settings
         .screenshot_directory
@@ -692,42 +676,41 @@ fn share(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
     let folder = row()
         .center_y()
         .gap(8.0)
-        .child(outlined(
-            p,
-            Button::new("choose-screenshot-folder")
-                .label("Choose…")
-                .build(p, |s: &mut SettingsUi, tx: &mut Tx| s.choose_folder(tx)),
-        ))
         .child(
-            Button::new("reset-screenshot-folder")
-                .icon(&icons::ROTATE_CCW)
+            Button::new("Choose…")
+                .on_press_tx(|s: &mut SettingsUi, tx: &mut Tx| s.choose_folder(tx))
+                .build(k)
+                .key("choose-screenshot-folder"),
+        )
+        .child(
+            IconButton::new(&icons::ROTATE_CCW)
+                .variant(IconButtonVariant::Ghost)
                 .help("Use the default folder")
-                .build(p, |s: &mut SettingsUi, _| {
-                    s.change(|s| s.screenshot_directory = None)
-                }),
+                .on_press(|s: &mut SettingsUi| s.change(|s| s.screenshot_directory = None))
+                .build(k)
+                .key("reset-screenshot-folder"),
         );
     page()
         .child(section(
-            p,
+            k,
             "Saving",
-            card(p)
+            card(k)
                 .child(setting_row(
-                    p,
+                    k,
                     "Screenshots folder",
                     "The starting folder when you save a screenshot.",
                     folder,
                 ))
-                .child(path_line(p, directory))
-                .child(rule(p))
+                .child(path_line(k, directory))
+                .child(rule(k))
                 .child(setting_row(
-                    p,
+                    k,
                     "Save format",
                     "The default image format.",
                     format,
                 ))
-                .child(rule(p))
+                .child(rule(k))
                 .child(toggle(
-                    p,
                     k,
                     "downscale-on-save",
                     "Save Retina screenshots at 1×",
@@ -736,10 +719,10 @@ fn share(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
                     |s, on| s.downscale_on_save = on,
                 )),
         ))
-        .child(upload_section(s, p, k))
+        .child(upload_section(s, k))
 }
 
-fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
+fn upload_section(s: &SettingsUi, k: &Kit) -> El {
     let configured = s.settings.cloud_upload.is_some();
     let status = if configured {
         "On. Screenshots upload only when you choose Upload."
@@ -754,9 +737,9 @@ fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         .on_toggle(|s: &mut SettingsUi| s.set_upload_open(!s.upload_open))
         .build(k)
         .key("upload-enabled");
-    let mut upload = card(p).child(setting_row(p, "Upload to the cloud", status, enabled));
+    let mut upload = card(k).child(setting_row(k, "Upload to the cloud", status, enabled));
     if !s.upload_open {
-        return section(p, "Upload", upload);
+        return section(k, "Upload", upload);
     }
     let kinds = [UploadKind::SignedUrl, UploadKind::S3];
     let kind = SegmentedControl::new(
@@ -782,42 +765,42 @@ fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         ],
     };
     upload = upload
-        .child(rule(p))
-        .child(setting_row(p, "Destination", "", kind))
-        .child(rule(p));
+        .child(rule(k))
+        .child(setting_row(k, "Destination", "", kind))
+        .child(rule(k));
     for &(index, label) in fields {
         upload = upload.child(
-            col()
-                .gap(8.0)
-                .px(16.0)
-                .py(12.0)
-                .child(text(label).font(BODY).color(p.foreground))
-                .child(
-                    TextInput::new(&s.upload[index])
-                        .label(label)
-                        .placeholder(UPLOAD_PLACEHOLDERS[index])
-                        .width(None)
-                        .on_edit(upload_access(index))
-                        .on_submit(|s: &mut SettingsUi, _| s.save_upload())
-                        .build(k)
-                        .key(format!("upload-input-{index}")),
-                ),
+            col().px(16.0).py(12.0).child(
+                KitField::new()
+                    .label(label)
+                    .control(
+                        TextInput::new(&s.upload[index])
+                            .label(label)
+                            .placeholder(UPLOAD_PLACEHOLDERS[index])
+                            .width(None)
+                            .on_edit(upload_access(index))
+                            .on_submit(|s: &mut SettingsUi, _| s.save_upload())
+                            .build(k)
+                            .key(format!("upload-input-{index}")),
+                    )
+                    .build(k),
+            ),
         );
     }
     upload = match s.upload_kind {
         UploadKind::SignedUrl => upload.child(col().px(16.0).pb(12.0).child(note(
-            p,
+            k,
             "Paste a signed upload URL from your provider. Signed URLs expire, so paste a new one when uploads fail.",
         ))),
         UploadKind::S3 => {
             let found = sniplet_platform::s3_credentials_available();
-            let ink = match (found, p.dark) {
-                (true, true) => rgb(0x4ade80),
-                (true, false) => rgb(0x16a34a),
-                (false, _) => p.danger,
+            let ink = if found {
+                k.c.success.fg
+            } else {
+                k.c.danger.fg
             };
-            upload.child(rule(p)).child(setting_row(
-                p,
+            upload.child(rule(k)).child(setting_row(
+                k,
                 "AWS credentials",
                 if found {
                     "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. AWS_SESSION_TOKEN is optional."
@@ -841,7 +824,7 @@ fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
                     )
                     .child(
                         text(if found { "Found" } else { "Not found" })
-                            .font(SMALL)
+                            .font(k.ty.text_xsmall_medium)
                             .color(ink),
                     ),
             ))
@@ -851,11 +834,11 @@ fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
         Some(error) => text(error.to_owned())
             .key("upload-error")
             .role("alert")
-            .font(SMALL)
-            .color(p.danger)
+            .font(k.ty.text_xsmall)
+            .color(k.c.danger.fg)
             .wrap(),
         None => note(
-            p,
+            k,
             if configured {
                 "Save again after you change a field."
             } else {
@@ -863,23 +846,24 @@ fn upload_section(s: &SettingsUi, p: &Palette, k: &Kit) -> El {
             },
         ),
     };
-    upload = upload.child(el().h(1.0).fill(p.border)).child(
+    upload = upload.child(Divider::horizontal().build(k)).child(
         row()
             .px(16.0)
             .py(12.0)
-            .fill(p.muted.alpha(0.4))
+            .fill(k.c.layer_02)
             .justify_between()
             .center_y()
             .gap(12.0)
             .child(el().grow(1.0).shrink().min_w(0.0).child(message))
             .child(
-                Button::new("save-upload")
-                    .label("Save destination")
-                    .primary()
-                    .build(p, |s: &mut SettingsUi, _| s.save_upload()),
+                Button::new("Save destination")
+                    .variant(ButtonVariant::Contrast)
+                    .on_press(|s: &mut SettingsUi| s.save_upload())
+                    .build(k)
+                    .key("save-upload"),
             ),
     );
-    section(p, "Upload", upload)
+    section(k, "Upload", upload)
 }
 
 impl SettingsUi {
@@ -894,7 +878,7 @@ impl SettingsUi {
 
 /// A horizontal slider over `slider`'s range. The value follows the drag and saves on release;
 /// arrow keys step it.
-fn slider(s: &SettingsUi, p: &Palette, which: Slider, key: &str, label: &str, width: f32) -> El {
+fn slider(s: &SettingsUi, k: &Kit, which: Slider, key: &str, label: &str, width: f32) -> El {
     let (min, max, step) = which.range();
     let value = s.slider_value(which);
     let (height, knob, bar) = (24.0, 16.0, 4.0);
@@ -932,30 +916,32 @@ fn slider(s: &SettingsUi, p: &Palette, which: Slider, key: &str, label: &str, wi
             el().size(width, bar)
                 .absolute(0.0, (height - bar) / 2.0)
                 .radius(bar / 2.0)
-                .fill(p.muted)
+                .fill(k.c.layer_03)
                 .a11y_hidden(),
         )
         .child(
             el().size(knob / 2.0 + fraction * travel, bar)
                 .absolute(0.0, (height - bar) / 2.0)
                 .radius(bar / 2.0)
-                .fill(p.accent)
+                .fill(k.c.bg_accent)
                 .a11y_hidden(),
         )
         .child(
-            el().size(knob, knob)
-                .absolute(fraction * travel, (height - knob) / 2.0)
-                .radius(knob / 2.0)
-                .fill(Color::WHITE)
-                .border(1.0, p.border)
-                .shadow(1.0, 3.0, Color::BLACK.alpha(0.2))
-                .a11y_hidden(),
+            // The kit's raised knob, as its switches draw theirs.
+            k.elevate(
+                el().size(knob, knob)
+                    .absolute(fraction * travel, (height - knob) / 2.0)
+                    .radius(knob / 2.0)
+                    .fill(k.c.knob),
+                &k.elevation.knob,
+            )
+            .border(0.5, k.c.border_strong)
+            .a11y_hidden(),
         )
 }
 
 /// A row with a switch that saves `set` with the new value.
 fn toggle(
-    p: &Palette,
     k: &Kit,
     key: &str,
     title: &str,
@@ -969,39 +955,35 @@ fn toggle(
         .on_toggle(move |s: &mut SettingsUi| s.change(move |settings| set(settings, !checked)))
         .build(k)
         .key(key);
-    setting_row(p, title, description, switch)
+    setting_row(k, title, description, switch)
 }
 
 /// A pressable choice tile, filled while it is the current choice.
-fn tile(p: &Palette, key: &str, selected: bool, width: f32, height: f32) -> El {
-    col()
+fn tile(k: &Kit, key: &str, selected: bool, width: f32, height: f32) -> El {
+    let tile = col()
         .key(key)
         .role("radio")
         .checked(selected)
         .size(width, height)
-        .radius(6.0)
+        .radius(k.radius.lg)
         .center()
         .gap(8.0)
-        .fill(if selected {
-            p.hover
-        } else {
-            Color::TRANSPARENT
-        })
-        .hover(p.hover)
-        .cursor(Cursor::Pointer)
-}
-
-/// A secondary button: Sniplet's ghost button with a border.
-fn outlined(p: &Palette, button: El) -> El {
-    button.border(1.0, p.border)
+        .cursor(Cursor::Pointer);
+    if selected {
+        tile.fill(k.c.pressed)
+    } else {
+        k.interactive(tile)
+    }
 }
 
 /// A muted path under a row, cut short when it does not fit.
-fn path_line(p: &Palette, path: String) -> El {
-    col()
-        .px(16.0)
-        .pb(12.0)
-        .child(text(path).font(SMALL).color(p.muted_foreground).truncate())
+fn path_line(k: &Kit, path: String) -> El {
+    col().px(16.0).pb(12.0).child(
+        text(path)
+            .font(k.ty.text_xsmall)
+            .color(k.c.text_muted)
+            .truncate(),
+    )
 }
 
 /// One column of sections with the page's spacing.
@@ -1010,51 +992,53 @@ fn page() -> El {
 }
 
 /// Muted help text that wraps.
-pub(crate) fn note(p: &Palette, value: impl Into<String>) -> El {
+pub(crate) fn note(k: &Kit, value: impl Into<String>) -> El {
     text(value.into())
-        .font(SMALL)
-        .color(p.muted_foreground)
+        .font(k.ty.text_xsmall)
+        .color(k.c.text_muted)
         .wrap()
 }
 
-/// A bordered, rounded group of rows.
-pub(crate) fn card(p: &Palette) -> El {
-    col()
-        .w_full()
-        .radius(12.0)
-        .border(1.0, p.border)
-        .fill(p.background)
-        .clip_rounded(12.0)
+/// A rounded group of rows on the kit's first layer.
+pub(crate) fn card(k: &Kit) -> El {
+    k.elevate(
+        col()
+            .w_full()
+            .radius(k.radius.xl)
+            .fill(k.c.layer_01)
+            .clip_rounded(k.radius.xl),
+        &k.elevation.raised,
+    )
 }
 
 /// A titled group: a small muted heading over its content.
-pub(crate) fn section(p: &Palette, title: &str, content: El) -> El {
+pub(crate) fn section(k: &Kit, title: &str, content: El) -> El {
     col()
         .w_full()
         .gap(8.0)
         .child(
             text(title)
                 .px(4.0)
-                .font(SMALL_SEMIBOLD)
-                .color(p.muted_foreground),
+                .font(k.ty.text_xsmall_medium)
+                .color(k.c.text_muted),
         )
         .child(content)
 }
 
 /// The hairline between rows of a card.
-pub(crate) fn rule(p: &Palette) -> El {
-    el().mx(16.0).h(1.0).fill(p.border)
+pub(crate) fn rule(k: &Kit) -> El {
+    Divider::horizontal().build(k).mx(16.0)
 }
 
 /// A settings row: a title and description on the left, the control on the right.
-pub(crate) fn setting_row(p: &Palette, title: &str, description: &str, control: El) -> El {
-    setting_row_with_error(p, title, description, None, control)
+pub(crate) fn setting_row(k: &Kit, title: &str, description: &str, control: El) -> El {
+    setting_row_with_error(k, title, description, None, control)
 }
 
 /// A settings row whose validation error shows under its title, next to the control it is
 /// about.
 fn setting_row_with_error(
-    p: &Palette,
+    k: &Kit,
     title: &str,
     description: &str,
     error: Option<&str>,
@@ -1064,17 +1048,17 @@ fn setting_row_with_error(
         .grow(1.0)
         .shrink()
         .min_w(0.0)
-        .gap(4.0)
-        .child(text(title).font(BODY).color(p.foreground).wrap());
+        .gap(2.0)
+        .child(text(title).font(k.ty.ui).color(k.c.text_base).wrap());
     if !description.is_empty() {
-        label = label.child(note(p, description));
+        label = label.child(note(k, description));
     }
     if let Some(error) = error {
         label = label.child(
             text(error.to_owned())
                 .role("alert")
-                .font(SMALL)
-                .color(p.danger)
+                .font(k.ty.text_xsmall)
+                .color(k.c.danger.fg)
                 .wrap(),
         );
     }
