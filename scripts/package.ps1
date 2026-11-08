@@ -64,14 +64,12 @@ try {
     }
     New-Item -ItemType Directory -Force -Path $Bundle | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Bundle "licenses") | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $Bundle "documentation") | Out-Null
 
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $Bundle "Sniplet.exe")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "README.md") -Destination (Join-Path $Bundle "README.md")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "LICENSE") -Destination (Join-Path $Bundle "LICENSE")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "assets\fonts\OFL.txt") -Destination (Join-Path $Bundle "licenses\NotoSans-OFL.txt")
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot "assets\icons\LICENSE-LUCIDE") -Destination (Join-Path $Bundle "licenses\Lucide-ISC.txt")
-    Copy-Item -Path (Join-Path $WorkspaceRoot "docs\*.md") -Destination (Join-Path $Bundle "documentation")
 
     Write-Host "`nCreated portable Windows package: $Bundle" -ForegroundColor Green
 }

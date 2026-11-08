@@ -57,12 +57,6 @@ if [ -z "$target_dir" ] || [ -z "$host_target" ] || [ -z "$app_version" ]; then
     exit 1
 fi
 
-copy_documentation() {
-    destination=$1
-    mkdir -p "$destination"
-    cp "$workspace_root"/docs/*.md "$destination/"
-}
-
 case "$(uname -s)" in
     Darwin)
         binary="$target_dir/$profile/sniplet"
@@ -88,7 +82,6 @@ case "$(uname -s)" in
         cp "$workspace_root/assets/fonts/OFL.txt" "$bundle/Contents/Resources/licenses/NotoSans-OFL.txt"
         cp "$workspace_root/assets/icons/LICENSE-LUCIDE" "$bundle/Contents/Resources/licenses/Lucide-ISC.txt"
         cp "$workspace_root/assets/icons/sniplet.icns" "$bundle/Contents/Resources/Sniplet.icns"
-        copy_documentation "$bundle/Contents/Resources/documentation"
         cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -135,7 +128,6 @@ PLIST
             cp "$workspace_root/assets/icons/sniplet-$icon_size.png" \
                 "$icon_root/${icon_size}x${icon_size}/apps/$app_id.png"
         done
-        copy_documentation "$bundle/share/doc/sniplet"
         cat > "$bundle/share/applications/$app_id.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
