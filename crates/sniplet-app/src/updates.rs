@@ -15,6 +15,7 @@ use sniplet_platform::{
 
 use crate::{
     editor::Editor,
+    settings_window::view,
     ui::{BODY, Button, Inbox, Palette, SEMIBOLD, SMALL, icons, rgb},
 };
 
@@ -538,6 +539,12 @@ pub(crate) struct UpdateSummary {
     pub(crate) last_check: Option<Instant>,
 }
 
+// Settings receives the summary through its window's inbox, from the editor's thread.
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<UpdateSummary>()
+};
+
 /// The Updates section of Settings. Its buttons send their actions to the editor's inbox, so it
 /// works in any window's state `S`.
 pub(crate) fn settings_section<S: 'static>(
@@ -713,63 +720,39 @@ pub(crate) fn settings_section<S: 'static>(
                     editor.persist_settings();
                 })
             })
-            .build(&p.kit())
+            .build(&view::kit(p))
             .key("check-for-updates")
     };
-    let divider = || el().mx(16.0).h(1.0).fill(p.border);
-    let setting = |title: &'static str, description: &'static str, control: El| {
-        row()
-            .padding(16.0)
-            .gap(16.0)
-            .center_y()
+    view::section(
+        p,
+        "Updates",
+        view::card(p)
+            .key("settings-updates")
             .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(4.0)
-                    .child(text(title).font(BODY).color(p.foreground))
-                    .child(note(p, description)),
+                row()
+                    .key("update-status")
+                    .padding(16.0)
+                    .gap(12.0)
+                    .center_y()
+                    .child(status_icon(p, glyph, failed))
+                    .child(status_text(p, title, description))
+                    .child(controls),
             )
-            .child(control)
-    };
-    col()
-        .key("settings-updates")
-        .gap(8.0)
-        .child(
-            text("Updates")
-                .font(rune::TextStyle::new(12.0, 600.0))
-                .color(p.muted_foreground)
-                .px(4.0),
-        )
-        .child(
-            col()
-                .radius(12.0)
-                .border(1.0, p.border)
-                .fill(p.background)
-                .clip_rounded(12.0)
-                .child(
-                    row()
-                        .key("update-status")
-                        .padding(16.0)
-                        .gap(12.0)
-                        .center_y()
-                        .child(status_icon(p, glyph, failed))
-                        .child(status_text(p, title, description))
-                        .child(controls),
-                )
-                .child(divider())
-                .child(setting(
-                    "Update channel",
-                    "Stable is tested. Nightly can have bugs. Switching channels never installs an older version.",
-                    channels,
-                ))
-                .child(divider())
-                .child(setting(
-                    "Check for updates automatically",
-                    "One time each day. Sniplet asks before it installs.",
-                    automatic,
-                )),
-        )
+            .child(view::rule(p))
+            .child(view::setting_row(
+                p,
+                "Update channel",
+                "Stable is tested. Nightly can have bugs. Switching channels never installs an older version.",
+                channels,
+            ))
+            .child(view::rule(p))
+            .child(view::setting_row(
+                p,
+                "Check for updates automatically",
+                "One time each day. Sniplet asks before it installs.",
+                automatic,
+            )),
+    )
 }
 
 fn failure_title(phase: &Phase) -> &'static str {
@@ -781,21 +764,15 @@ fn failure_title(phase: &Phase) -> &'static str {
     }
 }
 
-fn note(p: &Palette, description: impl Into<String>) -> El {
-    text(description)
-        .font(SMALL)
-        .color(p.muted_foreground)
-        .wrap()
-}
-
 /// A status's title over its description, taking the row's spare width.
 fn status_text(p: &Palette, title: String, description: String) -> El {
     col()
         .grow(1.0)
+        .shrink()
         .min_w(0.0)
         .gap(4.0)
         .child(text(title).font(SEMIBOLD).color(p.foreground).wrap())
-        .child(note(p, description))
+        .child(view::note(p, description))
 }
 
 /// The status's icon on a tinted square: red for failures, green for done, else the accent.

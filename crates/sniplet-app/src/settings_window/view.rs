@@ -96,7 +96,7 @@ pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
 }
 
 /// Kit components in Sniplet's colors, with white switch knobs in both appearances.
-fn kit(p: &Palette) -> Kit {
+pub(crate) fn kit(p: &Palette) -> Kit {
     let mut kit = p.kit();
     kit.c.knob = Color::WHITE;
     kit.c.knob_on = Color::WHITE;

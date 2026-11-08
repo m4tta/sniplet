@@ -20,7 +20,7 @@ use sniplet_platform::{CloudUploadConfig, HotkeySettings, Settings};
 
 use crate::{editor::Editor, ui::Inbox, ui::icons, updates::UpdateSummary};
 
-mod view;
+pub(crate) mod view;
 
 #[cfg(test)]
 mod tests;
