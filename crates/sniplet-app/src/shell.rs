@@ -26,6 +26,9 @@ struct Services {
     next_escape_id: u64,
     #[cfg(target_os = "windows")]
     tray_light_theme: bool,
+    /// When the taskbar theme was last read, so frames read it at most once a second.
+    #[cfg(target_os = "windows")]
+    tray_theme_checked: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -41,6 +44,8 @@ thread_local! {
         next_escape_id: 1,
         #[cfg(target_os = "windows")]
         tray_light_theme: true,
+        #[cfg(target_os = "windows")]
+        tray_theme_checked: None,
     }) };
 }
 
@@ -188,9 +193,21 @@ fn create_tray(hotkeys: &HotkeySettings) -> anyhow::Result<TrayIcon> {
 }
 
 /// Follow the taskbar's light or dark theme with the tray icon's ink. The editor's poll calls
-/// it about once a second.
+/// it on every frame; it reads the theme at most once a second.
 #[cfg(target_os = "windows")]
 pub fn refresh_tray_theme() {
+    let due = with(|services| {
+        let due = services
+            .tray_theme_checked
+            .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(1));
+        if due {
+            services.tray_theme_checked = Some(std::time::Instant::now());
+        }
+        due
+    });
+    if !due {
+        return;
+    }
     let light = crate::menu_bar::taskbar_uses_light_theme();
     with(|services| {
         if light != services.tray_light_theme
