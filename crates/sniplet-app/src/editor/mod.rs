@@ -20,6 +20,8 @@ use crate::{
 mod commands;
 mod input;
 mod panels;
+#[cfg(test)]
+mod tests;
 mod view;
 
 pub(crate) use commands::Command;
@@ -492,6 +494,19 @@ impl Editor {
         self.set_size(size, size.value_at(fraction));
         if phase == rune::Phase::Up {
             self.finish_size_edit();
+        }
+    }
+
+    /// Escape ended a size drag: put the size back, and the annotation with it.
+    fn cancel_size_edit(&mut self) {
+        if let Some(edit) = self.size_edit.take() {
+            if edit.grouped
+                && let Some(doc) = &mut self.document
+            {
+                let _ = doc.cancel_group();
+            }
+            self.sizes.set(edit.size, edit.before);
+            self.refresh();
         }
     }
 
