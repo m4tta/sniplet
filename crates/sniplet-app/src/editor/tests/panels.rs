@@ -376,3 +376,35 @@ fn the_dragged_file_holds_the_export_of_the_image_or_the_selection() {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn the_backdrop_panel_scrolls_to_its_last_controls_in_the_smallest_window() {
+    let mut h = Harness::new(
+        Document::new(sniplet_core::demo_image(400, 300)),
+        (900.0, 560.0),
+        true,
+    );
+    h.click("backdrop");
+    let panel = h.rect("floating-panel");
+    assert!(
+        panel[1] + panel[3] <= 560.0,
+        "the panel fits the window: {panel:?}"
+    );
+    let below = |h: &Harness| {
+        let r = h.rect("toggle-shadow");
+        r[1] + r[3] > panel[1] + panel[3]
+    };
+    assert!(below(&h), "this window is short enough to need scrolling");
+    let (x, y) = (panel[0] + panel[2] / 2.0, panel[1] + panel[3] / 2.0);
+    for _ in 0..20 {
+        if !below(&h) {
+            break;
+        }
+        h.rt.wheel_event(WheelEvent::new(0.0, -60.0).at(x, y));
+        h.settle();
+    }
+    assert!(!below(&h), "scrolling brings the last control into view");
+    let shadow = h.document().backdrop().shadow.is_some();
+    h.click("toggle-shadow");
+    assert_ne!(h.document().backdrop().shadow.is_some(), shadow);
+}

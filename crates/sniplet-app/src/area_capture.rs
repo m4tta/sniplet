@@ -71,6 +71,17 @@ fn selection_scale(screens: &[Screen], bounds: Rect) -> f32 {
         .fold(1.0, f32::max)
 }
 
+/// The highest display scale factor under `bounds`: the points-to-pixels ratio a capture of it
+/// records, for measurements in points and saving at 1×. On Windows and Linux desktop units are
+/// already pixels, so this differs from `selection_scale` there.
+fn display_scale(screens: &[Screen], bounds: Rect) -> f32 {
+    screens
+        .iter()
+        .filter(|screen| screen.layout.bounds.overlaps(&bounds))
+        .map(|screen| screen.scale_factor)
+        .fold(1.0, f32::max)
+}
+
 fn region(screens: &[Screen], bounds: Rect) -> Region {
     Region {
         bounds,
@@ -134,7 +145,7 @@ fn compose(screens: &[Screen], bounds: Rect) -> Option<(RgbaImage, f32)> {
             }
         }
     }
-    Some((image, scale))
+    Some((image, display_scale(screens, bounds)))
 }
 
 /// Round outward to each display's pixel grid. Keeping its desktop origin preserves Retina
@@ -729,6 +740,18 @@ mod tests {
             },
             scale_factor: scale,
         }
+    }
+
+    #[test]
+    fn captures_record_the_display_scale_where_desktop_units_are_pixels() {
+        // Windows and Linux: a 200% display whose desktop units are already pixels.
+        let screens = vec![Screen {
+            scale_factor: 2.0,
+            ..screen(1, rect(0.0, 0.0, 200.0, 100.0), 1.0)
+        }];
+        let (image, scale) = compose(&screens, rect(10.0, 10.0, 40.0, 30.0)).unwrap();
+        assert_eq!(image.dimensions(), (40, 30));
+        assert_eq!(scale, 2.0);
     }
 
     #[test]

@@ -257,6 +257,16 @@ pub(crate) fn open<S: WindowState>(
     state: S,
     on_ready: impl FnMut(&WindowHandle) + 'static,
 ) -> WindowHandle {
+    open_native(window, state, on_ready, rune::MacWindowOptions::default())
+}
+
+/// `open` with macOS window settings, which other platforms ignore.
+fn open_native<S: WindowState>(
+    window: Window<S>,
+    state: S,
+    on_ready: impl FnMut(&WindowHandle) + 'static,
+    native: rune::MacWindowOptions,
+) -> WindowHandle {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let key = format!("sniplet-window-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let spec = AppSpec {
@@ -277,7 +287,7 @@ pub(crate) fn open<S: WindowState>(
             // Translucent dims and labels blend as they did before Rune, in sRGB.
             .srgb_blend(true)
             .on_ready(on_ready)
-            .options(window.options),
+            .configured_options(window.options.macos(native)),
     )
 }
 
@@ -288,10 +298,23 @@ pub(crate) fn open_overlay<S: WindowState>(
     window: Window<S>,
     state: S,
 ) -> WindowHandle {
-    let handle = open(window, state, |_handle: &WindowHandle| {
-        #[cfg(target_os = "macos")]
-        crate::macos::focus_capture_under_pointer(_handle);
-    });
+    // As a pop-up panel: above other apps without activating Sniplet, and on every Space,
+    // including another app's full-screen Space.
+    const POP_UP_LEVEL: isize = 101;
+    const ALL_SPACES_AND_FULL_SCREEN: usize = 1 << 0 | 1 << 8;
+    let native = rune::MacWindowOptions::default()
+        .nonactivating_panel(true)
+        .level(POP_UP_LEVEL)
+        .collection_behavior(ALL_SPACES_AND_FULL_SCREEN);
+    let handle = open_native(
+        window,
+        state,
+        |_handle: &WindowHandle| {
+            #[cfg(target_os = "macos")]
+            crate::macos::focus_capture_under_pointer(_handle);
+        },
+        native,
+    );
     #[cfg(target_os = "macos")]
     handle.place(
         rune::DisplayTarget::Native(rune::NativeDisplayId::MacOS(monitor.id)),

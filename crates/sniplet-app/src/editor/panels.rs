@@ -422,15 +422,25 @@ pub(super) fn floating_panel(s: &Editor, p: &Palette, canvas_height: f32) -> Opt
             }
         }
     }
+    // A short window scrolls the panel rather than cutting off its last controls.
+    let height = (canvas_height - 32.0).max(120.0);
     Some(
         surface(p)
             .key("floating-panel")
             .pin(None, Some(10.0), Some(14.0), None)
             .w(340.0)
-            .max_h((canvas_height - 32.0).max(120.0))
-            .padding(16.0)
+            .max_h(height)
             .clip_rounded(8.0)
-            .child(body),
+            .child(
+                col()
+                    .key("floating-panel-scroll")
+                    .w_full()
+                    .max_h(height)
+                    .scroll(rune::ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .child(body.padding(16.0)),
+            ),
     )
 }
 
