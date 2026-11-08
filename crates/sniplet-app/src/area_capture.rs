@@ -821,10 +821,10 @@ mod tests {
     /// Run the editor's inbox once a worker has reported to it.
     fn settle(editor: &mut Runtime<Editor>) {
         for _ in 0..400 {
-            if !editor.state.inbox.is_empty() {
-                editor.update(|editor, tx| {
-                    Inbox::drain(editor, |editor| &editor.inbox, tx);
-                });
+            editor.update(|editor, tx| {
+                Inbox::drain(editor, |editor| &editor.inbox, tx);
+            });
+            if editor.state.inbox.is_idle() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
