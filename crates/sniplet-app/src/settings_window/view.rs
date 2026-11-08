@@ -161,11 +161,15 @@ fn toast(s: &SettingsUi, k: &Kit) -> Option<El> {
     } else {
         (&icons::CHECK, k.c.success.icon)
     };
-    let mut toast =
-        Toast::new("settings-toast", notice.text.clone()).lead(icon(glyph, 16.0).color(ink));
-    if notice.error {
-        toast = toast.on_close(|s: &mut SettingsUi| s.clear_notice());
-    }
+    // The kit cuts a title to one line, so an error's full text goes in the description.
+    let toast = if notice.error {
+        Toast::new("settings-toast", "Something went wrong")
+            .description(notice.text.clone())
+            .on_close(|s: &mut SettingsUi| s.clear_notice())
+    } else {
+        Toast::new("settings-toast", notice.text.clone())
+    };
+    let toast = toast.lead(icon(glyph, 16.0).color(ink));
     Some(
         ToastRegion::new()
             .toast(toast.build(k))

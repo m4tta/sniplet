@@ -28,7 +28,6 @@ pub fn segments(k: &Kit, label: &str) -> El {
     row()
         .role("radiogroup")
         .label(label)
-        .focus_group()
         .center_y()
         .gap(2.0)
         .padding(2.0)
@@ -38,16 +37,14 @@ pub fn segments(k: &Kit, label: &str) -> El {
 }
 
 /// One segment of [`segments`]: raised while it is the choice, lit under the pointer when not.
-/// Add its content and press handler.
+/// Add its content and press handler. Like the editor's other controls, it does not take the
+/// keyboard from the canvas.
 pub fn segment(k: &Kit, key: String, label: &str, on: bool) -> El {
     let e = row()
         .key(key)
         .role("radio")
         .label(label)
         .checked(on)
-        .focusable(true)
-        .focus_selected(on)
-        .focus_ring(2.0, 1.0, k.c.border_focus)
         .h(28.0)
         .min_w(32.0)
         .px(8.0)

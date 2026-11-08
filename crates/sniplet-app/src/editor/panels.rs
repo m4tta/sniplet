@@ -203,7 +203,7 @@ pub(super) fn properties(s: &Editor, k: &Kit) -> Option<El> {
         let button = strip_icon(&icons::PAINT_BUCKET, "Toggle fill")
             .on_press(|s: &mut Editor| s.change_style(None, Some(s.style.fill.is_none())))
             .build(k);
-        sections.push(ui::selected(button, k, filled).key("fill"));
+        sections.push(ui::selected(button, k, filled).key("fill").focusable(false));
     }
 
     if let Some(AnnotationKind::Counter { value, .. }) =
@@ -219,7 +219,8 @@ pub(super) fn properties(s: &Editor, k: &Kit) -> Option<El> {
                         .control_size(ControlSize::Regular)
                         .on_press(|s: &mut Editor| s.adjust_counter_value(-1))
                         .build(k)
-                        .key("counter-value-down"),
+                        .key("counter-value-down")
+                        .focusable(false),
                 )
                 .child(
                     el().min_w(18.0).center().child(
@@ -233,7 +234,8 @@ pub(super) fn properties(s: &Editor, k: &Kit) -> Option<El> {
                         .control_size(ControlSize::Regular)
                         .on_press(|s: &mut Editor| s.adjust_counter_value(1))
                         .build(k)
-                        .key("counter-value-up"),
+                        .key("counter-value-up")
+                        .focusable(false),
                 ),
         );
     }
@@ -252,7 +254,8 @@ pub(super) fn properties(s: &Editor, k: &Kit) -> Option<El> {
             .help("Switch between points and physical pixels")
             .on_press(|s: &mut Editor| s.toggle_units())
             .build(k)
-            .key("measure-units"),
+            .key("measure-units")
+            .focusable(false),
         );
     }
 
@@ -291,7 +294,8 @@ pub(super) fn floating_panel(s: &Editor, k: &Kit, canvas_height: f32) -> Option<
                     tx.blur();
                 })
                 .build(k)
-                .key("close-panel"),
+                .key("close-panel")
+                .focusable(false),
         );
     let mut body = col().gap(8.0).child(header);
     // A full-width ghost row for each choice in a panel.
@@ -301,6 +305,7 @@ pub(super) fn floating_panel(s: &Editor, k: &Kit, canvas_height: f32) -> Option<
             .control_size(ControlSize::Large)
             .build(k)
             .key(key)
+            .focusable(false)
             .w_full()
             .justify_start()
     };
@@ -329,7 +334,8 @@ pub(super) fn floating_panel(s: &Editor, k: &Kit, canvas_height: f32) -> Option<
                     .control_size(ControlSize::Large)
                     .on_press_tx(|s: &mut Editor, tx| s.commit_text(tx))
                     .build(k)
-                    .key("add-text"),
+                    .key("add-text")
+                    .focusable(false),
                 );
         }
         Panel::Backdrop => {

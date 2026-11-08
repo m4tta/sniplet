@@ -53,6 +53,9 @@ pub(crate) fn on_key(s: &mut Editor, event: &KeyEvent, tx: &mut Tx) -> bool {
     Keystroke::new(event, tx.key_base(), tx.key_repeat()).is_some_and(|key| s.key(&key, tx))
 }
 
+// The editor's buttons never take the keyboard, as pressing a kit button would: the canvas
+// owns Space (pan), Enter (crop) and the arrow keys while you work.
+
 /// A ghost icon button in the toolbar's size.
 fn toolbar_icon(glyph: &'static rune::Icon, help: &str) -> IconButton {
     IconButton::new(glyph)
@@ -73,7 +76,8 @@ fn toolbar(s: &Editor, k: &Kit, insets: rune::ChromeInsets) -> El {
             };
         })
         .build(k)
-        .key("app-menu");
+        .key("app-menu")
+        .focusable(false);
     if s.waiting_update_label().is_some() {
         menu = el().child(menu).child(
             el().key("update-dot")
@@ -102,7 +106,8 @@ fn toolbar(s: &Editor, k: &Kit, insets: rune::ChromeInsets) -> El {
                 .shortcut("mod+1")
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Fit, tx))
                 .build(k)
-                .key("zoom-fit"),
+                .key("zoom-fit")
+                .focusable(false),
         )
         .trailing(Divider::vertical().build(k).h(20.0).mx(4.0))
         .trailing(
@@ -111,21 +116,24 @@ fn toolbar(s: &Editor, k: &Kit, insets: rune::ChromeInsets) -> El {
                 .expanded(s.panel == Some(Panel::Backdrop))
                 .on_press(|s: &mut Editor| s.panel = Some(Panel::Backdrop))
                 .build(k)
-                .key("backdrop"),
+                .key("backdrop")
+                .focusable(false),
         )
         .trailing(drag_file(s, k))
         .trailing(
             toolbar_icon(&icons::PIN, "Pin image on screen")
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Pin, tx))
                 .build(k)
-                .key("pin"),
+                .key("pin")
+                .focusable(false),
         )
         .trailing(
             toolbar_icon(&icons::SAVE, "Save image")
                 .shortcut("mod+s")
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Save, tx))
                 .build(k)
-                .key("save"),
+                .key("save")
+                .focusable(false),
         )
         .trailing(
             Button::new("Copy")
@@ -137,6 +145,7 @@ fn toolbar(s: &Editor, k: &Kit, insets: rune::ChromeInsets) -> El {
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Copy, tx))
                 .build(&ui::accent(k))
                 .key("copy")
+                .focusable(false)
                 .ml(4.0),
         )
         .build(k)
@@ -364,7 +373,9 @@ fn dock(s: &Editor, k: &Kit) -> El {
         let button = button
             .on_press(move |s: &mut Editor| s.select_tool(tool))
             .build(k);
-        ui::selected(button, k, s.tool == tool).key(format!("tool-{}", tool as usize))
+        ui::selected(button, k, s.tool == tool)
+            .key(format!("tool-{}", tool as usize))
+            .focusable(false)
     });
     row()
         .key("dock-bar")
@@ -443,7 +454,8 @@ fn welcome(s: &Editor, k: &Kit) -> El {
                 .icon(&icons::SCAN)
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Area, tx))
                 .build(k)
-                .key("welcome-capture"),
+                .key("welcome-capture")
+                .focusable(false),
         )
         .child(
             Button::new("Open an image…")
@@ -451,7 +463,8 @@ fn welcome(s: &Editor, k: &Kit) -> El {
                 .control_size(ControlSize::Large)
                 .on_press_tx(|s: &mut Editor, tx| s.command(super::Command::Open, tx))
                 .build(k)
-                .key("welcome-open"),
+                .key("welcome-open")
+                .focusable(false),
         );
     let keys = crate::quick_menu::keycaps(&s.settings.hotkeys.capture_area);
     if !keys.is_empty() {
