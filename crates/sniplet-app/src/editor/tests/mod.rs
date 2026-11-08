@@ -228,7 +228,8 @@ impl Harness {
 }
 
 /// A key event from a name such as `"ctrl-shift-z"`: modifiers, then a key name or character
-/// (`"minus"` for `-`).
+/// (`"minus"` for `-`). `ctrl` is the platform's shortcut key, as a real keyboard sends it:
+/// Ctrl, or Cmd on macOS, where Ctrl+A in a text field moves to the line start instead.
 fn key(keys: &str) -> KeyEvent {
     let mut parts: Vec<&str> = keys.split('-').collect();
     let name = parts.pop().unwrap();
@@ -238,8 +239,12 @@ fn key(keys: &str) -> KeyEvent {
             "shift" => mods.shift = true,
             "alt" => mods.alt = true,
             "ctrl" => {
-                mods.ctrl = true;
                 mods.cmd = true;
+                if cfg!(target_os = "macos") {
+                    mods.logo = true;
+                } else {
+                    mods.ctrl = true;
+                }
             }
             _ => panic!("unknown modifier {part}"),
         }
