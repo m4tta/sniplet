@@ -11,6 +11,8 @@ pub fn surface<S: 'static>(k: &Kit, e: El) -> El {
         &k.elevation.floating,
     )
     .on_press(|_: &mut S| {})
+    // A press handler makes a group a button; the surface only holds controls.
+    .role("group")
 }
 
 /// `content` in a small floating label, such as the editor's status or a selection's size.
