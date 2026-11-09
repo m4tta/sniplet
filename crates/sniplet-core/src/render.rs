@@ -643,12 +643,52 @@ fn draw_spotlights(canvas: &mut RgbaImage, annotations: &[&Annotation]) {
         return;
     };
     let dim: Rgba<u8> = style.fill.unwrap_or(Color::new(0, 0, 0, 150)).into();
-    for y in 0..canvas.height() {
-        for x in 0..canvas.width() {
-            let point = Point::new(x as f32 + 0.5, y as f32 + 0.5);
-            if !spotlights.iter().any(|(rect, _)| rect.contains(point)) {
-                canvas.get_pixel_mut(x, y).blend(&dim);
-            }
+    // Over an opaque pixel each channel's blend depends only on that channel,
+    // so blend every value once and look results up per pixel.
+    let opaque: Vec<Rgba<u8>> = (0..=255)
+        .map(|value| {
+            let mut pixel = Rgba([value, value, value, 255]);
+            pixel.blend(&dim);
+            pixel
+        })
+        .collect();
+    // Pixel centers inside a rect form one contiguous run per axis.
+    let span = |start: f32, length: f32, count: u32| {
+        let inside = |index: u32| {
+            let center = index as f32 + 0.5;
+            center >= start && center <= start + length
+        };
+        let first = (0..count).find(|&index| inside(index)).unwrap_or(count);
+        let end = (first..count).find(|&index| !inside(index)).unwrap_or(count);
+        first..end
+    };
+    let spans: Vec<_> = spotlights
+        .iter()
+        .map(|(rect, _)| {
+            (
+                span(rect.x, rect.width, canvas.width()),
+                span(rect.y, rect.height, canvas.height()),
+            )
+        })
+        .collect();
+    let width = canvas.width();
+    for (index, pixel) in canvas.pixels_mut().enumerate() {
+        let (x, y) = (index as u32 % width, index as u32 / width);
+        if spans
+            .iter()
+            .any(|(columns, rows)| columns.contains(&x) && rows.contains(&y))
+        {
+            continue;
+        }
+        if pixel[3] == 255 {
+            *pixel = Rgba([
+                opaque[pixel[0] as usize][0],
+                opaque[pixel[1] as usize][1],
+                opaque[pixel[2] as usize][2],
+                opaque[0][3],
+            ]);
+        } else {
+            pixel.blend(&dim);
         }
     }
 }
@@ -849,11 +889,16 @@ fn draw_thick_line(image: &mut RgbaImage, start: Point, end: Point, width: f32, 
             (row_left, row_right)
         };
         for x in row_left..row_right {
+            let pixel = image.get_pixel_mut(x, y);
+            // Coverage never lifts alpha above the stroke alpha, so skip pixels already there.
+            // Freehand strokes overlap their own segments heavily, so most pixels stop here.
+            if pixel[3] >= color[3] {
+                continue;
+            }
             let point = Point::new(x as f32 + 0.5, y as f32 + 0.5);
             let distance = distance_to_segment(point, start, end);
             let coverage = (radius + 0.5 - distance).clamp(0.0, 1.0);
             let alpha = (color[3] as f32 * coverage).round() as u8;
-            let pixel = image.get_pixel_mut(x, y);
             if alpha > pixel[3] {
                 *pixel = Rgba([color[0], color[1], color[2], alpha]);
             }
@@ -1289,25 +1334,37 @@ fn pixelate(image: &mut RgbaImage, rect: ImageRect, block_size: u32) {
     let Some((left, top, right, bottom)) = rect.pixel_bounds(image.width(), image.height()) else {
         return;
     };
-    for block_y in (top..bottom).step_by(block_size as usize) {
-        for block_x in (left..right).step_by(block_size as usize) {
-            let block_right = (block_x + block_size).min(right);
-            let block_bottom = (block_y + block_size).min(bottom);
-            let mut sum = [0_u64; 4];
-            let count = (block_right - block_x) as u64 * (block_bottom - block_y) as u64;
-            for y in block_y..block_bottom {
-                for x in block_x..block_right {
-                    for (sum, channel) in sum.iter_mut().zip(image.get_pixel(x, y).0) {
+    // Walk raw RGBA rows one band of `block_size` rows at a time: sum every block in the
+    // band, fill the band's first row with block averages, then copy that row down.
+    let stride = image.width() as usize * 4;
+    let span = left as usize * 4..right as usize * 4;
+    let block = block_size as usize * 4;
+    let pixels: &mut [u8] = image;
+    let mut sums = vec![[0_u64; 4]; span.len().div_ceil(block)];
+    for band in pixels[top as usize * stride..bottom as usize * stride]
+        .chunks_mut(block_size as usize * stride)
+    {
+        sums.fill([0; 4]);
+        for row in band.chunks_exact(stride) {
+            for (sum, cell) in sums.iter_mut().zip(row[span.clone()].chunks(block)) {
+                for pixel in cell.chunks_exact(4) {
+                    for (sum, &channel) in sum.iter_mut().zip(pixel) {
                         *sum += channel as u64;
                     }
                 }
             }
-            let average = Rgba(sum.map(|channel| (channel / count) as u8));
-            for y in block_y..block_bottom {
-                for x in block_x..block_right {
-                    image.put_pixel(x, y, average);
-                }
+        }
+        let rows = (band.len() / stride) as u64;
+        let (first, rest) = band.split_at_mut(stride);
+        for (sum, cell) in sums.iter().zip(first[span.clone()].chunks_mut(block)) {
+            let count = rows * (cell.len() / 4) as u64;
+            let average = sum.map(|channel| (channel / count) as u8);
+            for pixel in cell.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&average);
             }
+        }
+        for row in rest.chunks_exact_mut(stride) {
+            row[span.clone()].copy_from_slice(&first[span.clone()]);
         }
     }
 }
@@ -1432,35 +1489,60 @@ fn shadow_layer(
     backdrop: Backdrop,
     shadow: Shadow,
 ) -> RgbaImage {
-    let mut layer = RgbaImage::new(width, height);
     let left = backdrop.padding as i64 + shadow.offset.x.round() as i64;
     let top = backdrop.padding as i64 + shadow.offset.y.round() as i64;
     let radius = backdrop
         .corner_radius
         .min(source.width().min(source.height()) / 2);
-    for y in 0..source.height() {
-        for x in 0..source.width() {
-            let destination_x = left + x as i64;
-            let destination_y = top + y as i64;
-            if destination_x >= 0
-                && destination_y >= 0
-                && destination_x < width as i64
-                && destination_y < height as i64
-                && inside_rounded(x, y, source.width(), source.height(), radius)
-            {
-                layer.put_pixel(
-                    destination_x as u32,
-                    destination_y as u32,
-                    shadow.color.into(),
-                );
+    // The gaussian blur filters every channel on its own, so blurring one gray
+    // plane per distinct non-zero channel value gives the same bytes as
+    // blurring the whole RGBA layer. A black shadow needs only one plane.
+    let plane = |value: u8| {
+        let mut plane = image::GrayImage::new(width, height);
+        for y in 0..source.height() {
+            for x in 0..source.width() {
+                let destination_x = left + x as i64;
+                let destination_y = top + y as i64;
+                if destination_x >= 0
+                    && destination_y >= 0
+                    && destination_x < width as i64
+                    && destination_y < height as i64
+                    && inside_rounded(x, y, source.width(), source.height(), radius)
+                {
+                    plane.put_pixel(
+                        destination_x as u32,
+                        destination_y as u32,
+                        image::Luma([value]),
+                    );
+                }
             }
         }
+        if shadow.blur_radius > 0.0 {
+            image::imageops::blur(&plane, shadow.blur_radius)
+        } else {
+            plane
+        }
+    };
+    let color: Rgba<u8> = shadow.color.into();
+    let mut planes: Vec<(u8, image::GrayImage)> = Vec::new();
+    let mut layer = RgbaImage::new(width, height);
+    for channel in 0..4 {
+        let value = color[channel];
+        if value == 0 {
+            continue;
+        }
+        let index = match planes.iter().position(|(cached, _)| *cached == value) {
+            Some(index) => index,
+            None => {
+                planes.push((value, plane(value)));
+                planes.len() - 1
+            }
+        };
+        for (pixel, gray) in layer.pixels_mut().zip(planes[index].1.pixels()) {
+            pixel[channel] = gray[0];
+        }
     }
-    if shadow.blur_radius > 0.0 {
-        image::imageops::blur(&layer, shadow.blur_radius)
-    } else {
-        layer
-    }
+    layer
 }
 
 fn inside_rounded(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool {
