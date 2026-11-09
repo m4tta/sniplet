@@ -157,7 +157,8 @@ Every new thread VM starts from the saved snapshot `sniplet-base`. It contains:
 If a thread's `Cargo.lock` is different from the base's, its first `sync` compiles the
 changed dependencies. That takes minutes instead of seconds.
 
-Run `python scripts/boat.py base` when `Cargo.lock` or the CI Linux packages change on
+A T3 scheduled task on the user's PC rebuilds the snapshot from `origin/main` every Monday.
+Run `python scripts/boat.py base` yourself when `Cargo.lock` or the CI Linux packages change on
 `main`, or when the user asks. It takes 5 to 10 minutes. To test a change to the base
 before it is on `main`, build from that commit: `python scripts/boat.py base --ref HEAD`. It creates a temporary
 `sniplet-base-build` VM, replaces the snapshot, and deletes the temporary VM. If a step
