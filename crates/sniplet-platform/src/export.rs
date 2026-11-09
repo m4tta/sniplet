@@ -64,27 +64,6 @@ fn is_windows_reserved(name: &str) -> bool {
             })
 }
 
-/// Returns a currently unused path under `directory`; it never accepts a path
-/// component from `stem`, so user-entered names cannot escape the destination.
-pub fn unique_export_path(directory: &Path, stem: &str, format: ExportFormat) -> Result<PathBuf> {
-    if directory.exists() && !directory.is_dir() {
-        return Err(PlatformError::InvalidExportDirectory(directory.to_owned()));
-    }
-    let stem = sanitize_filename(stem);
-    for suffix in 0..10_000_u32 {
-        let filename = if suffix == 0 {
-            format!("{stem}.{}", format.extension())
-        } else {
-            format!("{stem} {suffix}.{}", format.extension())
-        };
-        let path = directory.join(filename);
-        if !path.exists() {
-            return Ok(path);
-        }
-    }
-    Err(PlatformError::ExportNameExhausted(directory.to_owned()))
-}
-
 pub fn export_image(image: &RgbaImage, path: &Path, format: ExportFormat) -> Result<()> {
     let parent = path
         .parent()
@@ -133,27 +112,5 @@ mod tests {
         assert_eq!(sanitize_filename("../"), "Sniplet Screenshot");
         assert_eq!(sanitize_filename("CON"), "Sniplet Screenshot");
         assert_eq!(sanitize_filename("a\t  b"), "a b");
-    }
-
-    #[test]
-    fn unique_path_stays_in_the_requested_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = unique_export_path(directory.path(), "../../escape", ExportFormat::Png).unwrap();
-        assert_eq!(path.parent(), Some(directory.path()));
-        assert_eq!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("png")
-        );
-    }
-
-    #[test]
-    fn unique_path_does_not_overwrite_existing_files() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("Shot.png"), []).unwrap();
-        let path = unique_export_path(directory.path(), "Shot", ExportFormat::Png).unwrap();
-        assert_eq!(
-            path.file_name().and_then(|value| value.to_str()),
-            Some("Shot 1.png")
-        );
     }
 }

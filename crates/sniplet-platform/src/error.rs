@@ -46,9 +46,6 @@ pub enum PlatformError {
     #[error("window id {id} does not exist")]
     WindowNotFound { id: u32 },
 
-    #[error("no focused window is available for capture")]
-    ActiveWindowNotFound,
-
     #[error("window id {id} is minimized and cannot be captured")]
     WindowMinimized { id: u32 },
 
@@ -137,12 +134,6 @@ pub enum PlatformError {
 
     #[error("S3 upload failed: {0}")]
     S3(#[source] Box<s3::Error>),
-
-    #[error("export destination must be a directory: `{0}`")]
-    InvalidExportDirectory(PathBuf),
-
-    #[error("could not allocate a unique filename in `{0}`")]
-    ExportNameExhausted(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, PlatformError>;
