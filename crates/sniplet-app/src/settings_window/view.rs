@@ -1,8 +1,8 @@
 //! The Settings window's view: the title band, four tabs and the selected page. The card,
 //! section and row helpers are shared with the Updates section in `updates.rs`.
 use rune::{
-    Color, Cursor, Cx, Drag, El, Phase, Pixels, ScrollSpec, ShortcutError, SurfaceFit, TextEdit,
-    Tx, col, el, icon, row, text,
+    Color, Cursor, Cx, Drag, El, Phase, Pixels, ScrollSpec, ShortcutError, SurfaceFit, Tx, col, el,
+    icon, row, text,
 };
 use rune_kit::{
     Button, ButtonVariant, Card, ControlSize, Divider, Field as KitField, IconButton,
@@ -40,14 +40,16 @@ const BACKGROUNDS: [(&str, &str, WindowBackground); 4] = [
     ("window-trim", "Trim shadow", WindowBackground::TrimShadow),
 ];
 
-const UPLOAD_PLACEHOLDERS: [&str; 7] = [
-    "https://… signed PUT URL",
-    "https://… public image link",
-    "screenshots",
-    "us-east-1",
-    "Leave empty for Amazon S3",
-    "sniplet/",
-    "https://… public base URL",
+/// The upload form's fields as (label, placeholder), in `SettingsUi::upload` order: two for a
+/// signed URL, then five for S3.
+const UPLOAD_FIELDS: [(&str, &str); 7] = [
+    ("Signed PUT URL", "https://… signed PUT URL"),
+    ("Image link (optional)", "https://… public image link"),
+    ("Bucket", "screenshots"),
+    ("Region", "us-east-1"),
+    ("Endpoint (optional)", "Leave empty for Amazon S3"),
+    ("Folder prefix (optional)", "sniplet/"),
+    ("Public base URL (optional)", "https://… public base URL"),
 ];
 
 pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
@@ -96,56 +98,33 @@ pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
 
 /// The page tabs, as a preferences window's toolbar shows them: an icon over a title.
 fn tabs(s: &SettingsUi, k: &Kit) -> El {
-    let mut tabs = row()
+    let tabs = row()
         .key("settings-tabs")
         .role("tablist")
         .w_full()
         .padding(8.0)
         .gap(4.0)
         .justify_center()
-        .fill(k.c.bg_deep);
-    for (index, page) in Page::ALL.into_iter().enumerate() {
-        let selected = s.page == page;
-        let tab = col()
-            .key(format!("settings-nav-{index}"))
-            .role("tab")
-            .label(page.title())
-            .checked(selected)
-            .size(96.0, 56.0)
-            .radius(k.radius.lg)
-            .center()
-            .gap(4.0)
-            .cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut SettingsUi, tx: &mut Tx| {
-                // Pages switch at once, as tabs do.
-                tx.instant();
-                s.select_page(page);
-            })
-            .child(icon(page.icon(), 20.0).color(if selected {
-                k.c.icon_accent
+        .fill(k.c.bg_deep)
+        .children(Page::ALL.into_iter().enumerate().map(|(index, page)| {
+            let selected = s.page == page;
+            let (glyph, font, ink) = if selected {
+                (k.c.icon_accent, k.ty.text_xsmall_medium, k.c.text_base)
             } else {
-                k.c.icon_muted
-            }))
-            .child(
-                text(page.title())
-                    .font(if selected {
-                        k.ty.text_xsmall_medium
-                    } else {
-                        k.ty.text_xsmall
-                    })
-                    .color(if selected {
-                        k.c.text_base
-                    } else {
-                        k.c.text_muted
-                    })
-                    .single_line(),
-            );
-        tabs = tabs.child(if selected {
-            tab.fill(k.c.pressed)
-        } else {
-            k.interactive(tab)
-        });
-    }
+                (k.c.icon_muted, k.ty.text_xsmall, k.c.text_muted)
+            };
+            tile(k, &format!("settings-nav-{index}"), selected, 96.0, 56.0)
+                .role("tab")
+                .label(page.title())
+                .gap(4.0)
+                .on_press_tx(move |s: &mut SettingsUi, tx: &mut Tx| {
+                    // Pages switch at once, as tabs do.
+                    tx.instant();
+                    s.select_page(page);
+                })
+                .child(icon(page.icon(), 20.0).color(glyph))
+                .child(text(page.title()).font(font).color(ink).single_line())
+        }));
     col()
         .w_full()
         .child(tabs)
@@ -156,20 +135,16 @@ fn tabs(s: &SettingsUi, k: &Kit) -> El {
 /// closed.
 fn toast(s: &SettingsUi, k: &Kit) -> Option<El> {
     let notice = s.notice.as_ref().filter(|notice| notice.field.is_none())?;
-    let (glyph, ink) = if notice.error {
-        (&icons::CIRCLE_ALERT, k.c.danger.icon)
-    } else {
-        (&icons::CHECK, k.c.success.icon)
-    };
     // The kit cuts a title to one line, so an error's full text goes in the description.
     let toast = if notice.error {
         Toast::new("settings-toast", "Something went wrong")
             .description(notice.text.clone())
             .on_close(|s: &mut SettingsUi| s.clear_notice())
+            .lead(icon(&icons::CIRCLE_ALERT, 16.0).color(k.c.danger.icon))
     } else {
         Toast::new("settings-toast", notice.text.clone())
+            .lead(icon(&icons::CHECK, 16.0).color(k.c.success.icon))
     };
-    let toast = toast.lead(icon(glyph, 16.0).color(ink));
     Some(
         ToastRegion::new()
             .toast(toast.build(k))
@@ -430,14 +405,17 @@ fn window_background(s: &SettingsUi, k: &Kit) -> El {
                     el().size(20.0, 20.0)
                         .radius(10.0)
                         .border(1.0, k.c.border_base)
-                        .fill(rgb(color_value(color))),
+                        .fill(rgb(u32::from_be_bytes([0, color[0], color[1], color[2]]))),
                 )
         }));
     let color_field = TextInput::new(&s.background_color)
         .label("Background color")
         .width(Some(96.0))
         .invalid(s.field_error(Field::BackgroundColor).is_some())
-        .on_edit(color_access)
+        .on_edit(|s: &mut SettingsUi| {
+            s.wake();
+            &mut s.background_color
+        })
         .on_submit(|s: &mut SettingsUi, _| s.save_background_color())
         .build(k)
         .key("window-background-color");
@@ -579,18 +557,25 @@ fn recorder(s: &SettingsUi, k: &Kit, index: usize) -> El {
     let state = &s.recorders[index];
     let value = s.settings.hotkeys.slots()[index];
     let default = HotkeySettings::default().slots()[index].to_owned();
-    let field = ShortcutRecorder::new(format!("hotkey-{index}"), state, recorder_access(index))
-        .label(shortcut_name(index))
-        .width(230.0)
-        .error_message(|error, shortcut| match error {
-            ShortcutError::Backend(message) => message.clone(),
-            _ => rune_kit::shortcut_error_message(error, shortcut),
-        })
-        .on_change(move |s: &mut SettingsUi, shortcut, _| {
-            s.set_hotkey(index, shortcut.map(hotkey_text).unwrap_or_default())
-                .map_err(ShortcutError::Backend)
-        })
-        .build(k);
+    let field = ShortcutRecorder::new(
+        format!("hotkey-{index}"),
+        state,
+        move |s: &mut SettingsUi| {
+            s.wake();
+            &mut s.recorders[index]
+        },
+    )
+    .label(shortcut_name(index))
+    .width(230.0)
+    .error_message(|error, shortcut| match error {
+        ShortcutError::Backend(message) => message.clone(),
+        _ => rune_kit::shortcut_error_message(error, shortcut),
+    })
+    .on_change(move |s: &mut SettingsUi, shortcut, _| {
+        s.set_hotkey(index, shortcut.map(hotkey_text).unwrap_or_default())
+            .map_err(ShortcutError::Backend)
+    })
+    .build(k);
     // Small icon buttons inside the field's trailing end.
     let action = |key: String, glyph: &'static rune::Icon, help: &'static str| {
         IconButton::new(glyph)
@@ -630,24 +615,6 @@ fn recorder(s: &SettingsUi, k: &Kit, index: usize) -> El {
     }
     el().child(field)
         .child(actions.pin(None, Some(4.0), Some(4.0), None))
-}
-
-fn recorder_access(
-    index: usize,
-) -> impl for<'a> Fn(&'a mut SettingsUi) -> &'a mut ShortcutRecorderState {
-    move |s| {
-        s.wake();
-        &mut s.recorders[index]
-    }
-}
-
-fn color_access(s: &mut SettingsUi) -> &mut TextEdit {
-    s.wake();
-    &mut s.background_color
-}
-
-fn upload_access(index: usize) -> impl for<'a> Fn(&'a mut SettingsUi) -> &'a mut TextEdit {
-    move |s| &mut s.upload[index]
 }
 
 fn share(s: &SettingsUi, k: &Kit) -> El {
@@ -754,21 +721,16 @@ fn upload_section(s: &SettingsUi, k: &Kit) -> El {
     })
     .build(k)
     .key("upload-kind");
-    let fields: &[(usize, &str)] = match s.upload_kind {
-        UploadKind::SignedUrl => &[(0, "Signed PUT URL"), (1, "Image link (optional)")],
-        UploadKind::S3 => &[
-            (2, "Bucket"),
-            (3, "Region"),
-            (4, "Endpoint (optional)"),
-            (5, "Folder prefix (optional)"),
-            (6, "Public base URL (optional)"),
-        ],
+    let fields = match s.upload_kind {
+        UploadKind::SignedUrl => 0..2,
+        UploadKind::S3 => 2..7,
     };
     upload = upload
         .child(rule(k))
         .child(setting_row(k, "Destination", "", kind))
         .child(rule(k));
-    for &(index, label) in fields {
+    for index in fields {
+        let (label, placeholder) = UPLOAD_FIELDS[index];
         upload = upload.child(
             col().px(16.0).py(12.0).child(
                 KitField::new()
@@ -776,9 +738,9 @@ fn upload_section(s: &SettingsUi, k: &Kit) -> El {
                     .control(
                         TextInput::new(&s.upload[index])
                             .label(label)
-                            .placeholder(UPLOAD_PLACEHOLDERS[index])
+                            .placeholder(placeholder)
                             .width(None)
-                            .on_edit(upload_access(index))
+                            .on_edit(move |s: &mut SettingsUi| &mut s.upload[index])
                             .on_submit(|s: &mut SettingsUi, _| s.save_upload())
                             .build(k)
                             .key(format!("upload-input-{index}")),
@@ -793,40 +755,31 @@ fn upload_section(s: &SettingsUi, k: &Kit) -> El {
             "Paste a signed upload URL from your provider. Each signed URL uploads one image, so paste a new one for the next upload.",
         ))),
         UploadKind::S3 => {
-            let found = sniplet_platform::s3_credentials_available();
-            let ink = if found {
-                k.c.success.fg
+            let (glyph, ink, status, description) = if sniplet_platform::s3_credentials_available() {
+                (
+                    &icons::CIRCLE_CHECK,
+                    k.c.success.fg,
+                    "Found",
+                    "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. AWS_SESSION_TOKEN is optional.",
+                )
             } else {
-                k.c.danger.fg
+                (
+                    &icons::CIRCLE_ALERT,
+                    k.c.danger.fg,
+                    "Not found",
+                    "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then restart Sniplet.",
+                )
             };
             upload.child(rule(k)).child(setting_row(
                 k,
                 "AWS credentials",
-                if found {
-                    "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. AWS_SESSION_TOKEN is optional."
-                } else {
-                    "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then restart Sniplet."
-                },
+                description,
                 row()
                     .key("aws-credentials")
                     .center_y()
                     .gap(4.0)
-                    .child(
-                        icon(
-                            if found {
-                                &icons::CIRCLE_CHECK
-                            } else {
-                                &icons::CIRCLE_ALERT
-                            },
-                            14.0,
-                        )
-                        .color(ink),
-                    )
-                    .child(
-                        text(if found { "Found" } else { "Not found" })
-                            .font(k.ty.text_xsmall_medium)
-                            .color(ink),
-                    ),
+                    .child(icon(glyph, 14.0).color(ink))
+                    .child(text(status).font(k.ty.text_xsmall_medium).color(ink)),
             ))
         }
     };
@@ -1070,10 +1023,6 @@ fn setting_row_with_error(
         .justify_between()
         .child(label)
         .child(control)
-}
-
-fn color_value(color: [u8; 3]) -> u32 {
-    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
 }
 
 /// Draw the four window background thumbnails for `color` into `previews`.

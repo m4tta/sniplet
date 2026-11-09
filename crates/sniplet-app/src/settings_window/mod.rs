@@ -4,16 +4,11 @@
 //! The editor owns `Settings`. This window keeps a copy for its view. Each change applies to the
 //! copy, and the same change goes to the editor, which saves it. What the editor learns back (the
 //! save result, shortcut errors, update progress) returns through [`sync`].
-use std::{
-    cell::RefCell,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{cell::RefCell, path::PathBuf, time::Duration};
 
 use rune::{
     AppSpec, FileDialogOptions, Icon, Key, KeyEvent, Pixels, Shortcut, TextEdit, Titlebar, Tx,
-    Waker, WindowHandle, WindowOptions, WindowSpec,
+    Waker, WindowHandle, WindowSpec,
 };
 use rune_kit::ShortcutRecorderState;
 use sniplet_platform::{CloudUploadConfig, HotkeySettings, Settings};
@@ -171,7 +166,6 @@ impl Link {
 }
 
 struct Open {
-    id: u64,
     handle: WindowHandle,
     link: Link,
 }
@@ -180,8 +174,6 @@ thread_local! {
     /// The open Settings window. Its state clears this when the window closes.
     static OPEN: RefCell<Option<Open>> = const { RefCell::new(None) };
 }
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Open the settings window on `page`, or bring it forward on that page.
 pub(crate) fn open(editor: &mut Editor, page: Page) -> anyhow::Result<()> {
@@ -204,18 +196,13 @@ pub(crate) fn open(editor: &mut Editor, page: Page) -> anyhow::Result<()> {
         inbox: ui.inbox.clone(),
         sent: ui.snapshot.clone(),
     };
-    let id = ui.id;
     let handle = rune::open_window(
         WindowSpec::new("settings", app_spec())
             .state(ui)
             .titlebar(Titlebar::new(TITLE_BAR))
-            .on_focus(on_focus)
-            .options(WindowOptions {
-                min_size: Some((560.0, 480.0)),
-                ..Default::default()
-            }),
+            .on_focus(on_focus),
     );
-    OPEN.with_borrow_mut(|open| *open = Some(Open { id, handle, link }));
+    OPEN.with_borrow_mut(|open| *open = Some(Open { handle, link }));
     Ok(())
 }
 
@@ -282,7 +269,6 @@ struct Startup {
 
 /// The Settings window's state.
 pub(crate) struct SettingsUi {
-    id: u64,
     page: Page,
     /// The window's copy of the editor's settings.
     settings: Settings,
@@ -339,7 +325,6 @@ impl SettingsUi {
         let previews = std::array::from_fn(|_| Pixels::new());
         view::render_previews(&previews, settings.window_capture.color);
         Self {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             page,
             editor: editor.inbox.clone(),
             inbox: Inbox::default(),
@@ -402,19 +387,17 @@ impl SettingsUi {
     /// Apply one change to this window's copy and send the same change to the editor, which
     /// saves it in the background. The save result comes back as a toast.
     fn change(&mut self, change: impl Fn(&mut Settings) + Send + 'static) {
-        let before = (
-            self.settings.hotkeys.clone(),
-            self.settings.window_capture.color,
-        );
+        let hotkeys = self.settings.hotkeys.clone();
+        let color = self.settings.window_capture.color;
         change(&mut self.settings);
         self.editor.send(move |editor, _| {
             change(&mut editor.settings);
             editor.persist_settings();
         });
-        if self.settings.hotkeys != before.0 {
+        if self.settings.hotkeys != hotkeys {
             self.recorders = recorders(&self.settings.hotkeys);
         }
-        if self.settings.window_capture.color != before.1 {
+        if self.settings.window_capture.color != color {
             view::render_previews(&self.previews, self.settings.window_capture.color);
         }
         self.stop_recording();
@@ -662,13 +645,8 @@ impl Drop for SettingsUi {
         if self.paused {
             self.editor.send(|editor, _| editor.hotkeys_paused = false);
         }
-        let id = self.id;
-        let _ = OPEN.try_with(|open| {
-            let mut open = open.borrow_mut();
-            if open.as_ref().is_some_and(|open| open.id == id) {
-                *open = None;
-            }
-        });
+        // `open` registers only one window at a time, so the one closing is the one registered.
+        let _ = OPEN.try_with(|open| *open.borrow_mut() = None);
     }
 }
 
