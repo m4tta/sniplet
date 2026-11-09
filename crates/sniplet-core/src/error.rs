@@ -14,6 +14,13 @@ pub enum SnipletError {
     UnknownAnnotation(u64),
     #[error("annotation bounds must have finite coordinates and positive dimensions")]
     InvalidAnnotationBounds,
+    #[error("annotation and backdrop numbers must be finite")]
+    NonFiniteValue,
+    #[error(
+        "a {width}x{height} image is too large; the limit is {} pixels",
+        crate::export::MAX_IMAGE_PIXELS
+    )]
+    ImageTooLarge { width: u32, height: u32 },
     #[error("an edit group is already open")]
     EditGroupAlreadyOpen,
     #[error("there is no open edit group")]

@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
             Ok(Some(if sniplet_core::Project::is_project_path(path) {
                 sniplet_core::Project::load(path)?.open_document()?
             } else {
-                Document::new(image::open(path)?.to_rgba8())
+                Document::new(sniplet_core::open_image(path)?)
             }))
         })()
     } else {

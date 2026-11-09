@@ -17,6 +17,25 @@ fn upload_keys_have_a_random_part() {
     assert_ne!(keys[0], keys[1]);
 }
 
+#[test]
+fn a_capture_too_large_to_append_leaves_the_document_unchanged() {
+    // A 100000 x 1500 canvas is over the image size limit.
+    let mut h = Harness::new(
+        Document::new(image::RgbaImage::new(100_000, 1)),
+        WINDOW,
+        true,
+    );
+    h.update(|editor| editor.add_image(image::RgbaImage::new(1, 1_500), "Capture", true));
+    assert!(h.annotations().is_empty());
+    assert_eq!((h.document().width(), h.document().height()), (100_000, 1));
+    assert!(!h.document().can_undo());
+    assert!(
+        h.editor().status.contains("too large"),
+        "{}",
+        h.editor().status
+    );
+}
+
 /// One editor window: the runtime, and the temp folder its settings write to.
 struct Harness {
     rt: Runtime<Editor>,

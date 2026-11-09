@@ -23,6 +23,14 @@ pub struct Annotation {
     pub style: AnnotationStyle,
 }
 
+impl Annotation {
+    /// JSON has no NaN or infinity, so a document keeps only finite numbers.
+    /// Otherwise a project would save but then fail to load.
+    pub(crate) fn is_finite(&self) -> bool {
+        self.kind.is_finite() && self.style.stroke_width.is_finite()
+    }
+}
+
 /// Visual treatment for an arrow while preserving the same three editing handles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,14 +233,11 @@ impl AnnotationKind {
                     ImageRect::new(origin.x, origin.y, size.width as f32, size.height as f32)
                 })
                 .or_else(|| {
-                    image::load_from_memory(png_bytes).ok().map(|image| {
-                        ImageRect::new(
-                            origin.x,
-                            origin.y,
-                            image.width() as f32,
-                            image.height() as f32,
-                        )
-                    })
+                    crate::export::encoded_dimensions(png_bytes)
+                        .ok()
+                        .map(|(width, height)| {
+                            ImageRect::new(origin.x, origin.y, width as f32, height as f32)
+                        })
                 })
                 .unwrap_or_else(|| ImageRect::new(origin.x, origin.y, 0.0, 0.0)),
         }
@@ -273,25 +278,74 @@ impl AnnotationKind {
         }
     }
 
+    /// Every coordinate and size is finite. See [`Annotation::is_finite`].
+    pub(crate) fn is_finite(&self) -> bool {
+        let point = |point: &Point| point.x.is_finite() && point.y.is_finite();
+        let rect = |rect: &ImageRect| {
+            [rect.x, rect.y, rect.width, rect.height]
+                .into_iter()
+                .all(f32::is_finite)
+        };
+        match self {
+            Self::Measurement { measurement } => {
+                point(&measurement.start)
+                    && point(&measurement.end)
+                    && measurement.pixels_per_unit.is_finite()
+                    && measurement.scale_factor.is_finite()
+            }
+            Self::Line { start, end } => point(start) && point(end),
+            Self::Arrow {
+                start, end, bend, ..
+            } => point(start) && point(end) && bend.as_ref().is_none_or(point),
+            Self::Rectangle { rect: area }
+            | Self::Ellipse { rect: area }
+            | Self::Pixelate { rect: area, .. }
+            | Self::Highlight { rect: area }
+            | Self::Spotlight { rect: area }
+            | Self::Redaction { rect: area } => rect(area),
+            Self::Blur { rect: area, radius } => rect(area) && radius.is_finite(),
+            Self::RemoveFill { rect: area, sample } => {
+                rect(area) && sample.as_ref().is_none_or(point)
+            }
+            Self::Text {
+                origin, font_size, ..
+            }
+            | Self::Counter {
+                center: origin,
+                font_size,
+                ..
+            } => point(origin) && font_size.is_finite(),
+            Self::Freehand { points } => points.iter().all(point),
+            Self::Image { origin, .. } => point(origin),
+            Self::Magnifier {
+                rect: area,
+                zoom,
+                source,
+            } => rect(area) && zoom.is_finite() && source.as_ref().is_none_or(point),
+        }
+    }
+
+    /// Moves the annotation by a finite `delta`. Coordinates saturate at the
+    /// largest `f32`, so a finite annotation stays finite.
     pub(crate) fn translate(&mut self, delta: Point) {
+        let shift = |x: &mut f32, y: &mut f32| {
+            *x = (*x + delta.x).clamp(-f32::MAX, f32::MAX);
+            *y = (*y + delta.y).clamp(-f32::MAX, f32::MAX);
+        };
+        let point = |point: &mut Point| shift(&mut point.x, &mut point.y);
         match self {
             Self::Measurement { .. } => {}
             Self::Line { start, end } => {
-                start.x += delta.x;
-                start.y += delta.y;
-                end.x += delta.x;
-                end.y += delta.y;
+                point(start);
+                point(end);
             }
             Self::Arrow {
                 start, end, bend, ..
             } => {
-                start.x += delta.x;
-                start.y += delta.y;
-                end.x += delta.x;
-                end.y += delta.y;
+                point(start);
+                point(end);
                 if let Some(bend) = bend {
-                    bend.x += delta.x;
-                    bend.y += delta.y;
+                    point(bend);
                 }
             }
             Self::Rectangle { rect }
@@ -301,32 +355,17 @@ impl AnnotationKind {
             | Self::Highlight { rect }
             | Self::Spotlight { rect }
             | Self::Redaction { rect }
-            | Self::RemoveFill { rect, .. } => *rect = rect.translated(delta),
+            | Self::RemoveFill { rect, .. } => shift(&mut rect.x, &mut rect.y),
             Self::Magnifier { rect, source, .. } => {
-                *rect = rect.translated(delta);
+                shift(&mut rect.x, &mut rect.y);
                 if let Some(source) = source {
-                    source.x += delta.x;
-                    source.y += delta.y;
+                    point(source);
                 }
             }
-            Self::Text { origin, .. } => {
-                origin.x += delta.x;
-                origin.y += delta.y;
-            }
-            Self::Counter { center, .. } => {
-                center.x += delta.x;
-                center.y += delta.y;
-            }
-            Self::Freehand { points } => {
-                for point in points {
-                    point.x += delta.x;
-                    point.y += delta.y;
-                }
-            }
-            Self::Image { origin, .. } => {
-                origin.x += delta.x;
-                origin.y += delta.y;
-            }
+            Self::Text { origin, .. }
+            | Self::Counter { center: origin, .. }
+            | Self::Image { origin, .. } => point(origin),
+            Self::Freehand { points } => points.iter_mut().for_each(point),
         }
     }
 

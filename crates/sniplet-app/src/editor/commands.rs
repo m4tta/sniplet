@@ -379,9 +379,7 @@ impl Editor {
                 if sniplet_core::Project::is_project_path(&path) {
                     sniplet_core::Project::load(path).and_then(|project| project.open_document())
                 } else {
-                    image::open(path)
-                        .map(|image| Document::new(image.to_rgba8()))
-                        .map_err(sniplet_core::SnipletError::from)
+                    sniplet_core::open_image(path).map(Document::new)
                 }
             },
             move |this, result, _| {
@@ -621,10 +619,19 @@ impl Editor {
             .size
             .map(|size| (size.width, size.height))
             .unwrap_or(insertion.dimensions);
-        doc.expand_canvas_to(
-            (insertion.origin.x.ceil() as u32).saturating_add(width),
-            (insertion.origin.y.ceil() as u32).saturating_add(height),
-        );
+        let right = (insertion.origin.x.ceil() as u32).saturating_add(width);
+        let bottom = (insertion.origin.y.ceil() as u32).saturating_add(height);
+        doc.expand_canvas_to(right, bottom);
+        if doc.width() < right || doc.height() < bottom {
+            // The canvas would pass the image size limit. Leave the document as it was.
+            let _ = doc.cancel_group();
+            self.status = sniplet_core::SnipletError::ImageTooLarge {
+                width: right,
+                height: bottom,
+            }
+            .to_string();
+            return;
+        }
         if insertion.append {
             doc.clear_crop();
         }

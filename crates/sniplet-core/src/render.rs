@@ -13,10 +13,18 @@ use crate::{
     Annotation, AnnotationKind, ArrowVariant, Backdrop, Background, Color, Document, ImageRect,
     Measurement, Point, Result, Shadow, SnipletError,
     annotation::CompositeLayer,
+    export::{MAX_IMAGE_PIXELS, check_image_size, decode_image},
     geometry::{
         ArrowHeadGeometry, QuadraticCurve, arrow_geometry, distance_to_segment, quadratic_bounds,
     },
 };
+
+// A project file can set these numbers without bound. Each limit is well above what the
+// editor offers, and stops a bad file from allocating or looping without end.
+const MAX_FONT_SIZE: f32 = 2048.0;
+const MAX_STROKE_WIDTH: f32 = 1024.0;
+const MAX_BLUR_RADIUS: f32 = 100.0;
+const MAX_BACKDROP_PADDING: u32 = 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RenderOptions<'a> {
@@ -225,7 +233,7 @@ impl Document {
                 .to_image();
         }
         if options.apply_backdrop && !backdrop_is_identity(self.backdrop()) {
-            canvas = apply_backdrop(&canvas, self.backdrop());
+            canvas = apply_backdrop(&canvas, self.backdrop())?;
         }
         Ok(canvas)
     }
@@ -251,7 +259,7 @@ impl Document {
             (0.0, 0.0)
         };
         let padding = if options.apply_backdrop {
-            self.backdrop().padding as f32
+            self.backdrop().padding.min(MAX_BACKDROP_PADDING) as f32
         } else {
             0.0
         };
@@ -275,7 +283,9 @@ fn draw_annotation(
         AnnotationKind::Pixelate { rect, block_size } => {
             pixelate(canvas, *rect, (*block_size).max(2));
         }
-        AnnotationKind::Blur { rect, radius } => blur(canvas, *rect, (*radius).max(0.1)),
+        AnnotationKind::Blur { rect, radius } => {
+            blur(canvas, *rect, radius.clamp(0.1, MAX_BLUR_RADIUS))
+        }
         AnnotationKind::RemoveFill {
             rect,
             sample: sampled_point,
@@ -290,14 +300,17 @@ fn draw_annotation(
             png_bytes,
             size,
         } => {
-            let pasted = image::load_from_memory(png_bytes)?.to_rgba8();
+            let pasted = decode_image(png_bytes)?;
             let pasted = match size {
-                Some(size) if size.width > 0 && size.height > 0 => image::imageops::resize(
-                    &pasted,
-                    size.width,
-                    size.height,
-                    image::imageops::FilterType::CatmullRom,
-                ),
+                Some(size) if size.width > 0 && size.height > 0 => {
+                    check_image_size(size.width, size.height)?;
+                    image::imageops::resize(
+                        &pasted,
+                        size.width,
+                        size.height,
+                        image::imageops::FilterType::CatmullRom,
+                    )
+                }
                 _ => pasted,
             };
             image::imageops::overlay(
@@ -347,14 +360,17 @@ fn draw_annotation(
         }
         AnnotationKind::Spotlight { .. } => {}
         _ => {
+            // Skip an annotation with no pixels on the canvas. This also keeps far-away
+            // coordinates from overflowing the integer math in the drawing code.
+            let Some(bounds) =
+                annotation_layer_bounds(annotation, font, canvas.width(), canvas.height())
+            else {
+                return Ok(());
+            };
             let layer = annotation_layer
                 .get_or_insert_with(|| RgbaImage::new(canvas.width(), canvas.height()));
             draw_layer_annotation(layer, annotation, font)?;
-            composite_annotation_layer(
-                canvas,
-                layer,
-                annotation_layer_bounds(annotation, font, canvas.width(), canvas.height()),
-            );
+            composite_annotation_layer(canvas, layer, Some(bounds));
             #[cfg(test)]
             assert!(
                 layer.pixels().all(|pixel| pixel[3] == 0),
@@ -384,7 +400,8 @@ fn draw_layer_annotation(
     font: Option<&FontRef<'_>>,
 ) -> Result<()> {
     let color: Rgba<u8> = annotation.style.stroke.into();
-    let width = annotation.style.stroke_width.max(1.0);
+    // `max` first, so NaN becomes 1 as before.
+    let width = MAX_STROKE_WIDTH.min(annotation.style.stroke_width.max(1.0));
     match &annotation.kind {
         AnnotationKind::Line { start, end } => draw_thick_line(layer, *start, *end, width, color),
         AnnotationKind::Arrow {
@@ -423,7 +440,7 @@ fn draw_layer_annotation(
             layer,
             *origin,
             text,
-            *font_size,
+            font_size.min(MAX_FONT_SIZE),
             annotation
                 .style
                 .fill
@@ -439,7 +456,7 @@ fn draw_layer_annotation(
             layer,
             *center,
             *value,
-            *font_size,
+            font_size.min(MAX_FONT_SIZE),
             color,
             annotation.style.fill.unwrap_or(Color::WHITE).into(),
             font.ok_or(SnipletError::MissingFont)?,
@@ -514,6 +531,7 @@ fn annotation_layer_bounds(
             if !finite(&[origin.x, origin.y, *font_size]) {
                 return full();
             }
+            let font_size = font_size.min(MAX_FONT_SIZE);
             let Some(font) = font else {
                 return full();
             };
@@ -535,6 +553,7 @@ fn annotation_layer_bounds(
             if !finite(&[center.x, center.y, *font_size]) {
                 return full();
             }
+            let font_size = font_size.min(MAX_FONT_SIZE);
             let radius = (font_size * 0.65).max(8.0).round();
             let mut bounds = ImageRect::new(
                 center.x.round() - radius - 1.0,
@@ -1437,13 +1456,24 @@ fn backdrop_is_identity(backdrop: Backdrop) -> bool {
     backdrop.padding == 0 && backdrop.corner_radius == 0 && backdrop.shadow.is_none()
 }
 
-fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> RgbaImage {
+/// Pads `source` onto its backdrop. Padding may add at most [`MAX_IMAGE_PIXELS`], so a
+/// long, thin image cannot grow into a huge buffer.
+fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> Result<RgbaImage> {
+    let backdrop = Backdrop {
+        padding: backdrop.padding.min(MAX_BACKDROP_PADDING),
+        ..backdrop
+    };
     let width = source
         .width()
         .saturating_add(backdrop.padding.saturating_mul(2));
     let height = source
         .height()
         .saturating_add(backdrop.padding.saturating_mul(2));
+    let added = u64::from(width) * u64::from(height)
+        - u64::from(source.width()) * u64::from(source.height());
+    if added > MAX_IMAGE_PIXELS {
+        return Err(SnipletError::ImageTooLarge { width, height });
+    }
     let mut result = background(width, height, backdrop.background);
     if let Some(shadow) = backdrop.shadow {
         let layer = shadow_layer(width, height, source, backdrop, shadow);
@@ -1465,7 +1495,7 @@ fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> RgbaImage {
         }
     }
     image::imageops::overlay(&mut result, &layer, 0, 0);
-    result
+    Ok(result)
 }
 
 fn background(width: u32, height: u32, background: Background) -> RgbaImage {
@@ -1505,8 +1535,11 @@ fn shadow_layer(
     backdrop: Backdrop,
     shadow: Shadow,
 ) -> RgbaImage {
-    let left = backdrop.padding as i64 + shadow.offset.x.round() as i64;
-    let top = backdrop.padding as i64 + shadow.offset.y.round() as i64;
+    // An offset past the layer edge moves the shadow fully out, so clamping it changes nothing.
+    let offset =
+        |value: f32, extent: u32| (value.round() as i64).clamp(-(extent as i64), extent as i64);
+    let left = backdrop.padding as i64 + offset(shadow.offset.x, width);
+    let top = backdrop.padding as i64 + offset(shadow.offset.y, height);
     let radius = backdrop
         .corner_radius
         .min(source.width().min(source.height()) / 2);
@@ -1534,7 +1567,7 @@ fn shadow_layer(
             }
         }
         if shadow.blur_radius > 0.0 {
-            image::imageops::blur(&plane, shadow.blur_radius)
+            image::imageops::blur(&plane, shadow.blur_radius.clamp(0.1, MAX_BLUR_RADIUS))
         } else {
             plane
         }
@@ -1646,7 +1679,7 @@ mod tests {
                 .to_image();
         }
         if options.apply_backdrop {
-            canvas = apply_backdrop(&canvas, document.backdrop());
+            canvas = apply_backdrop(&canvas, document.backdrop())?;
         }
         Ok(canvas)
     }
