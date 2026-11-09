@@ -40,9 +40,8 @@ pub fn stitch_vertical_refs(frames: &[&RgbaImage], options: StitchOptions) -> Re
     let width = first.width();
     let row_bytes = width as usize * 4;
     let mut height = first.height();
-    // One buffer grows by the new rows of each frame, so earlier rows are never copied again.
-    let mut output = Vec::with_capacity(frames.iter().map(|frame| pixels(frame).len()).sum());
-    output.extend_from_slice(pixels(first));
+    // One buffer grows by the new rows of each frame, so earlier rows are not copied per frame.
+    let mut output = pixels(first).to_vec();
 
     for (index, frame) in frames.iter().copied().enumerate().skip(1) {
         if frame.width() != width {
