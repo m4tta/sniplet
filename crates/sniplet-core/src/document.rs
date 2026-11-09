@@ -573,14 +573,6 @@ impl Document {
         Ok(removed)
     }
 
-    pub fn clear_annotations(&mut self) {
-        if !self.annotations.is_empty() {
-            self.record_before_change();
-            self.annotations.clear();
-            self.selected = None;
-        }
-    }
-
     /// Returns the topmost annotation under an image-space point.
     pub fn hit_test(&self, point: Point, tolerance: f32) -> Option<AnnotationId> {
         self.annotations
@@ -675,10 +667,6 @@ impl Document {
 
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
     }
 
     fn record_before_change(&mut self) {

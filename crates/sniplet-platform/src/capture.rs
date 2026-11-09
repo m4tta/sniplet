@@ -96,12 +96,6 @@ pub struct CapturedFrame {
     pub source: CaptureSource,
 }
 
-impl CapturedFrame {
-    pub fn into_document(self) -> sniplet_core::Document {
-        sniplet_core::Document::new(self.image)
-    }
-}
-
 fn property<T>(
     kind: &'static str,
     property: &'static str,
@@ -524,23 +518,6 @@ fn capture_window_impl(id: u32) -> Result<CapturedFrame> {
     }
     let window = selected.ok_or(PlatformError::WindowNotFound { id })?;
     capture_window_handle(window)
-}
-
-pub fn capture_active_window() -> Result<CapturedFrame> {
-    capture_backend("capture the active window", capture_active_window_impl)
-}
-
-fn capture_active_window_impl() -> Result<CapturedFrame> {
-    let windows = Window::all().map_err(|source| PlatformError::Enumeration {
-        kind: "windows",
-        source: Box::new(source),
-    })?;
-    for window in windows {
-        if window.is_focused().unwrap_or(false) {
-            return capture_window_handle(window);
-        }
-    }
-    Err(PlatformError::ActiveWindowNotFound)
 }
 
 fn capture_window_handle(window: Window) -> Result<CapturedFrame> {

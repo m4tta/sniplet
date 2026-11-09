@@ -23,15 +23,13 @@ mod window_background;
 pub use capture::capture_desktop_region;
 
 pub use capture::{
-    CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_active_window,
-    capture_monitor, capture_monitor_region, capture_monitor_under_pointer, capture_monitors,
-    capture_window, capture_window_with_background, list_monitors, list_windows, window_at_point,
+    CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_monitor,
+    capture_monitor_region, capture_monitor_under_pointer, capture_monitors, capture_window,
+    capture_window_with_background, list_monitors, list_windows, window_at_point,
 };
 pub use clipboard::Clipboard;
 pub use error::{PlatformError, Result};
-pub use export::{
-    default_export_directory, export_image, image_at_1x, sanitize_filename, unique_export_path,
-};
+pub use export::{default_export_directory, export_image, image_at_1x, sanitize_filename};
 pub use image::RgbaImage;
 #[cfg(windows)]
 pub use ocr::recognize_text_native_windows;
@@ -39,7 +37,7 @@ pub use ocr::{OcrOptions, recognize_text, recognize_text_tesseract};
 pub use qr::{QrCode, QrPoint, scan_qr_codes};
 pub use scroll::{
     AutomaticScrollCapture, AutomaticScrollOptions, AutomaticScrollStop, ScrollCancellation,
-    ScrollCaptureTarget, ScrollSession, capture_scrolling_region,
+    capture_scrolling_region,
 };
 pub use settings::{
     AnnotationColor, ExportFormat, HotkeySettings, Settings, SettingsStore, ThemePreference,
