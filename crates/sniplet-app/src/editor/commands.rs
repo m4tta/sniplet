@@ -619,10 +619,19 @@ impl Editor {
             .size
             .map(|size| (size.width, size.height))
             .unwrap_or(insertion.dimensions);
-        doc.expand_canvas_to(
-            (insertion.origin.x.ceil() as u32).saturating_add(width),
-            (insertion.origin.y.ceil() as u32).saturating_add(height),
-        );
+        let right = (insertion.origin.x.ceil() as u32).saturating_add(width);
+        let bottom = (insertion.origin.y.ceil() as u32).saturating_add(height);
+        doc.expand_canvas_to(right, bottom);
+        if doc.width() < right || doc.height() < bottom {
+            // The canvas would pass the image size limit. Leave the document as it was.
+            let _ = doc.cancel_group();
+            self.status = sniplet_core::SnipletError::ImageTooLarge {
+                width: right,
+                height: bottom,
+            }
+            .to_string();
+            return;
+        }
         if insertion.append {
             doc.clear_crop();
         }

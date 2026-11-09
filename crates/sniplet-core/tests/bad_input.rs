@@ -152,6 +152,20 @@ fn oversized_image_annotation_is_a_render_error() {
     ));
 }
 
+#[test]
+fn padding_a_long_thin_image_is_a_render_error() {
+    // The canvas is under the limit, but 1024 px of padding would add 2 billion pixels.
+    let mut document = Document::new(RgbaImage::new(1_000_000, 1));
+    document.set_backdrop(Backdrop {
+        padding: 1024,
+        ..Backdrop::default()
+    });
+    assert!(matches!(
+        document.render(&RenderOptions::default()),
+        Err(SnipletError::ImageTooLarge { .. })
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_project_source_that_never_ends_fails_to_open() {

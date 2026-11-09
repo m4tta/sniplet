@@ -13,7 +13,7 @@ use crate::{
     Annotation, AnnotationKind, ArrowVariant, Backdrop, Background, Color, Document, ImageRect,
     Measurement, Point, Result, Shadow, SnipletError,
     annotation::CompositeLayer,
-    export::{check_image_size, decode_image},
+    export::{MAX_IMAGE_PIXELS, check_image_size, decode_image},
     geometry::{
         ArrowHeadGeometry, QuadraticCurve, arrow_geometry, distance_to_segment, quadratic_bounds,
     },
@@ -233,7 +233,7 @@ impl Document {
                 .to_image();
         }
         if options.apply_backdrop && !backdrop_is_identity(self.backdrop()) {
-            canvas = apply_backdrop(&canvas, self.backdrop());
+            canvas = apply_backdrop(&canvas, self.backdrop())?;
         }
         Ok(canvas)
     }
@@ -400,7 +400,7 @@ fn draw_layer_annotation(
     font: Option<&FontRef<'_>>,
 ) -> Result<()> {
     let color: Rgba<u8> = annotation.style.stroke.into();
-    let width = annotation.style.stroke_width.max(1.0);
+    let width = annotation.style.stroke_width.clamp(1.0, MAX_STROKE_WIDTH);
     match &annotation.kind {
         AnnotationKind::Line { start, end } => draw_thick_line(layer, *start, *end, width, color),
         AnnotationKind::Arrow {
@@ -1455,7 +1455,9 @@ fn backdrop_is_identity(backdrop: Backdrop) -> bool {
     backdrop.padding == 0 && backdrop.corner_radius == 0 && backdrop.shadow.is_none()
 }
 
-fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> RgbaImage {
+/// Pads `source` onto its backdrop. Padding may add at most [`MAX_IMAGE_PIXELS`], so a
+/// long, thin image cannot grow into a huge buffer.
+fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> Result<RgbaImage> {
     let backdrop = Backdrop {
         padding: backdrop.padding.min(MAX_BACKDROP_PADDING),
         ..backdrop
@@ -1466,6 +1468,11 @@ fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> RgbaImage {
     let height = source
         .height()
         .saturating_add(backdrop.padding.saturating_mul(2));
+    let added = u64::from(width) * u64::from(height)
+        - u64::from(source.width()) * u64::from(source.height());
+    if added > MAX_IMAGE_PIXELS {
+        return Err(SnipletError::ImageTooLarge { width, height });
+    }
     let mut result = background(width, height, backdrop.background);
     if let Some(shadow) = backdrop.shadow {
         let layer = shadow_layer(width, height, source, backdrop, shadow);
@@ -1487,7 +1494,7 @@ fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> RgbaImage {
         }
     }
     image::imageops::overlay(&mut result, &layer, 0, 0);
-    result
+    Ok(result)
 }
 
 fn background(width: u32, height: u32, background: Background) -> RgbaImage {
@@ -1671,7 +1678,7 @@ mod tests {
                 .to_image();
         }
         if options.apply_backdrop {
-            canvas = apply_backdrop(&canvas, document.backdrop());
+            canvas = apply_backdrop(&canvas, document.backdrop())?;
         }
         Ok(canvas)
     }
