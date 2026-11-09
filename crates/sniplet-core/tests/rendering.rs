@@ -114,6 +114,76 @@ fn every_vector_shape_composites_into_the_raster() {
 }
 
 #[test]
+fn a_stroke_wider_than_its_rectangle_fills_it_without_stepping_outside() {
+    let mut document = Document::new(RgbaImage::from_pixel(20, 20, Rgba([255, 255, 255, 255])));
+    let red = Color::new(255, 0, 0, 255);
+    // Covers pixels 0..5. A fractional corner used to walk the stroke diagonally out to (9, 9).
+    document.add_annotation(
+        AnnotationKind::Rectangle {
+            rect: ImageRect::new(0.5, 0.5, 4.0, 4.0),
+        },
+        AnnotationStyle {
+            stroke: red,
+            fill: None,
+            stroke_width: 10.0,
+        },
+    );
+    // Its composite bounds reach (6, 6), so it also shows pixels a shape left in the shared layer.
+    document.add_annotation(
+        AnnotationKind::Line {
+            start: Point::new(18.0, 18.0),
+            end: Point::new(18.0, 18.0),
+        },
+        AnnotationStyle {
+            stroke: Color::new(0, 0, 255, 255),
+            fill: None,
+            stroke_width: 20.0,
+        },
+    );
+
+    let rendered = document.render(&RenderOptions::default()).unwrap();
+    for (x, y, pixel) in rendered.enumerate_pixels() {
+        let inside = x < 5 && y < 5;
+        assert_eq!(pixel.0 == [255, 0, 0, 255], inside, "pixel ({x}, {y})");
+    }
+}
+
+#[test]
+fn nan_and_oversized_ellipses_do_not_draw_stray_pixels_or_panic() {
+    let mut document = white_document();
+    let filled = AnnotationStyle {
+        fill: Some(Color::new(20, 80, 160, 255)),
+        ..AnnotationStyle::default()
+    };
+    // A NaN coordinate used to put the fill at the canvas edge.
+    document.add_annotation(
+        AnnotationKind::Ellipse {
+            rect: ImageRect::new(f32::NAN, 5.0, 6.0, 4.0),
+        },
+        filled,
+    );
+    assert_eq!(
+        document.render(&RenderOptions::default()).unwrap(),
+        *document.original()
+    );
+
+    // Live previews are not clipped to the canvas, and imageproc squares radii as i32.
+    let preview = [Annotation {
+        id: AnnotationId(99),
+        kind: AnnotationKind::Ellipse {
+            rect: ImageRect::new(0.0, 0.0, 100_000.0, 50.0),
+        },
+        style: filled,
+    }];
+    document
+        .render(&RenderOptions {
+            extra_annotations: &preview,
+            ..RenderOptions::default()
+        })
+        .unwrap();
+}
+
+#[test]
 fn live_preview_crop_backdrop_rounding_shadow_and_gradient_are_applied() {
     let mut document = white_document();
     document.set_crop(ImageRect::new(4.0, 2.0, 20.0, 16.0));

@@ -412,8 +412,67 @@ fn every_variant_handles_short_and_degenerate_arrows() {
 
         assert_eq!(document.hit_test(point, 0.0), Some(zero_id));
         let rendered = document.render(&RenderOptions::default()).unwrap();
-        assert!(rendered.pixels().any(|pixel| pixel[3] > 0));
+        // The zero-length arrow draws a dot, so it is never an invisible annotation.
+        assert!(rendered.get_pixel(30, 30)[3] > 0, "{variant:?}");
     }
+}
+
+#[test]
+fn far_off_canvas_and_huge_arrows_render_without_panicking() {
+    let mut document = Document::new(RgbaImage::new(40, 30));
+    let thin = AnnotationStyle {
+        stroke_width: 3.0,
+        ..AnnotationStyle::default()
+    };
+    for variant in [
+        ArrowVariant::Solid,
+        ArrowVariant::HandDrawn,
+        ArrowVariant::Thin,
+        ArrowVariant::DoubleEnded,
+    ] {
+        // Past the raster range: skipped instead of overflowing tiny-skia's fixed-point edges.
+        document.add_annotation(
+            AnnotationKind::Arrow {
+                start: Point::new(10.0, 20.0),
+                end: Point::new(30.0, -1e9),
+                bend: Some(Point::new(5.0, 25.0)),
+                variant,
+            },
+            thin,
+        );
+        document.add_annotation(
+            AnnotationKind::Arrow {
+                start: Point::new(5.0, 5.0),
+                end: Point::new(35.0, 25.0),
+                bend: None,
+                variant,
+            },
+            AnnotationStyle {
+                stroke_width: 1e9,
+                ..thin
+            },
+        );
+    }
+    assert!(
+        document
+            .render(&RenderOptions::default())
+            .unwrap()
+            .pixels()
+            .all(|pixel| pixel[3] == 0)
+    );
+
+    // Far off the canvas but inside the range, the visible part of the shaft still draws.
+    document.add_annotation(
+        AnnotationKind::Arrow {
+            start: Point::new(20.0, 15.0),
+            end: Point::new(20.0, -4_000_000.0),
+            bend: None,
+            variant: ArrowVariant::Solid,
+        },
+        thin,
+    );
+    let rendered = document.render(&RenderOptions::default()).unwrap();
+    assert!(rendered.get_pixel(20, 5)[3] > 0);
 }
 
 #[test]

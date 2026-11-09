@@ -86,11 +86,19 @@ impl ImageRect {
     }
 
     pub(crate) fn pixel_bounds(self, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+        // `clipped` turns a NaN extent into 0, which still covers a pixel at a fractional edge.
+        if [self.x, self.y, self.width, self.height]
+            .iter()
+            .any(|value| value.is_nan())
+        {
+            return None;
+        }
         let rect = self.clipped(width, height);
         let left = rect.x.floor() as u32;
         let top = rect.y.floor() as u32;
-        let right = (rect.x + rect.width).ceil().min(width as f32) as u32;
-        let bottom = (rect.y + rect.height).ceil().min(height as f32) as u32;
+        // Clamp as integers: `width as f32` can round up past the image edge above 2^24.
+        let right = ((rect.x + rect.width).ceil() as u32).min(width);
+        let bottom = ((rect.y + rect.height).ceil() as u32).min(height);
         (right > left && bottom > top).then_some((left, top, right, bottom))
     }
 }
@@ -340,6 +348,21 @@ pub(crate) fn point_in_triangle(point: Point, triangle: [Point; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_bounds_stay_inside_the_image() {
+        let wide = ImageRect::new(0.0, 0.0, 1e9, 1.0);
+        assert_eq!(
+            wide.pixel_bounds(16_777_219, 1),
+            Some((0, 0, 16_777_219, 1))
+        );
+        for not_a_number in [
+            ImageRect::new(f32::NAN, 5.0, 10.0, 10.0),
+            ImageRect::new(5.5, 5.5, 10.0, f32::NAN),
+        ] {
+            assert_eq!(not_a_number.pixel_bounds(100, 100), None);
+        }
+    }
 
     #[test]
     fn open_variants_share_the_documented_width_mapping() {
