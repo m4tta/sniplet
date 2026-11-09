@@ -26,7 +26,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      # The rebuild runs a downloaded CLI and fetches the public repo without credentials.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install the boat CLI
         run: |

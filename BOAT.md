@@ -166,7 +166,8 @@ again: pipe `infisical secrets get BOAT_API_KEY ... --plain --silent` into
 `gh secret set BOAT_API_KEY`.
 
 To test a change to the base before it is on `main`, build from your commit on this
-machine: `python scripts/boat.py base --ref HEAD`. Either way, `base` creates a temporary
+machine: `python scripts/boat.py base --ref HEAD`. That replaces the shared snapshot, so
+after the test, rebuild it from `main` with `gh workflow run boat-base.yml`. Either way, `base` creates a temporary
 `sniplet-base-build` VM, replaces the snapshot, and deletes the temporary VM. If a step
 fails, it keeps the temporary VM for debugging, and that VM stops by itself after
 2 hours. Existing thread VMs keep their own disks. Only one agent at a time may run
