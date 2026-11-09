@@ -1,7 +1,7 @@
 //! Headless tests that drive the real editor view through Rune's `Runtime`: pointer presses
 //! and drags on elements by key, keys through the same `on_key` the window uses, and
 //! background work through the editor's `Inbox`.
-use rune::{Env, Key, KeyEvent, Mods, PhysicalInput, Runtime};
+use rune::{Env, Key, KeyEvent, Mods, PhysicalInput, PointerButton, Runtime};
 use sniplet_core::{Annotation, AnnotationKind, Document, Point as ImagePoint};
 
 use super::Editor;
@@ -180,12 +180,21 @@ impl Harness {
 
     /// Press at `from`, move there in steps to `to`, and release.
     fn drag(&mut self, from: (f32, f32), to: (f32, f32)) {
-        self.down(from);
+        self.drag_with(PointerButton::Primary, from, to);
+    }
+
+    /// Press `button` at `from`, move there in steps to `to`, and release it, as the window
+    /// passes each mouse button to the runtime.
+    fn drag_with(&mut self, button: PointerButton, from: (f32, f32), to: (f32, f32)) {
+        self.move_to(from);
+        self.rt.button_down(from.0, from.1, button);
+        self.frame();
         for step in 1..=8 {
             let t = step as f32 / 8.0;
             self.move_to((from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t));
         }
-        self.up(to);
+        self.rt.button_up(to.0, to.1, button);
+        self.settle();
         // A later press at the same place must not pair into a double click.
         self.rt.frame(1.0);
     }

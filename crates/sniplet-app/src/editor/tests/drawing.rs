@@ -1,4 +1,5 @@
 //! Drawing, selecting, moving, cropping and undoing annotations with real pointer and keys.
+use rune::PointerButton;
 use sniplet_core::{AnnotationKind, ImageRect};
 
 use super::{arrow_points, editor};
@@ -235,6 +236,47 @@ fn text_entry_keeps_editor_shortcuts_out_and_adds_one_annotation() {
     assert!(matches!(&h.only().kind, AnnotationKind::Text { text, .. } if text == "Edited"));
     h.undo();
     assert_eq!(h.only(), text);
+}
+
+#[test]
+fn middle_drag_pans_and_neither_button_selects_moves_or_draws() {
+    let mut h = editor();
+    h.click(&tool(Tool::Rectangle));
+    h.drag_image((70.0, 30.0), (180.0, 120.0));
+    let drawn = h.only();
+    // From this edge a left drag would select and move the rectangle with Select (V), or draw
+    // another with Rectangle (R). A middle drag only pans, by the distance it moved, and a
+    // right drag uses no tool.
+    for key in ["v", "r"] {
+        h.press(key);
+        let selected = h.document().selected();
+        for button in [PointerButton::Middle, PointerButton::Secondary] {
+            let before = h.editor().transform().pan();
+            let (from, to) = (h.at(70.0, 60.0), h.at(150.0, 110.0));
+            h.drag_with(button, from, to);
+            if button == PointerButton::Middle {
+                let pan = h.editor().transform().pan();
+                assert!(
+                    (pan.x - before.x - (to.0 - from.0)).abs() < 0.01
+                        && (pan.y - before.y - (to.1 - from.1)).abs() < 0.01,
+                    "{key}: middle-drag pans with the pointer"
+                );
+            }
+            assert_eq!(h.only(), drawn, "{key} {button:?}: must not move or draw");
+            assert_eq!(
+                h.document().selected(),
+                selected,
+                "{key} {button:?}: must not select"
+            );
+        }
+    }
+    // A raster selection stays through a pan.
+    h.press("v");
+    h.drag_image((220.0, 150.0), (300.0, 220.0));
+    let selection = h.editor().selection;
+    assert!(selection.is_some());
+    h.drag_with(PointerButton::Middle, h.at(70.0, 60.0), h.at(150.0, 110.0));
+    assert_eq!(h.editor().selection, selection);
 }
 
 #[test]
