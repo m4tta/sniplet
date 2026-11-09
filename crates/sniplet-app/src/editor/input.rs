@@ -307,7 +307,10 @@ impl Editor {
                 magnifier_edit = None;
             }
         }
-        self.selection = None;
+        // A pan keeps the raster selection.
+        if !pan {
+            self.selection = None;
+        }
         self.drag = Some(EditDrag {
             points: vec![p],
             last: if pan { screen } else { p },

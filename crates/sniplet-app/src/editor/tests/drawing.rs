@@ -270,6 +270,13 @@ fn middle_drag_pans_and_neither_button_selects_moves_or_draws() {
             );
         }
     }
+    // A raster selection stays through a pan.
+    h.press("v");
+    h.drag_image((220.0, 150.0), (300.0, 220.0));
+    let selection = h.editor().selection;
+    assert!(selection.is_some());
+    h.drag_with(PointerButton::Middle, h.at(70.0, 60.0), h.at(150.0, 110.0));
+    assert_eq!(h.editor().selection, selection);
 }
 
 #[test]
