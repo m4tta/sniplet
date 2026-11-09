@@ -57,17 +57,13 @@ impl Screen {
             scale_factor: info.scale_factor,
         }
     }
-
-    fn scale(&self) -> f32 {
-        self.layout.scale()
-    }
 }
 
 fn selection_scale(screens: &[Screen], bounds: Rect) -> f32 {
     screens
         .iter()
         .filter(|screen| screen.layout.bounds.overlaps(&bounds))
-        .map(Screen::scale)
+        .map(|screen| screen.layout.scale())
         .fold(1.0, f32::max)
 }
 
@@ -153,7 +149,7 @@ fn compose(screens: &[Screen], bounds: Rect) -> Option<(RgbaImage, f32)> {
 #[cfg(target_os = "macos")]
 fn capture_bounds(screen: &Screen, selection: Rect) -> Rect {
     let bounds = selection.intersect(&screen.layout.bounds);
-    let scale = screen.scale();
+    let scale = screen.layout.scale();
     let (left, top) = (screen.layout.bounds.x, screen.layout.bounds.y);
     let x0 = ((bounds.x - left) * scale).floor() / scale + left;
     let y0 = ((bounds.y - top) * scale).floor() / scale + top;
@@ -258,24 +254,19 @@ fn ready(
             }
             match previous.filter(|_| matches!(command, Command::Repeat)) {
                 Some(previous) if !layout_matches(&previous, &screens) => {
-                    Err("Repeat Capture stopped because the display layout changed".into())
+                    return Err("Repeat Capture stopped because the display layout changed".into());
                 }
-                Some(previous) => {
-                    capture_and_load(
-                        screens,
-                        previous.bounds,
-                        &editor.inbox,
-                        command,
-                        escape.clone(),
-                        Vec::new(),
-                    );
-                    Ok(())
-                }
-                None => {
-                    open(screens, Finish::Area(command), &editor.inbox, &escape);
-                    Ok(())
-                }
+                Some(previous) => capture_and_load(
+                    screens,
+                    previous.bounds,
+                    &editor.inbox,
+                    command,
+                    escape.clone(),
+                    Vec::new(),
+                ),
+                None => open(screens, Finish::Area(command), &editor.inbox, &escape),
             }
+            Ok(())
         });
     if let Err(error) = result {
         editor.status = error;
@@ -357,11 +348,7 @@ enum Finish {
     /// Capture the area for this command.
     Area(Command),
     /// Start a scrolling capture of the area on this monitor.
-    Scroll {
-        command: Command,
-        monitor: usize,
-        scale_factor: f32,
-    },
+    Scroll { command: Command, monitor: usize },
 }
 
 /// The selection every monitor's overlay shares.
@@ -444,16 +431,12 @@ impl Selection {
                 self.escape.clone(),
                 excluded,
             ),
-            Finish::Scroll {
-                command,
-                monitor,
-                scale_factor,
-            } => {
+            Finish::Scroll { command, monitor } => {
                 let screen = &screens[0];
                 let Some(frame) = &screen.frame else {
                     return;
                 };
-                let scale = screen.scale();
+                let scale = screen.layout.scale();
                 let origin = screen.layout.bounds;
                 let rect = ImageRect::new(
                     (bounds.x - origin.x) * scale,
@@ -465,7 +448,7 @@ impl Selection {
                     capture::ScrollSelection {
                         command,
                         monitor,
-                        scale_factor,
+                        scale_factor: screen.scale_factor,
                         source: &frame.image,
                         rect,
                     },
@@ -547,22 +530,7 @@ fn overlays(
     finish: Finish,
     editor: &Inbox<Editor>,
     escape: &EscapeSession,
-) -> Vec<Overlay> {
-    let overlays = screens
-        .iter()
-        .map(|screen| {
-            (
-                screen.layout.bounds,
-                capture_overlay::initial_viewport(&screen.layout, screen.scale_factor),
-                screen.frame.as_ref().map(|frame| {
-                    let pixels = Pixels::new();
-                    let (width, height, rgba) = crate::editor::display_pixels(&frame.image);
-                    pixels.set(width, height, rgba);
-                    pixels
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
+) -> Vec<(Monitor, Overlay)> {
     let selection = Rc::new(RefCell::new(Selection {
         screens,
         windows: Vec::new(),
@@ -574,33 +542,37 @@ fn overlays(
         end: ImagePoint::default(),
         completed: false,
     }));
-    let overlays = overlays
-        .into_iter()
+    let overlays = selection
+        .borrow()
+        .screens
+        .iter()
         .enumerate()
-        .map(|(index, (bounds, viewport, pixels))| Overlay {
-            inbox: Inbox::default(),
-            selection: selection.clone(),
-            index,
-            bounds,
-            viewport,
-            pixels,
+        .map(|(index, screen)| {
+            let overlay = Overlay {
+                inbox: Inbox::default(),
+                selection: selection.clone(),
+                index,
+                bounds: screen.layout.bounds,
+                viewport: capture_overlay::initial_viewport(&screen.layout, screen.scale_factor),
+                pixels: screen.frame.as_ref().map(|frame| {
+                    let pixels = Pixels::new();
+                    let (width, height, rgba) = crate::editor::display_pixels(&frame.image);
+                    pixels.set(width, height, rgba);
+                    pixels
+                }),
+            };
+            (screen.layout.clone(), overlay)
         })
         .collect::<Vec<_>>();
-    selection.borrow_mut().overlays = overlays.iter().map(|o| o.inbox.clone()).collect();
+    selection.borrow_mut().overlays = overlays.iter().map(|(_, o)| o.inbox.clone()).collect();
     overlays
 }
 
 /// Open an overlay on every screen. Escape anywhere cancels them all.
 fn open(screens: Vec<Screen>, finish: Finish, editor: &Inbox<Editor>, escape: &EscapeSession) {
-    let monitors = screens
-        .iter()
-        .map(|screen| (screen.layout.clone(), screen.frame.is_none()))
-        .collect::<Vec<_>>();
-    let overlays = overlays(screens, finish, editor, escape);
-    let Some(selection) = overlays.first().map(|overlay| overlay.selection.clone()) else {
-        return;
-    };
-    for (overlay, (monitor, live)) in overlays.into_iter().zip(monitors) {
+    for (monitor, overlay) in overlays(screens, finish, editor, escape) {
+        let selection = overlay.selection.clone();
+        let live = overlay.pixels.is_none();
         let window = capture_overlay::open_overlay(
             &monitor,
             capture_overlay::Window {
@@ -629,12 +601,12 @@ pub(crate) fn open_scroll(
         | sniplet_platform::CaptureSource::MonitorRegion { index, .. } => index,
         sniplet_platform::CaptureSource::Window { .. } => 0,
     };
-    let finish = Finish::Scroll {
-        command,
-        monitor,
-        scale_factor: frame.scale_factor,
-    };
-    open(vec![Screen::new(frame)], finish, editor, escape);
+    open(
+        vec![Screen::new(frame)],
+        Finish::Scroll { command, monitor },
+        editor,
+        escape,
+    );
 }
 
 fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
@@ -796,7 +768,7 @@ mod tests {
         for screen in &mut screens {
             let region = capture_bounds(screen, bounds);
             let source = screen.frame.as_ref().unwrap();
-            let scale = screen.scale();
+            let scale = screen.layout.scale();
             let image = image::imageops::crop_imm(
                 &source.image,
                 ((region.x - source.bounds.x) * scale).round() as u32,
@@ -867,7 +839,7 @@ mod tests {
             escape,
         )
         .into_iter()
-        .map(|overlay| {
+        .map(|(_, overlay)| {
             let mut rt = Runtime::new(overlay, view, (100.0, 100.0), ENV);
             rt.on_key = Some(on_key);
             rt.frame(0.0);
