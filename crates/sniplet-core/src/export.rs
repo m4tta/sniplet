@@ -51,11 +51,13 @@ pub fn open_image(path: impl AsRef<Path>) -> Result<RgbaImage> {
 
 /// Checks the header, then decodes with the same decoder.
 fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<RgbaImage> {
-    let decoder = reader.with_guessed_format()?.into_decoder()?;
+    let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     let (width, height) = decoder.dimensions();
     check_image_size(width, height)?;
-    // The allocation check that `ImageReader::decode` makes.
-    Limits::default().reserve(decoder.total_bytes())?;
+    // As `ImageReader::decode` does: the output comes out of the decoder's budget.
+    let mut limits = Limits::default();
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
     Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
 }
 

@@ -400,7 +400,8 @@ fn draw_layer_annotation(
     font: Option<&FontRef<'_>>,
 ) -> Result<()> {
     let color: Rgba<u8> = annotation.style.stroke.into();
-    let width = annotation.style.stroke_width.clamp(1.0, MAX_STROKE_WIDTH);
+    // `max` first, so NaN becomes 1 as before.
+    let width = MAX_STROKE_WIDTH.min(annotation.style.stroke_width.max(1.0));
     match &annotation.kind {
         AnnotationKind::Line { start, end } => draw_thick_line(layer, *start, *end, width, color),
         AnnotationKind::Arrow {
