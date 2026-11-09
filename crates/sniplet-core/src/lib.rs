@@ -22,7 +22,7 @@ pub use color::{Color, ColorFormat};
 pub use demo::demo_image;
 pub use document::{Backdrop, Background, Document, ImageSize, Project, Shadow};
 pub use error::{Result, SnipletError};
-pub use export::{ExportFormat, decode_image};
+pub use export::{ExportFormat, decode_image, open_image};
 pub use geometry::{ImageRect, Point};
 pub use measurement::{Measurement, MeasurementAxis, measure_at};
 pub use render::RenderOptions;

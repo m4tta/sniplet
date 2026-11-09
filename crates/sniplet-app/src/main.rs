@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
             Ok(Some(if sniplet_core::Project::is_project_path(path) {
                 sniplet_core::Project::load(path)?.open_document()?
             } else {
-                Document::new(sniplet_core::decode_image(&std::fs::read(path)?)?)
+                Document::new(sniplet_core::open_image(path)?)
             }))
         })()
     } else {

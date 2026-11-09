@@ -1,4 +1,7 @@
-use std::{io::Cursor, path::Path};
+use std::{
+    io::{BufRead, Cursor, Seek},
+    path::Path,
+};
 
 use image::{
     ExtendedColorType, ImageEncoder, ImageReader, RgbaImage,
@@ -37,12 +40,22 @@ pub(crate) fn encoded_dimensions(encoded: &[u8]) -> Result<(u32, u32)> {
 /// Decodes PNG, JPEG, or WebP bytes. The header is checked against
 /// [`MAX_IMAGE_PIXELS`] first, so the RGBA8 result also stays in that budget.
 pub fn decode_image(encoded: &[u8]) -> Result<RgbaImage> {
-    let (width, height) = encoded_dimensions(encoded)?;
+    decode_with(|| Ok(ImageReader::new(Cursor::new(encoded))))
+}
+
+/// Opens an image file like [`decode_image`]. The file is streamed, never read whole
+/// before the header check, so a huge or endless file fails early.
+pub fn open_image(path: impl AsRef<Path>) -> Result<RgbaImage> {
+    decode_with(|| ImageReader::open(path.as_ref()))
+}
+
+/// Reads the header from one reader, then decodes from a fresh one.
+fn decode_with<R: BufRead + Seek>(
+    reader: impl Fn() -> std::io::Result<ImageReader<R>>,
+) -> Result<RgbaImage> {
+    let (width, height) = reader()?.with_guessed_format()?.into_dimensions()?;
     check_image_size(width, height)?;
-    Ok(ImageReader::new(Cursor::new(encoded))
-        .with_guessed_format()?
-        .decode()?
-        .to_rgba8())
+    Ok(reader()?.with_guessed_format()?.decode()?.to_rgba8())
 }
 
 impl Document {

@@ -152,6 +152,14 @@ fn oversized_image_annotation_is_a_render_error() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_project_source_that_never_ends_fails_to_open() {
+    // The source is streamed, so the format check reads a few bytes and stops.
+    let project = document().to_project("/dev/zero");
+    assert!(project.open_document().is_err());
+}
+
 #[test]
 fn image_size_comes_from_the_header_before_any_pixels_are_decoded() {
     let bomb = jpeg_claiming(12_000, 12_000);

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStyle, Color, ImageRect, Point, Result,
-    SnipletError, decode_image, export::check_image_size,
+    SnipletError, export::check_image_size, open_image,
 };
 
 const PROJECT_VERSION: u32 = 1;
@@ -124,7 +124,7 @@ impl Project {
     }
 
     pub fn open_document(&self) -> Result<Document> {
-        let image = decode_image(&std::fs::read(&self.source_image)?)?;
+        let image = open_image(&self.source_image)?;
         Document::from_project(self.clone(), image)
     }
 }
