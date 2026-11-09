@@ -206,13 +206,10 @@ impl Editor {
             Command::Qr => self.recognize(true),
             Command::Fit => self.fit = true,
             Command::ZoomSelection => {
-                if let Some(rect) = self.selection.or_else(|| {
-                    self.document.as_ref().and_then(|d| {
-                        d.selected()
-                            .and_then(|id| d.annotation(id))
-                            .map(|a| a.kind.bounds())
-                    })
-                }) {
+                if let Some(rect) = self
+                    .selection
+                    .or_else(|| self.selected_annotation().map(|a| a.kind.bounds()))
+                {
                     let (w, h) = self.canvas;
                     let zoom = ((w - 80.0) / rect.width)
                         .min((h - 80.0) / rect.height)
@@ -283,12 +280,11 @@ impl Editor {
     }
 
     fn copy_image(&mut self) {
-        let document = match self.export_document() {
-            Ok(document) => document,
-            Err(error) => {
-                self.status = error.to_string();
-                return;
-            }
+        let Ok(document) = self
+            .export_document()
+            .inspect_err(|error| self.status = error.to_string())
+        else {
+            return;
         };
         let revision = self.preview_revision;
         let hide =
@@ -470,12 +466,11 @@ impl Editor {
     }
 
     pub(super) fn recognize(&mut self, qr_only: bool) {
-        let document = match self.export_document() {
-            Ok(document) => document,
-            Err(error) => {
-                self.status = error.to_string();
-                return;
-            }
+        let Ok(document) = self
+            .export_document()
+            .inspect_err(|error| self.status = error.to_string())
+        else {
+            return;
         };
         self.status = "Recognizing text…".into();
         // A new document or a newer recognition makes the result stale. Edits and clicks
@@ -515,12 +510,11 @@ impl Editor {
             self.open_settings(crate::settings_window::Page::Share);
             return;
         };
-        let document = match self.export_document() {
-            Ok(document) => document,
-            Err(error) => {
-                self.status = error.to_string();
-                return;
-            }
+        let Ok(document) = self
+            .export_document()
+            .inspect_err(|error| self.status = error.to_string())
+        else {
+            return;
         };
         // A signed URL names one object, so it uploads one image. Spend it now, so a second
         // upload cannot replace the image behind a link already shared.

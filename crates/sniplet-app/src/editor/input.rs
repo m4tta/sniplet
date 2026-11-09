@@ -62,36 +62,12 @@ impl Keystroke {
     }
 }
 
-/// A press on the canvas, in canvas points.
-#[derive(Clone, Copy)]
-struct Press {
-    x: f32,
-    y: f32,
-    pan_button: bool,
-    shift: bool,
-    alt: bool,
-    command: bool,
-    clicks: u32,
-}
-
 impl Editor {
     /// Every press, move and release on the canvas.
     pub(super) fn canvas_drag(&mut self, drag: &mut Drag, tx: &mut Tx) {
-        let mods = tx.mods();
         match drag.phase {
-            Phase::Down => self.pointer_down(
-                Press {
-                    x: drag.x,
-                    y: drag.y,
-                    pan_button: tx.button() == PointerButton::Middle,
-                    shift: mods.shift,
-                    alt: mods.alt,
-                    command: mods.cmd || mods.ctrl,
-                    clicks: drag.clicks,
-                },
-                tx,
-            ),
-            Phase::Move => self.pointer_move(drag.x, drag.y, mods.shift),
+            Phase::Down => self.pointer_down(drag, tx),
+            Phase::Move => self.pointer_move(drag.x, drag.y, tx.mods().shift),
             Phase::Up if drag.cancelled() => self.cancel_drag(),
             Phase::Up => self.pointer_up(),
         }
@@ -104,13 +80,16 @@ impl Editor {
         }
     }
 
-    fn pointer_down(&mut self, event: Press, tx: &mut Tx) {
+    /// A press on the canvas, in canvas points.
+    fn pointer_down(&mut self, event: &Drag, tx: &mut Tx) {
+        let mods = tx.mods();
+        let pan_button = tx.button() == PointerButton::Middle;
         tx.blur();
         self.panel = None;
         let p = self.image_point(event.x, event.y);
         if self.measure.is_some() {
-            if !event.pan_button {
-                self.update_measure(p, event.shift);
+            if !pan_button {
+                self.update_measure(p, mods.shift);
                 if let Some(measurement) = self.measure.as_ref().and_then(|m| m.measurement)
                     && let Some(doc) = &mut self.document
                 {
@@ -129,25 +108,20 @@ impl Editor {
         let Some(doc) = &mut self.document else {
             return;
         };
-        let pan = self.space || event.pan_button;
+        let pan = self.space || pan_button;
         let selected = if self.selection.is_some() {
             None
         } else {
             doc.selected()
         };
-        let bounds = self.selection.or_else(|| {
-            selected
-                .and_then(|id| doc.annotation(id))
-                .map(|a| a.kind.bounds())
-        });
-        let arrow_points = selected
-            .and_then(|id| doc.annotation(id))
-            .and_then(|annotation| annotation.kind.arrow_points());
-        let magnifier_circles = selected
-            .and_then(|id| doc.annotation(id))
-            .and_then(|annotation| annotation.kind.magnifier_circles());
+        let annotation = selected.and_then(|id| doc.annotation(id));
+        let bounds = self
+            .selection
+            .or_else(|| annotation.map(|a| a.kind.bounds()));
+        let arrow_points = annotation.and_then(|a| a.kind.arrow_points());
+        let magnifier_circles = annotation.and_then(|a| a.kind.magnifier_circles());
         if !pan
-            && !event.alt
+            && !mods.alt
             && matches!(self.tool, Tool::Select | Tool::Zoom)
             && let Some(circles) = magnifier_circles
         {
@@ -174,9 +148,8 @@ impl Editor {
                     ))
                 })
                 .or_else(|| {
-                    selected
-                        .and_then(|id| doc.annotation(id))
-                        .and_then(|annotation| annotation.kind.magnifier_part_at(p, tolerance))
+                    annotation
+                        .and_then(|a| a.kind.magnifier_part_at(p, tolerance))
                         .map(|part| EditHandle::Magnifier(part, false))
                 });
             if let Some(edit) = edit {
@@ -197,7 +170,7 @@ impl Editor {
                 p,
                 selected,
                 Some(EditHandle::Arrow(handle)),
-                event.shift,
+                mods.shift,
             ));
             return;
         }
@@ -215,7 +188,7 @@ impl Editor {
                 p,
                 selected,
                 Some(EditHandle::Bounds(handle, rect)),
-                event.shift,
+                mods.shift,
             ));
             return;
         }
@@ -235,7 +208,7 @@ impl Editor {
         if !pan && self.quick_zoom {
             self.unfit();
             self.transform
-                .zoom_by(if event.alt { 0.5 } else { 2.0 }, screen);
+                .zoom_by(if mods.alt { 0.5 } else { 2.0 }, screen);
             return;
         }
         if !pan && self.tool == Tool::Text {
@@ -247,7 +220,7 @@ impl Editor {
         let Some(doc) = &mut self.document else {
             return;
         };
-        if !pan && self.tool == Tool::Select && event.command {
+        if !pan && self.tool == Tool::Select && (mods.cmd || mods.ctrl) {
             let _ = doc.select(None);
             self.selection = doc.select_monotone_at(p, 12);
             return;
@@ -300,7 +273,7 @@ impl Editor {
                 return;
             }
             let _ = doc.begin_group();
-            if event.alt {
+            if mods.alt {
                 let id = doc.add_annotation(annotation.kind, annotation.style);
                 let _ = doc.select(Some(id));
                 moving = Some(id);
@@ -315,7 +288,7 @@ impl Editor {
             points: vec![p],
             last: if pan { screen } else { p },
             pan,
-            ..EditDrag::at(p, moving, magnifier_edit, event.shift)
+            ..EditDrag::at(p, moving, magnifier_edit, mods.shift)
         });
     }
 
@@ -545,20 +518,13 @@ impl Editor {
         }
         if key == "escape" {
             // Rune ends a slider drag on Escape before keys arrive: see `cancel_size_edit`.
-            if let Some(drag) = self.drag.take()
-                && drag.moving.is_some()
-                && let Some(doc) = &mut self.document
-            {
-                let _ = doc.cancel_group();
-            }
             self.panel = None;
             self.selection = None;
-            self.draft = None;
             self.space = false;
             self.quick_zoom = false;
             self.clear_measure();
             tx.blur();
-            self.refresh();
+            self.cancel_drag();
             return true;
         }
         if !event.command
@@ -567,7 +533,7 @@ impl Editor {
             && !matches!(self.panel, Some(Panel::Text))
         {
             if key == "shift"
-                && let Some((_, _, outer)) = &mut self.measure_pending
+                && let Some((_, outer)) = &mut self.measure_pending
             {
                 *outer = true;
                 return true;
@@ -591,30 +557,25 @@ impl Editor {
                         if self
                             .measure_pending
                             .as_ref()
-                            .is_some_and(|(pending, _, _)| pending == key)
+                            .is_some_and(|(pending, _)| pending == key)
                         {
                             return true;
                         }
                         let document = doc.clone();
                         let key = key.to_owned();
                         let revision = self.preview_revision;
-                        self.measure_pending = Some((key.clone(), revision, event.shift));
+                        self.measure_pending = Some((key.clone(), event.shift));
                         self.inbox.spawn(
                             move || document.render_measurement_source(&render_options()),
                             move |this, result, _| {
                                 if this.preview_revision != revision {
                                     return;
                                 }
-                                let Some((pending, pending_revision, outer)) =
-                                    &this.measure_pending
+                                let Some((key, outer)) =
+                                    this.measure_pending.take_if(|(pending, _)| *pending == key)
                                 else {
                                     return;
                                 };
-                                if *pending != key || *pending_revision != revision {
-                                    return;
-                                }
-                                let outer = *outer;
-                                this.measure_pending = None;
                                 match result {
                                     Ok((source, origin)) => {
                                         this.measure = Some(MeasureSession {
@@ -782,11 +743,11 @@ impl Editor {
         if self
             .measure_pending
             .as_ref()
-            .is_some_and(|(pending, _, _)| pending == key)
+            .is_some_and(|(pending, _)| pending == key)
         {
             self.measure_pending = None;
         } else if key == "shift"
-            && let Some((_, _, outer)) = &mut self.measure_pending
+            && let Some((_, outer)) = &mut self.measure_pending
         {
             *outer = false;
         }
@@ -888,19 +849,14 @@ impl Editor {
     }
 
     fn resize_selected(&mut self, key: &str, step: f32, symmetric: bool) {
-        let Some(doc) = &mut self.document else {
+        let selected = self
+            .selected_annotation()
+            .filter(|_| self.selection.is_none());
+        let Some(mut rect) = self.selection.or(selected.map(|a| a.kind.bounds())) else {
             return;
         };
-        let selected = if self.selection.is_some() {
-            None
-        } else {
-            doc.selected()
-        };
-        let Some(mut rect) = self.selection.or_else(|| {
-            selected
-                .and_then(|id| doc.annotation(id))
-                .map(|a| a.kind.bounds())
-        }) else {
+        let selected = selected.map(|a| a.id);
+        let Some(doc) = &mut self.document else {
             return;
         };
         if symmetric {
