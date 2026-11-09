@@ -181,19 +181,12 @@ impl Document {
             }
             None => None,
         };
-        let mut canvas = if self.dimensions().width == self.original().width()
-            && self.dimensions().height == self.original().height()
-        {
-            if self.original_is_opaque() {
-                self.original().clone()
-            } else {
-                clone_source_for_overlay(self.original())
-            }
-        } else {
-            let mut canvas = RgbaImage::new(self.width(), self.height());
-            image::imageops::overlay(&mut canvas, self.original(), 0, 0);
-            canvas
-        };
+        let mut canvas = base_canvas(
+            self.original(),
+            self.original_is_opaque(),
+            self.width(),
+            self.height(),
+        );
         let mut annotations: Vec<_> = self
             .annotations()
             .iter()
@@ -382,16 +375,75 @@ fn draw_annotation(
     Ok(())
 }
 
-fn clone_source_for_overlay(source: &RgbaImage) -> RgbaImage {
-    let mut canvas = source.clone();
-    for pixel in canvas.pixels_mut() {
-        if pixel[3] != 255 {
-            let source_pixel = *pixel;
-            *pixel = Rgba([0, 0, 0, 0]);
-            pixel.blend(&source_pixel);
+/// The source drawn at the top-left of a transparent `width` x `height` canvas, with the
+/// same pixels as `image::imageops::overlay`. The canvas is never smaller than the source.
+fn base_canvas(source: &RgbaImage, source_is_opaque: bool, width: u32, height: u32) -> RgbaImage {
+    let row = source.width() as usize * 4;
+    if row == 0 {
+        return RgbaImage::new(width, height);
+    }
+    let stride = width as usize * 4;
+    let mut canvas = if source.dimensions() == (width, height) {
+        source.clone()
+    } else {
+        let mut canvas = RgbaImage::new(width, height);
+        for (destination, source) in canvas
+            .chunks_exact_mut(stride)
+            .zip(source.chunks_exact(row))
+        {
+            destination[..row].copy_from_slice(source);
+        }
+        canvas
+    };
+    if source_is_opaque {
+        return canvas;
+    }
+    // Over a transparent pixel, `Rgba::blend` depends only on the source channel and
+    // alpha, so a table built from `blend` itself replaces one float blend per pixel.
+    let table = over_transparent_table();
+    for pixels in canvas
+        .chunks_exact_mut(stride)
+        .take(source.height() as usize)
+    {
+        for pixel in pixels[..row].as_chunks_mut::<4>().0 {
+            let [red, green, blue, alpha] = pixel.map(usize::from);
+            if alpha != 255 {
+                let colors = &table.colors[alpha];
+                *pixel = [
+                    colors[red],
+                    colors[green],
+                    colors[blue],
+                    table.alphas[alpha],
+                ];
+            }
         }
     }
     canvas
+}
+
+/// `Rgba::blend` of each (channel, alpha) source over a transparent pixel.
+struct OverTransparent {
+    colors: [[u8; 256]; 256],
+    alphas: [u8; 256],
+}
+
+fn over_transparent_table() -> &'static OverTransparent {
+    static TABLE: std::sync::OnceLock<OverTransparent> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = OverTransparent {
+            colors: [[0; 256]; 256],
+            alphas: [0; 256],
+        };
+        for alpha in 0..=255 {
+            for channel in 0..=255 {
+                let mut pixel = Rgba([0, 0, 0, 0]);
+                pixel.blend(&Rgba([channel, channel, channel, alpha]));
+                table.colors[alpha as usize][channel as usize] = pixel[0];
+                table.alphas[alpha as usize] = pixel[3];
+            }
+        }
+        table
+    })
 }
 
 fn draw_layer_annotation(
@@ -622,32 +674,59 @@ fn composite_annotation_layer(
     let canvas = canvas.as_mut();
     let layer = layer.as_mut();
     for y in top as usize..bottom as usize {
-        for x in left as usize..right as usize {
-            let index = (y * row_width + x) * 4;
-            let alpha = layer[index + 3];
-            if alpha == 0 {
-                continue;
+        let span = (y * row_width + left as usize) * 4..(y * row_width + right as usize) * 4;
+        let pixels = canvas[span.clone()].as_chunks_mut::<4>().0;
+        for (destination, source) in pixels.iter_mut().zip(layer[span].as_chunks_mut::<4>().0) {
+            if source[3] != 0 {
+                blend_over(destination, *source);
+                *source = [0; 4];
             }
-            if alpha == 255 {
-                canvas[index..index + 4].copy_from_slice(&layer[index..index + 4]);
-            } else {
-                let mut destination = Rgba([
-                    canvas[index],
-                    canvas[index + 1],
-                    canvas[index + 2],
-                    canvas[index + 3],
-                ]);
-                destination.blend(&Rgba([
-                    layer[index],
-                    layer[index + 1],
-                    layer[index + 2],
-                    alpha,
-                ]));
-                canvas[index..index + 4].copy_from_slice(&destination.0);
-            }
-            layer[index..index + 4].fill(0);
         }
     }
+}
+
+/// `u8 as f32 / 255.0`, the channel conversion `Rgba::blend` starts with.
+const UNIT: [f32; 256] = {
+    let mut table = [0.0; 256];
+    let mut index = 0;
+    while index < 256 {
+        table[index] = index as f32 / 255.0;
+        index += 1;
+    }
+    table
+};
+
+/// Source-over blend of one RGBA pixel, bit-identical to `image`'s `Rgba::<u8>::blend`:
+/// the same f32 operations in the same order, with table lookups for the divisions by
+/// 255 and no division when the result is opaque (x / 1.0 == x).
+#[inline]
+fn blend_over(destination: &mut [u8; 4], source: [u8; 4]) {
+    if source[3] == 0 {
+        return;
+    }
+    if source[3] == 255 {
+        *destination = source;
+        return;
+    }
+    let bg_a = UNIT[destination[3] as usize];
+    let fg_a = UNIT[source[3] as usize];
+    let alpha_final = bg_a + fg_a - bg_a * fg_a;
+    if alpha_final == 0.0 {
+        return;
+    }
+    let keep = 1.0 - fg_a;
+    for channel in 0..3 {
+        let premultiplied = UNIT[source[channel] as usize] * fg_a
+            + UNIT[destination[channel] as usize] * bg_a * keep;
+        let value = if alpha_final == 1.0 {
+            premultiplied
+        } else {
+            premultiplied / alpha_final
+        };
+        // `NumCast` truncates like `as`; the value is always within (-1, 256).
+        destination[channel] = (255.0 * value) as u8;
+    }
+    destination[3] = (255.0 * alpha_final) as u8;
 }
 
 fn draw_spotlights(canvas: &mut RgbaImage, annotations: &[&Annotation]) {
@@ -1061,22 +1140,7 @@ fn draw_solid_arrow(
         }
     }
 
-    for (index, pixel) in mask.pixels().iter().enumerate() {
-        let coverage = pixel.alpha();
-        if coverage == 0 {
-            continue;
-        }
-        let x = left + index as u32 % mask.width();
-        let y = top + index as u32 / mask.width();
-        let alpha = ((color[3] as u16 * coverage as u16 + 127) / 255) as u8;
-        composite_pixel(
-            image,
-            x,
-            y,
-            Rgba([color[0], color[1], color[2], alpha]),
-            mode,
-        );
-    }
+    composite_mask(image, &mask, left, top, color, mode);
 }
 
 fn draw_open_arrow(
@@ -1179,28 +1243,24 @@ fn composite_mask(
     color: Rgba<u8>,
     mode: CompositeMode,
 ) {
-    for (index, pixel) in mask.pixels().iter().enumerate() {
-        let coverage = pixel.alpha();
-        if coverage == 0 {
-            continue;
+    let mask_width = mask.width() as usize;
+    let image_width = image.width() as usize;
+    let pixels = image.as_mut();
+    for (row, coverage) in mask.pixels().chunks_exact(mask_width).enumerate() {
+        let start = ((top as usize + row) * image_width + left as usize) * 4;
+        let destination = pixels[start..start + mask_width * 4].as_chunks_mut::<4>().0;
+        for (pixel, coverage) in destination.iter_mut().zip(coverage) {
+            let coverage = coverage.alpha();
+            if coverage == 0 {
+                continue;
+            }
+            let alpha = ((color[3] as u16 * coverage as u16 + 127) / 255) as u8;
+            let source = [color[0], color[1], color[2], alpha];
+            match mode {
+                CompositeMode::Replace => *pixel = source,
+                CompositeMode::Over => blend_over(pixel, source),
+            }
         }
-        let x = left + index as u32 % mask.width();
-        let y = top + index as u32 / mask.width();
-        let alpha = ((color[3] as u16 * coverage as u16 + 127) / 255) as u8;
-        composite_pixel(
-            image,
-            x,
-            y,
-            Rgba([color[0], color[1], color[2], alpha]),
-            mode,
-        );
-    }
-}
-
-fn composite_pixel(image: &mut RgbaImage, x: u32, y: u32, source: Rgba<u8>, mode: CompositeMode) {
-    match mode {
-        CompositeMode::Replace => image.put_pixel(x, y, source),
-        CompositeMode::Over => image.get_pixel_mut(x, y).blend(&source),
     }
 }
 
@@ -1405,12 +1465,75 @@ fn pixelate(image: &mut RgbaImage, rect: ImageRect, block_size: u32) {
 }
 
 fn blur(image: &mut RgbaImage, rect: ImageRect, radius: f32) {
-    let Some((left, top, right, bottom)) = rect.pixel_bounds(image.width(), image.height()) else {
+    let Some(bounds) = rect.pixel_bounds(image.width(), image.height()) else {
         return;
     };
-    let region = image::imageops::crop_imm(image, left, top, right - left, bottom - top).to_image();
-    let blurred = image::imageops::blur(&region, radius);
-    image::imageops::replace(image, &blurred, left as i64, top as i64);
+    let (left, top, right, bottom) = bounds;
+    // Threads pay off once the region is large and each band has at least as many rows
+    // of its own as it re-reads from its neighbours.
+    let bands = if (right - left) as u64 * ((bottom - top) as u64) < 16_384 {
+        1
+    } else {
+        let threads = std::thread::available_parallelism().map_or(1, |count| count.get() as u32);
+        threads.min((bottom - top) / (blur_halo(radius) * 2).max(16))
+    };
+    blur_in_bands(image, bounds, radius, bands);
+}
+
+/// Rows above and below a band that `imageops::blur` can read: half its kernel of about
+/// 2 * ((sigma - 0.8) / 0.3 + 1) + 1 taps, plus a row of margin for its rounding.
+fn blur_halo(sigma: f32) -> u32 {
+    ((sigma - 0.8) / 0.3 + 3.0).max(2.0) as u32
+}
+
+/// Same pixels as one `imageops::blur` over the region, split into up to `bands`
+/// horizontal bands that blur on their own threads. The blur only mixes rows within
+/// half a kernel and clamps at the region's edges, so a band that also reads a halo of
+/// rows above and below its own rows gets them exactly right.
+fn blur_in_bands(image: &mut RgbaImage, bounds: PixelBounds, sigma: f32, bands: u32) {
+    let (left, top, right, bottom) = bounds;
+    let (width, height) = (right - left, bottom - top);
+    let halo = blur_halo(sigma);
+    let band_rows = height.div_ceil(bands.clamp(1, height));
+    let bands = height.div_ceil(band_rows);
+    let blurred = std::thread::scope(|scope| {
+        let source = &*image;
+        let blur_band = move |band: u32| {
+            let rows_top = top + band * band_rows;
+            let rows_bottom = (rows_top + band_rows).min(bottom);
+            let read_top = rows_top.saturating_sub(halo).max(top);
+            let read_bottom = rows_bottom.saturating_add(halo).min(bottom);
+            let view =
+                image::imageops::crop_imm(source, left, read_top, width, read_bottom - read_top);
+            (
+                rows_top,
+                rows_bottom,
+                read_top,
+                image::imageops::blur(&*view, sigma),
+            )
+        };
+        let workers: Vec<_> = (1..bands)
+            .map(|band| scope.spawn(move || blur_band(band)))
+            .collect();
+        let mut blurred = vec![blur_band(0)];
+        blurred.extend(workers.into_iter().map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }));
+        blurred
+    });
+    let stride = image.width() as usize * 4;
+    let row = width as usize * 4;
+    let pixels = image.as_mut();
+    for (rows_top, rows_bottom, read_top, band) in blurred {
+        for y in rows_top..rows_bottom {
+            let start = y as usize * stride + left as usize * 4;
+            let band_start = (y - read_top) as usize * row;
+            pixels[start..start + row]
+                .copy_from_slice(&band.as_raw()[band_start..band_start + row]);
+        }
+    }
 }
 
 fn sample(image: &RgbaImage, point: Point) -> Option<Color> {
@@ -1452,8 +1575,17 @@ fn average_border(image: &RgbaImage, rect: ImageRect) -> Color {
     )
 }
 
+/// A backdrop that cannot change what a viewer sees. A visible background still fills
+/// transparent source pixels when there is no padding.
 fn backdrop_is_identity(backdrop: Backdrop) -> bool {
-    backdrop.padding == 0 && backdrop.corner_radius == 0 && backdrop.shadow.is_none()
+    let transparent_background = match backdrop.background {
+        Background::Solid { color } => color.a == 0,
+        Background::LinearGradient { start, end, .. } => start.a == 0 && end.a == 0,
+    };
+    backdrop.padding == 0
+        && backdrop.corner_radius == 0
+        && backdrop.shadow.is_none()
+        && transparent_background
 }
 
 /// Pads `source` onto its backdrop. Padding may add at most [`MAX_IMAGE_PIXELS`], so a
@@ -1477,24 +1609,35 @@ fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> Result<RgbaImage> {
     let mut result = background(width, height, backdrop.background);
     if let Some(shadow) = backdrop.shadow {
         let layer = shadow_layer(width, height, source, backdrop, shadow);
-        image::imageops::overlay(&mut result, &layer, 0, 0);
+        let shadow = layer.as_chunks::<4>().0;
+        for (pixel, shadow) in result.as_chunks_mut::<4>().0.iter_mut().zip(shadow) {
+            blend_over(pixel, *shadow);
+        }
     }
-    let mut layer = RgbaImage::new(width, height);
     let radius = backdrop
         .corner_radius
         .min(source.width().min(source.height()) / 2);
-    for y in 0..source.height() {
-        for x in 0..source.width() {
-            if inside_rounded(x, y, source.width(), source.height(), radius) {
-                layer.put_pixel(
-                    x + backdrop.padding,
-                    y + backdrop.padding,
-                    *source.get_pixel(x, y),
-                );
+    let (source_width, source_height) = source.dimensions();
+    let row = source_width as usize * 4;
+    if row == 0 {
+        return Ok(result);
+    }
+    let stride = width as usize * 4;
+    let padding = backdrop.padding as usize;
+    let pixels = result.as_mut();
+    for (y, source_row) in source.chunks_exact(row).enumerate() {
+        let start = (y + padding) * stride + padding * 4;
+        let destination = pixels[start..start + row].as_chunks_mut::<4>().0;
+        for (x, (pixel, source)) in destination
+            .iter_mut()
+            .zip(source_row.as_chunks::<4>().0)
+            .enumerate()
+        {
+            if inside_rounded(x as u32, y as u32, source_width, source_height, radius) {
+                blend_over(pixel, *source);
             }
         }
     }
-    image::imageops::overlay(&mut result, &layer, 0, 0);
     Ok(result)
 }
 
@@ -1618,7 +1761,14 @@ fn inside_rounded(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool 
 }
 
 fn lerp(start: u8, end: u8, t: f32) -> u8 {
-    (start as f32 + (end as f32 - start as f32) * t).round() as u8
+    round_to_u8(start as f32 + (end as f32 - start as f32) * t)
+}
+
+/// `value.round() as u8` for every f32, without the `roundf` call that `f32::round`
+/// becomes on x86-64 targets without SSE4.1.
+fn round_to_u8(value: f32) -> u8 {
+    let whole = value as u8;
+    whole.saturating_add((value - whole as f32 >= 0.5) as u8)
 }
 
 #[cfg(test)]
@@ -2150,6 +2300,121 @@ mod tests {
         assert_eq!(
             overlapping, once,
             "overlapping stroke geometry accumulated alpha"
+        );
+    }
+
+    #[test]
+    fn base_canvas_matches_overlay_for_every_channel_and_alpha() {
+        // x is the red channel and y the alpha, so every (channel, alpha) pair appears.
+        let source = RgbaImage::from_fn(256, 256, |x, y| {
+            Rgba([x as u8, 255 - x as u8, (x * 7 + y * 3) as u8, y as u8])
+        });
+        for (width, height) in [(256, 256), (261, 300)] {
+            let mut expected = RgbaImage::new(width, height);
+            image::imageops::overlay(&mut expected, &source, 0, 0);
+            assert_eq!(base_canvas(&source, false, width, height), expected);
+        }
+        let opaque = RgbaImage::from_fn(5, 3, |x, y| Rgba([x as u8, y as u8, 9, 255]));
+        let mut expected = RgbaImage::new(8, 4);
+        image::imageops::overlay(&mut expected, &opaque, 0, 0);
+        assert_eq!(base_canvas(&opaque, true, 8, 4), expected);
+    }
+
+    #[test]
+    fn blend_over_matches_image_blend_for_every_alpha_pair() {
+        let mut seed = 0x2545_f491_u32;
+        for background_alpha in 0..=255 {
+            for source_alpha in 0..=255 {
+                for _ in 0..4 {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let background = Rgba([seed as u8, (seed >> 8) as u8, 0, background_alpha]);
+                    let source = Rgba([(seed >> 16) as u8, 255, (seed >> 24) as u8, source_alpha]);
+                    let mut expected = background;
+                    expected.blend(&source);
+                    let mut actual = background.0;
+                    blend_over(&mut actual, source.0);
+                    assert_eq!(actual, expected.0, "{source:?} over {background:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn banded_blur_matches_one_blur_over_the_region() {
+        let mut seed = 7_u32;
+        // 23 px rows cover every chunk width of the image crate's column filter.
+        let image = RgbaImage::from_fn(23, 300, |_, _| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            Rgba(seed.to_le_bytes())
+        });
+        // Sigma 8.3 is the largest ring-buffer kernel; 20 and 40 use the full transient.
+        for (bounds, sigma) in [
+            ((0, 0, 23, 300), 0.1),
+            ((2, 7, 21, 293), 2.25),
+            ((0, 0, 23, 300), 8.3),
+            ((1, 30, 22, 300), 20.0),
+            ((0, 0, 23, 300), 40.0),
+        ] {
+            let (left, top, right, bottom) = bounds;
+            let region =
+                image::imageops::crop_imm(&image, left, top, right - left, bottom - top).to_image();
+            let mut expected = image.clone();
+            let blurred = image::imageops::blur(&region, sigma);
+            image::imageops::replace(&mut expected, &blurred, left as i64, top as i64);
+            for bands in [1, 2, 5, 16] {
+                let mut actual = image.clone();
+                blur_in_bands(&mut actual, bounds, sigma, bands);
+                assert!(
+                    actual == expected,
+                    "sigma {sigma} in {bands} bands over {bounds:?} differed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn round_to_u8_matches_round_then_cast_at_every_rounding_edge() {
+        let mut values = vec![
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN,
+        ];
+        for whole in -2..=258 {
+            for edge in [whole as f32, whole as f32 + 0.5] {
+                let (mut below, mut above) = (edge, edge);
+                for _ in 0..4 {
+                    values.extend([below, above]);
+                    below = below.next_down();
+                    above = above.next_up();
+                }
+            }
+        }
+        for value in values {
+            assert_eq!(round_to_u8(value), value.round() as u8, "{value:e}");
+        }
+    }
+
+    #[test]
+    fn a_visible_background_shows_through_transparent_pixels_without_padding() {
+        let source =
+            RgbaImage::from_fn(3, 1, |x, _| Rgba([200, 40, 10, [0, 128, 255][x as usize]]));
+        let mut document = Document::new(source);
+        document.set_backdrop(Backdrop {
+            padding: 0,
+            corner_radius: 0,
+            background: Background::Solid {
+                color: Color::WHITE,
+            },
+            shadow: None,
+        });
+        let options = RenderOptions::default();
+        let rendered = document.render(&options).unwrap();
+        assert_eq!(*rendered.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
+        assert_eq!(
+            rendered,
+            full_canvas_reference(&document, &options).unwrap()
         );
     }
 }
