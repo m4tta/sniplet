@@ -1,5 +1,5 @@
 use image::{Rgba, RgbaImage};
-use sniplet_core::{Point, StitchOptions, ViewportTransform, stitch_vertical};
+use sniplet_core::{Point, SnipletError, StitchOptions, ViewportTransform, stitch_vertical};
 
 #[test]
 fn cursor_anchored_zoom_round_trips_coordinates() {
@@ -14,31 +14,75 @@ fn cursor_anchored_zoom_round_trips_coordinates() {
     assert_eq!(transform.image_to_screen(anchored_pixel), cursor);
 }
 
-#[test]
-fn deterministic_vertical_stitch_recovers_the_original_fixture() {
-    let original = RgbaImage::from_fn(8, 15, |x, y| {
+fn fixture() -> RgbaImage {
+    RgbaImage::from_fn(8, 15, |x, y| {
         Rgba([
             (x * 17 + y * 3) as u8,
             (y * 13 + x) as u8,
             (x * 5 + y * 11) as u8,
             255,
         ])
-    });
-    let frames = vec![
-        image::imageops::crop_imm(&original, 0, 0, 8, 7).to_image(),
-        image::imageops::crop_imm(&original, 0, 5, 8, 7).to_image(),
-        image::imageops::crop_imm(&original, 0, 10, 8, 5).to_image(),
-    ];
-    let stitched = stitch_vertical(
-        &frames,
-        StitchOptions {
-            min_overlap: 2,
-            max_overlap: Some(4),
-            max_mean_error: 0.0,
-        },
-    )
-    .unwrap();
+    })
+}
+
+/// The fixture cut into three frames that overlap by 2 and 2 rows.
+fn fixture_frames(original: &RgbaImage) -> Vec<RgbaImage> {
+    vec![
+        image::imageops::crop_imm(original, 0, 0, 8, 7).to_image(),
+        image::imageops::crop_imm(original, 0, 5, 8, 7).to_image(),
+        image::imageops::crop_imm(original, 0, 10, 8, 5).to_image(),
+    ]
+}
+
+const EXACT: StitchOptions = StitchOptions {
+    min_overlap: 2,
+    max_overlap: Some(4),
+    max_mean_error: 0.0,
+};
+
+#[test]
+fn deterministic_vertical_stitch_recovers_the_original_fixture() {
+    let original = fixture();
+    let stitched = stitch_vertical(&fixture_frames(&original), EXACT).unwrap();
     assert_eq!(stitched, original);
+}
+
+#[test]
+fn stitching_ignores_spare_bytes_after_the_last_row() {
+    let original = fixture();
+    let padded = fixture_frames(&original)
+        .into_iter()
+        .map(|frame| {
+            let (width, height) = frame.dimensions();
+            let mut raw = frame.into_raw();
+            raw.extend_from_slice(&[9; 16]);
+            RgbaImage::from_raw(width, height, raw).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stitch_vertical(&padded, EXACT).unwrap(), original);
+}
+
+#[test]
+fn stitching_rejects_frames_it_cannot_measure() {
+    // Both cases used to score NaN, which passed the `error > max_mean_error` check.
+    let empty = RgbaImage::new(0, 30);
+    let result = stitch_vertical(&[empty.clone(), empty], StitchOptions::default());
+    assert!(matches!(
+        result,
+        Err(SnipletError::StitchOverlapNotFound { index: 1, .. })
+    ));
+
+    let black = RgbaImage::from_pixel(4, 8, Rgba([0, 0, 0, 255]));
+    let white = RgbaImage::from_pixel(4, 8, Rgba([255, 255, 255, 255]));
+    let nan_threshold = StitchOptions {
+        max_mean_error: f32::NAN,
+        ..EXACT
+    };
+    let result = stitch_vertical(&[black, white], nan_threshold);
+    assert!(matches!(
+        result,
+        Err(SnipletError::StitchOverlapNotFound { index: 1, .. })
+    ));
 }
 
 #[test]
