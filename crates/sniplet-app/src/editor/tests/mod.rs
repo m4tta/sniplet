@@ -10,6 +10,13 @@ mod drawing;
 mod panels;
 mod sizes;
 
+#[test]
+fn upload_keys_have_a_random_part() {
+    // Without one, two keys made in the same millisecond are equal.
+    let keys = [(); 2].map(|_| super::commands::upload_key().unwrap());
+    assert_ne!(keys[0], keys[1]);
+}
+
 /// One editor window: the runtime, and the temp folder its settings write to.
 struct Harness {
     rt: Runtime<Editor>,

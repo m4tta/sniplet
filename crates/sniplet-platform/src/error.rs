@@ -132,6 +132,9 @@ pub enum PlatformError {
     #[error("the upload request could not reach the configured server")]
     UploadTransport,
 
+    #[error("the upload server did not respond in time")]
+    UploadTimeout,
+
     #[error("S3 upload failed: {0}")]
     S3(#[source] Box<s3::Error>),
 }

@@ -138,6 +138,8 @@ struct Snapshot {
     hotkey_error: Option<String>,
     updates: UpdateSummary,
     installing: bool,
+    /// The editor's destination. An upload removes a signed URL from it.
+    cloud_upload: Option<CloudUploadConfig>,
 }
 
 impl Snapshot {
@@ -147,6 +149,7 @@ impl Snapshot {
             hotkey_error: editor.hotkey_error.clone(),
             updates: editor.update_summary(),
             installing: editor.updates.installing(),
+            cloud_upload: editor.settings.cloud_upload.clone(),
         }
     }
 }
@@ -373,6 +376,19 @@ impl SettingsUi {
                 None if self.notice.as_ref().is_some_and(|notice| notice.error) => {}
                 None => self.show("Saved", false, None),
             }
+        }
+        // The editor spent the signed URL on an upload. Forget it here too, so Save cannot
+        // send it again. When this window turned upload off, its copy is already empty.
+        if self.snapshot.cloud_upload.is_some()
+            && snapshot.cloud_upload.is_none()
+            && matches!(
+                self.settings.cloud_upload,
+                Some(CloudUploadConfig::PresignedPut { .. })
+            )
+        {
+            self.settings.cloud_upload = None;
+            self.upload[0].replace_text("");
+            self.upload[1].replace_text("");
         }
         self.snapshot = snapshot;
     }

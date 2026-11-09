@@ -428,6 +428,33 @@ fn upload_validates_before_saving_and_turns_off() {
     h.until("the save", |h| h.saved().cloud_upload.is_none());
 }
 
+#[test]
+fn an_upload_spends_the_signed_url_in_the_editor_and_this_window() {
+    let mut h = Harness::new(Page::Share, (680.0, 1400.0), true);
+    h.click("upload-enabled");
+    // Port 0 refuses at once, so the upload fails fast. The URL is spent either way.
+    h.ui.update(|s, _| s.upload[0].replace_text("http://127.0.0.1:0/shot.png?signature=s"));
+    h.click("save-upload");
+    h.until("the save", |h| h.saved().cloud_upload.is_some());
+
+    h.editor.update(|editor, tx| {
+        editor.document = Some(sniplet_core::Document::new(sniplet_core::demo_image(4, 3)));
+        editor.command(crate::editor::Command::Upload, tx);
+    });
+    h.until("the upload", |h| {
+        h.editor.state.status.starts_with("Upload failed")
+    });
+
+    assert!(h.editor.state.settings.cloud_upload.is_none());
+    assert!(h.saved().cloud_upload.is_none());
+    assert!(h.settings().cloud_upload.is_none());
+    assert!(h.ui.state.upload[0].text.is_empty());
+    // With the URL gone, Save has nothing to send back to the editor.
+    h.click("save-upload");
+    assert!(h.ui.state.field_error(Field::Upload).is_some());
+    assert!(h.editor.state.settings.cloud_upload.is_none());
+}
+
 /// Renders every page in both themes to `target/settings-snapshots` for a look:
 /// `cargo test -p sniplet-app settings_snapshots -- --ignored`.
 #[test]

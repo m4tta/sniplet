@@ -5421,6 +5421,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "embed-resource",
+ "getrandom 0.3.4",
  "global-hotkey",
  "image",
  "objc2 0.6.5",

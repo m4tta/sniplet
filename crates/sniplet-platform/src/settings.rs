@@ -130,8 +130,9 @@ pub struct Settings {
     pub scroll_max_frames: usize,
     pub scroll_settle_ms: u64,
     pub annotation_color: AnnotationColor,
-    /// Upload destination metadata. Credentials are loaded from the environment
-    /// at upload time and are never persisted here.
+    /// Upload destination. S3 credentials are loaded from the environment at
+    /// upload time and are never persisted here. A presigned PUT URL is a write
+    /// credential: it stays here only until an upload uses it.
     pub cloud_upload: Option<CloudUploadConfig>,
 }
 

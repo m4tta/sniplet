@@ -5,7 +5,7 @@ use rune::{FileDialogOptions, Tx};
 use sniplet_core::{
     AnnotationKind, Backdrop, ColorFormat, Document, Point as ImagePoint, ViewportTransform,
 };
-use sniplet_platform::Clipboard;
+use sniplet_platform::{Clipboard, CloudUploadConfig};
 
 use super::{Editor, Panel, render_options};
 use crate::{
@@ -524,17 +524,17 @@ impl Editor {
                 return;
             }
         };
+        // A signed URL names one object, so it uploads one image. Spend it now, so a second
+        // upload cannot replace the image behind a link already shared.
+        if matches!(config, CloudUploadConfig::PresignedPut { .. }) {
+            self.settings.cloud_upload = None;
+            self.persist_settings();
+        }
         self.status = "Uploading image…".into();
-        let key = format!(
-            "Sniplet-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
         self.inbox.spawn(
             move || {
                 let image = document.render(&render_options())?;
+                let key = upload_key()?;
                 Ok::<_, anyhow::Error>(sniplet_platform::upload_image(&image, &key, &config)?)
             },
             |this, result, _| {
@@ -651,6 +651,16 @@ impl Editor {
             self.status = format!("Could not open settings: {error}");
         }
     }
+}
+
+/// A new object name for an upload, such as `Sniplet-1731000000000-9f86d081884c7d65.png`. The
+/// random part stops one shared link from revealing the names of other uploads.
+pub(super) fn upload_key() -> anyhow::Result<String> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Ok(format!("Sniplet-{millis}-{:016x}.png", getrandom::u64()?))
 }
 
 /// Write an image export, or a project with its source image beside it.
