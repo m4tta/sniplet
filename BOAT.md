@@ -8,7 +8,8 @@ Agents edit Sniplet on the local machine. Builds, tests, and the running app go 
 
 1. **Default to the VM.** Build, test, and run the app on this thread's VM. This covers
    `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `scripts/verify.sh`,
-   `--self-test`, and all computer use on the app. Do not compile on the local machine.
+   `--self-test`, Windows compile checks, and all computer use on the app. Do not compile
+   on the local machine.
    Local `git` and `cargo fmt` are fine.
 2. **Another machine only when the user names it.** If the user says where to test (for
    example "test on my PC" or "use yarr-dev"), do that and do not start a VM.
@@ -38,6 +39,7 @@ Run from the worktree root: `python scripts/boat.py <command>`. Use `python3` wh
 | `type "TEXT"` | Types text into the focused control. |
 | `key KEY...` | Presses keys in xdotool syntax: `ctrl+z`, `ctrl+shift+2`, `Escape`, `Return`. |
 | `exec -- CMD` | Runs a shell command in the VM's repo folder (`/home/user/sniplet`). Prints its output and exits with its exit code. |
+| `check windows` | Pushes the worktree, then compiles and lints the Windows build. See [Check Windows code](#check-windows-code). |
 | `logs [-n N]` | Shows the end of the app log. |
 | `desktop` | Prints a live desktop link for a person to watch. |
 | `status` | Shows this thread's VM and its state. |
@@ -92,6 +94,18 @@ python scripts/boat.py exec -- cargo test -p sniplet-core --locked
 and `--self-test`, which captures the real screen. Those runs start their own copies of
 the app, so stop the running copy first: `exec -- pkill -x sniplet`.
 
+## Check Windows code
+
+`python scripts/boat.py check windows` pushes the worktree, then runs clippy for
+`x86_64-pc-windows-msvc` with warnings denied, like the clippy step of the Windows CI job.
+It compiles and lints the Windows-only code (`cfg(windows)`) without a Windows machine.
+It takes about 20 seconds on a warm VM. Run it when your change touches Windows-only code,
+or shared code that Windows-only code uses.
+
+The check does not link or run anything, so it does not prove Windows behavior.
+`cargo-xwin` uses Microsoft's CRT and Windows SDK, under Microsoft's license terms. The base
+snapshot already holds them in `~/.xwin-cache`.
+
 ## What the VM proves
 
 The VM runs Ubuntu 24.04 with 8 vCPUs and 16 GB (the `large` size), Xorg on display `:0`
@@ -102,9 +116,10 @@ On 2026-11-09 these passed on the VM: `verify.sh all`, the smoke run, `--self-te
 real 1920 × 1080 capture, pointer and keyboard input, and the global capture hotkey.
 
 The VM does not prove Windows or macOS behavior, Wayland, mixed DPI, or GPU rendering.
-Code under `cfg(windows)` or `cfg(target_os = "macos")` does not even compile there. The
-tray was not checked. If your change touches any of these, say so in your report and ask
-the user if they want a run on a machine that they name.
+`check windows` compiles and lints Windows-only code, but nothing runs on Windows. Code
+under `cfg(target_os = "macos")` is not compiled at all. The tray was not checked. If your
+change touches any of these, say so in your report and ask the user if they want a run on
+a machine that they name.
 
 ## Secrets
 
@@ -131,16 +146,20 @@ to watch the app. Do not put it in commits, pull requests, or public comments.
 
 ## The base snapshot
 
-Every new thread VM starts from the saved snapshot `sniplet-base`. It contains the CI
-Linux packages, the Mesa Vulkan driver, `rsync`, `CARGO_BUILD_JOBS=$(nproc)` in
-`/etc/profile.d/sniplet.sh`, and the repo at `/home/user/sniplet` with a warm build of
-`origin/main`: the debug app, the full verify suite, and a native smoke run.
+Every new thread VM starts from the saved snapshot `sniplet-base`. It contains:
+
+- the CI Linux packages, the Mesa Vulkan driver, and `rsync`;
+- `/etc/profile.d/sniplet.sh`, which sets `CARGO_BUILD_JOBS=$(nproc)` and `XWIN_CACHE_DIR`;
+- the Windows Rust target, `cargo-xwin`, and the Windows SDK in `~/.xwin-cache`;
+- the repo at `/home/user/sniplet`, with a warm build of `origin/main`: the debug app, the
+  full verify suite, a native smoke run, and `check windows`.
 
 If a thread's `Cargo.lock` is different from the base's, its first `sync` compiles the
 changed dependencies. That takes minutes instead of seconds.
 
 Run `python scripts/boat.py base` when `Cargo.lock` or the CI Linux packages change on
-`main`, or when the user asks. It takes 5 to 8 minutes. It creates a temporary
+`main`, or when the user asks. It takes 5 to 10 minutes. To test a change to the base
+before it is on `main`, build from that commit: `python scripts/boat.py base --ref HEAD`. It creates a temporary
 `sniplet-base-build` VM, replaces the snapshot, and deletes the temporary VM. If a step
 fails, it keeps the temporary VM for debugging, and that VM stops by itself after
 2 hours. Existing thread VMs keep their own disks. Only one agent at a time may run

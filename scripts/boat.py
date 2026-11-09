@@ -47,6 +47,20 @@ ACTIVE_STATES = {"provisioned", "cloning", "ready", "idle", "running"}
 # a GitHub token, into the VM, where the app and every dependency's build script can read
 # them. The VMs need no secrets.
 
+# Shell setup for every VM command, in /etc/profile.d/sniplet.sh. The repo's .cargo/config.toml
+# caps builds at 2 jobs for desktops; a VM uses every CPU. ~/.cache is not in snapshots, so
+# cargo-xwin keeps the Windows SDK in another folder.
+PROFILE = 'export CARGO_BUILD_JOBS="$(nproc)"\nexport XWIN_CACHE_DIR=/home/user/.xwin-cache\n'
+
+# Compile-and-lint checks for platforms the VM cannot run. They mirror the clippy step in
+# .github/workflows/ci.yml. Nothing is linked or run.
+CARGO_XWIN_VERSION = "0.23.1"
+CROSS_TARGETS = ["x86_64-pc-windows-msvc"]
+CROSS_CHECKS = {
+    "windows": "cargo xwin clippy --target x86_64-pc-windows-msvc "
+    "--workspace --all-targets --all-features --locked -- -D warnings",
+}
+
 # Keep in sync with the Linux packages in .github/workflows/ci.yml.
 APT_PACKAGES = (
     "gcc g++ clang cmake pkg-config libclang-dev libfontconfig-dev libwayland-dev "
@@ -338,6 +352,13 @@ def cmd_exec(args: argparse.Namespace) -> None:
     sys.exit(stream(running_vm(), f"cd {REPO} && {command}"))
 
 
+def cmd_check(args: argparse.Namespace) -> None:
+    vm = up()
+    push(vm)
+    print(f"Checking the {args.platform} build (compile and clippy only)...", flush=True)
+    sys.exit(stream(vm, f"cd {REPO} && {CROSS_CHECKS[args.platform]}"))
+
+
 def cmd_desktop(_: argparse.Namespace) -> None:
     frames = boat("desktop", running_vm())
     print(next((f["viewerUrl"] for f in frames if f.get("viewerUrl")), frames))
@@ -364,14 +385,15 @@ def cmd_down(_: argparse.Namespace) -> None:
     print(f"Stopping {vm['id']}. Its disk is kept for 14 days; `sync` resumes it.")
 
 
-def cmd_base(_: argparse.Namespace) -> None:
-    """Rebuilds the sniplet-base snapshot from origin/main. Existing thread VMs keep their disks."""
+def cmd_base(args: argparse.Namespace) -> None:
+    """Rebuilds the sniplet-base snapshot from a commit (origin/main by default).
+    Existing thread VMs keep their disks."""
     subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=ROOT, check=True)
     rev = subprocess.run(
-        ["git", "rev-parse", "--short", "origin/main"], cwd=ROOT, check=True,
+        ["git", "rev-parse", "--short", args.ref], cwd=ROOT, check=True,
         capture_output=True, text=True,
     ).stdout.strip()
-    print(f"Building {BASE_SNAPSHOT} from origin/main ({rev})...", flush=True)
+    print(f"Building {BASE_SNAPSHOT} from {args.ref} ({rev})...", flush=True)
     vm = ready_id(boat(
         "new", "--type", VM_TYPE, "--no-env", "--ttl", str(TTL_SECONDS), "--name", BASE_BUILDER,
     ))
@@ -385,24 +407,31 @@ def cmd_base(_: argparse.Namespace) -> None:
         f"sudo -E apt-get install -y -qq --no-install-recommends {APT_PACKAGES} >/tmp/apt.log 2>&1 "
         "|| { tail -n 40 /tmp/apt.log; exit 1; }"
     )
-    # The repo's .cargo/config.toml caps builds at 2 jobs for desktops; a VM uses every CPU.
-    step("echo 'export CARGO_BUILD_JOBS=\"$(nproc)\"' | sudo tee /etc/profile.d/sniplet.sh >/dev/null")
+    step(f"printf %s {shlex.quote(PROFILE)} | sudo tee /etc/profile.d/sniplet.sh >/dev/null")
+    # cargo-xwin downloads Microsoft's CRT and Windows SDK into XWIN_CACHE_DIR on first use.
+    step(
+        f"rustup target add {' '.join(CROSS_TARGETS)} && "
+        f"cargo install --locked cargo-xwin@{CARGO_XWIN_VERSION}"
+    )
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(
-            ["git", "archive", "--format=tar.gz", "-o", str(Path(tmp) / "src.tgz"), "origin/main"],
+            ["git", "archive", "--format=tar.gz", "-o", str(Path(tmp) / "src.tgz"), args.ref],
             cwd=ROOT, check=True,
         )
         boat("scp", "src.tgz", f"{vm}:/home/user/src.tgz", cwd=Path(tmp))
     step(f"rm -rf {REPO} && mkdir -p {REPO} && tar xzf ~/src.tgz -C {REPO} && rm ~/src.tgz")
-    # Warm every build that threads use: the app, the full verify suite, and a native smoke run.
+    # Warm every build that threads use: the app, the full verify suite, a native smoke run,
+    # and every cross-platform check.
     step(f"cd {REPO} && cargo build -p sniplet-app --locked && bash scripts/verify.sh all --native")
+    for command in CROSS_CHECKS.values():
+        step(f"cd {REPO} && {command}")
     step(f"rm -rf {REPO}/artifacts")
     # Stop first, so the snapshot holds every write.
     boat("stop", vm)
     wait_until_stopped(vm)
     boat("snapshot", vm, BASE_SNAPSHOT)  # Replaces the old snapshot with this name.
     boat("delete", vm, "--yes")
-    print(f"Saved {BASE_SNAPSHOT} from origin/main ({rev}).")
+    print(f"Saved {BASE_SNAPSHOT} from {args.ref} ({rev}).")
 
 
 def main() -> None:
@@ -445,10 +474,13 @@ def main() -> None:
     p.add_argument("-n", "--lines", type=int, default=60)
     p = add("exec", cmd_exec, "run a command in the VM's repo folder, with its exit code")
     p.add_argument("command", nargs=argparse.REMAINDER)
+    p = add("check", cmd_check, "push, then compile and lint for a platform the VM cannot run")
+    p.add_argument("platform", choices=sorted(CROSS_CHECKS))
     add("desktop", cmd_desktop, "print a live desktop link for a person to watch")
     add("status", cmd_status, "show this thread's VM")
     add("down", cmd_down, "stop this thread's VM (the disk is kept for 14 days)")
-    add("base", cmd_base, "rebuild the shared sniplet-base snapshot from origin/main")
+    p = add("base", cmd_base, "rebuild the shared sniplet-base snapshot from origin/main")
+    p.add_argument("--ref", default="origin/main", help="commit to build from (default: origin/main)")
 
     args = parser.parse_args()
     for attr in ("app_args", "command"):
