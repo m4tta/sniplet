@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStyle, Color, ImageRect, Point, Result,
-    SnipletError,
+    SnipletError, decode_image, export::check_image_size,
 };
 
 const PROJECT_VERSION: u32 = 1;
@@ -54,6 +54,21 @@ pub struct Backdrop {
     pub corner_radius: u32,
     pub background: Background,
     pub shadow: Option<Shadow>,
+}
+
+impl Backdrop {
+    fn is_finite(&self) -> bool {
+        let angle = match self.background {
+            Background::Solid { .. } => 0.0,
+            Background::LinearGradient { angle_degrees, .. } => angle_degrees,
+        };
+        angle.is_finite()
+            && self.shadow.is_none_or(|shadow| {
+                [shadow.offset.x, shadow.offset.y, shadow.blur_radius]
+                    .into_iter()
+                    .all(f32::is_finite)
+            })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,7 +124,7 @@ impl Project {
     }
 
     pub fn open_document(&self) -> Result<Document> {
-        let image = image::open(&self.source_image)?.to_rgba8();
+        let image = decode_image(&std::fs::read(&self.source_image)?)?;
         Document::from_project(self.clone(), image)
     }
 }
@@ -195,7 +210,7 @@ impl Document {
                 actual_height: actual.height,
             });
         }
-        let next_id = project
+        let mut next_id = project
             .annotations
             .iter()
             .map(|annotation| annotation.id.0)
@@ -213,11 +228,26 @@ impl Document {
                 height: size.height.max(actual.height),
             })
             .unwrap_or(actual);
+        if document.canvas_size != actual {
+            check_image_size(document.canvas_size.width, document.canvas_size.height)?;
+        }
         document.annotations = project.annotations;
+        let mut ids = HashSet::new();
         for annotation in &mut document.annotations {
             annotation
                 .kind
                 .normalize_and_clip(document.canvas_size.width, document.canvas_size.height);
+            if !annotation.is_finite() {
+                return Err(SnipletError::NonFiniteValue);
+            }
+            // A hand-edited file can repeat an id. A new id keeps each annotation editable.
+            if !ids.insert(annotation.id) {
+                annotation.id = AnnotationId(next_id);
+                next_id = next_id.saturating_add(1);
+            }
+        }
+        if !project.backdrop.is_finite() {
+            return Err(SnipletError::NonFiniteValue);
         }
         document.crop = project
             .crop
@@ -280,12 +310,15 @@ impl Document {
 
     /// Grows the editable canvas to at least `width` by `height`, anchored at
     /// the immutable source image's top-left. Returns whether it changed.
+    /// A canvas over the image size limit is refused.
     pub fn expand_canvas_to(&mut self, width: u32, height: u32) -> bool {
         let expanded = ImageSize {
             width: self.canvas_size.width.max(width),
             height: self.canvas_size.height.max(height),
         };
-        if expanded == self.canvas_size {
+        if expanded == self.canvas_size
+            || check_image_size(expanded.width, expanded.height).is_err()
+        {
             return false;
         }
         self.record_before_change();
@@ -482,16 +515,22 @@ impl Document {
         ))
     }
 
+    /// Adds an annotation and returns its id. An annotation with a NaN or
+    /// infinite number is not added, and the returned id names no annotation.
     pub fn add_annotation(
         &mut self,
         mut kind: AnnotationKind,
         style: AnnotationStyle,
     ) -> AnnotationId {
         kind.normalize_and_clip(self.width(), self.height());
-        self.record_before_change();
         let id = AnnotationId(self.next_id);
+        let annotation = Annotation { id, kind, style };
+        if !annotation.is_finite() {
+            return id;
+        }
+        self.record_before_change();
         self.next_id = self.next_id.saturating_add(1);
-        self.annotations.push(Annotation { id, kind, style });
+        self.annotations.push(annotation);
         id
     }
 
@@ -508,6 +547,9 @@ impl Document {
             .ok_or(SnipletError::UnknownAnnotation(id.0))?;
         kind.normalize_and_clip(self.width(), self.height());
         let replacement = Annotation { id, kind, style };
+        if !replacement.is_finite() {
+            return Err(SnipletError::NonFiniteValue);
+        }
         if self.annotations[index] != replacement {
             self.record_before_change();
             self.annotations[index] = replacement;
@@ -521,6 +563,9 @@ impl Document {
             .iter()
             .position(|annotation| annotation.id == id)
             .ok_or(SnipletError::UnknownAnnotation(id.0))?;
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            return Err(SnipletError::NonFiniteValue);
+        }
         if delta.x == 0.0 && delta.y == 0.0 {
             return Ok(());
         }
@@ -552,6 +597,9 @@ impl Document {
         }
         let mut resized = self.annotations[index].kind.clone();
         resized.resize_to(target_bounds);
+        if !resized.is_finite() {
+            return Err(SnipletError::NonFiniteValue);
+        }
         if resized != self.annotations[index].kind {
             self.record_before_change();
             self.annotations[index].kind = resized;
@@ -608,8 +656,9 @@ impl Document {
         }
     }
 
+    /// A backdrop with a NaN or infinite number is ignored.
     pub fn set_backdrop(&mut self, backdrop: Backdrop) {
-        if self.backdrop != backdrop {
+        if self.backdrop != backdrop && backdrop.is_finite() {
             self.record_before_change();
             self.backdrop = backdrop;
         }

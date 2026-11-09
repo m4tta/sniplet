@@ -379,9 +379,10 @@ impl Editor {
                 if sniplet_core::Project::is_project_path(&path) {
                     sniplet_core::Project::load(path).and_then(|project| project.open_document())
                 } else {
-                    image::open(path)
-                        .map(|image| Document::new(image.to_rgba8()))
+                    std::fs::read(path)
                         .map_err(sniplet_core::SnipletError::from)
+                        .and_then(|bytes| sniplet_core::decode_image(&bytes))
+                        .map(Document::new)
                 }
             },
             move |this, result, _| {
