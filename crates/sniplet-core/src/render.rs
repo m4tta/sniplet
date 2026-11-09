@@ -659,7 +659,9 @@ fn draw_spotlights(canvas: &mut RgbaImage, annotations: &[&Annotation]) {
             center >= start && center <= start + length
         };
         let first = (0..count).find(|&index| inside(index)).unwrap_or(count);
-        let end = (first..count).find(|&index| !inside(index)).unwrap_or(count);
+        let end = (first..count)
+            .find(|&index| !inside(index))
+            .unwrap_or(count);
         first..end
     };
     let spans: Vec<_> = spotlights
@@ -1347,7 +1349,7 @@ fn pixelate(image: &mut RgbaImage, rect: ImageRect, block_size: u32) {
         sums.fill([0; 4]);
         for row in band.chunks_exact(stride) {
             for (sum, cell) in sums.iter_mut().zip(row[span.clone()].chunks(block)) {
-                for pixel in cell.chunks_exact(4) {
+                for pixel in cell.as_chunks::<4>().0 {
                     for (sum, &channel) in sum.iter_mut().zip(pixel) {
                         *sum += channel as u64;
                     }
@@ -1359,9 +1361,7 @@ fn pixelate(image: &mut RgbaImage, rect: ImageRect, block_size: u32) {
         for (sum, cell) in sums.iter().zip(first[span.clone()].chunks_mut(block)) {
             let count = rows * (cell.len() / 4) as u64;
             let average = sum.map(|channel| (channel / count) as u8);
-            for pixel in cell.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&average);
-            }
+            cell.as_chunks_mut::<4>().0.fill(average);
         }
         for row in rest.chunks_exact_mut(stride) {
             row[span.clone()].copy_from_slice(&first[span.clone()]);
@@ -1813,6 +1813,58 @@ mod tests {
             reference_draw_thick_line(&mut expected, start, end, width, color);
             draw_thick_line(&mut actual, start, end, width, color);
             assert_eq!(actual, expected, "line case {case} differed");
+        }
+    }
+
+    // `shadow_layer` relies on `image`'s gaussian blur treating every channel alike; this
+    // catches a dependency update that breaks that.
+    #[test]
+    fn per_channel_shadow_blur_matches_blurring_the_rgba_layer() {
+        let source = RgbaImage::new(37, 23);
+        let backdrop = Backdrop {
+            padding: 9,
+            corner_radius: 6,
+            ..Backdrop::default()
+        };
+        let (width, height) = (55, 41);
+        for color in [
+            Color::new(0, 0, 0, 75),
+            Color::new(200, 40, 90, 128),
+            Color::new(50, 50, 200, 50),
+            Color::new(10, 20, 30, 0),
+        ] {
+            for blur_radius in [0.0, 2.5, 7.0] {
+                let shadow = Shadow {
+                    offset: Point::new(-3.4, 5.6),
+                    blur_radius,
+                    color,
+                };
+                let radius = backdrop.corner_radius;
+                let mut layer = RgbaImage::new(width, height);
+                for y in 0..source.height() {
+                    for x in 0..source.width() {
+                        let (dx, dy) = (x as i64 + 9 - 3, y as i64 + 9 + 6);
+                        if dx >= 0
+                            && dy >= 0
+                            && dx < width as i64
+                            && dy < height as i64
+                            && inside_rounded(x, y, source.width(), source.height(), radius)
+                        {
+                            layer.put_pixel(dx as u32, dy as u32, color.into());
+                        }
+                    }
+                }
+                let expected = if blur_radius > 0.0 {
+                    image::imageops::blur(&layer, blur_radius)
+                } else {
+                    layer
+                };
+                assert_eq!(
+                    shadow_layer(width, height, &source, backdrop, shadow),
+                    expected,
+                    "shadow {color:?} blur {blur_radius}"
+                );
+            }
         }
     }
 
