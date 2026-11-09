@@ -49,7 +49,7 @@ Double-click text to edit it; Alt-drag to
 duplicate. Enter crops a raster selection; Escape cancels. Copy/export uses
 the selection when present. Undo/redo preserves editing operations.
 
-Right-drag or Space-drag pans. Ctrl/Cmd + wheel zooms at the pointer.
+Middle-drag or Space-drag pans. Ctrl/Cmd + wheel zooms at the pointer.
 Ctrl/Cmd + 1 fits, 0 uses actual pixels, and 2 fits the selection. Z + click
 zooms in (Alt zooms out). Tab copies the sampled color. The application menu
 auto-adjusts a raster selection to visible content; Ctrl/Cmd-click selects a monotone region.

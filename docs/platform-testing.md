@@ -406,7 +406,7 @@ Use a fixture with fine one-pixel lines, flat-color regions, text, transparency,
 1. Verify the main toolbar order, overflow behavior, pixel color, image dimensions, and zoom readouts against the [feature checklist](parity.md).
 2. Create every annotation object. For selectable objects, move, resize, recolor, restyle, duplicate, reorder, undo, and redo it.
 3. Exercise context-sensitive editor shortcuts. In particular, `V` selects/crops, `A` selects Arrow (the user's requested override), `B` selects the Blur/Erase family, `C` chooses Counter without a raster selection and copies average color with one, and `Command/Ctrl+A` invokes Add Capture. Auto Adjust is available from the application menu. Draw an arrow, drag all three handles and the shaft, then verify grouped undo/redo and PNG export.
-4. Crop a selection with Enter; remove a uniform object with Delete; pan with right-drag and Space-drag; test keyboard nudge and resize increments.
+4. Crop a selection with Enter; remove a uniform object with Delete; pan with middle-drag and Space-drag; test keyboard nudge and resize increments.
 5. Copy the full image, copy a selected raster region, and save as PNG and JPEG.
 6. Open each export in an independent viewer. Compare dimensions, alpha, edge pixels, annotation placement, colors, and JPEG quality to the editor preview.
 7. Drag the editor's file representation into another application. Verify that the file remains readable after the drop and is eventually cleaned up.
