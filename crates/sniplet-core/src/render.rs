@@ -1512,14 +1512,22 @@ fn blur_in_bands(image: &mut RgbaImage, bounds: PixelBounds, sigma: f32, bands: 
                 image::imageops::blur(&*view, sigma),
             )
         };
+        // A band whose thread cannot start blurs on this thread instead.
         let workers: Vec<_> = (1..bands)
-            .map(|band| scope.spawn(move || blur_band(band)))
+            .map(|band| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, move || blur_band(band))
+                    .map_err(|_| band)
+            })
             .collect();
         let mut blurred = vec![blur_band(0)];
         blurred.extend(workers.into_iter().map(|worker| {
-            worker
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            match worker {
+                Ok(worker) => worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(band) => blur_band(band),
+            }
         }));
         blurred
     });
