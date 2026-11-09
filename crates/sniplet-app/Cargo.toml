@@ -17,6 +17,7 @@ sniplet-core = { path = "../sniplet-core" }
 sniplet-platform = { path = "../sniplet-platform" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 anyhow = "1"
+getrandom = { version = "0.3", features = ["std"] }
 global-hotkey = "0.8"
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 serde_json = "1"

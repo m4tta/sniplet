@@ -790,7 +790,7 @@ fn upload_section(s: &SettingsUi, k: &Kit) -> El {
     upload = match s.upload_kind {
         UploadKind::SignedUrl => upload.child(col().px(16.0).pb(12.0).child(note(
             k,
-            "Paste a signed upload URL from your provider. Signed URLs expire, so paste a new one when uploads fail.",
+            "Paste a signed upload URL from your provider. Each signed URL uploads one image, so paste a new one for the next upload.",
         ))),
         UploadKind::S3 => {
             let found = sniplet_platform::s3_credentials_available();

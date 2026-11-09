@@ -677,8 +677,12 @@ impl Editor {
                     return;
                 }
                 let error = result.err().map(|error| error.to_string());
-                if this.load_revision == load_revision {
-                    this.status = error.clone().unwrap_or_else(|| "Settings saved".into());
+                // The Settings window confirms its own saves. The status shows only failures, so
+                // a save never hides the status of the command that caused it, such as an upload.
+                if let Some(error) = &error
+                    && this.load_revision == load_revision
+                {
+                    this.status = error.clone();
                 }
                 this.settings_save_result = Some((revision, error));
             },

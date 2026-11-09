@@ -8,16 +8,20 @@ use url::Url;
 use crate::{PlatformError, Result, sanitize_filename};
 
 const PNG_CONTENT_TYPE: &str = "image/png";
+// The longest one upload request may take, so a stalled server ends in an error.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 // AWS Signature Version 4 caps presigned URLs at seven days.
 const PRESIGNED_GET_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// An explicit cloud destination. Authentication material is deliberately not
-/// represented here: S3 credentials are read from the standard AWS environment
-/// variables only when [`upload_image`] is called.
+/// An explicit cloud destination. S3 credentials are deliberately not represented
+/// here: they are read from the standard AWS environment variables only when
+/// [`upload_image`] is called. A presigned PUT URL is itself a write credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CloudUploadConfig {
-    /// A one-use URL obtained from an external service.
+    /// A one-use URL obtained from an external service. It names one object, so a
+    /// second upload would replace the first image behind its shared link. The
+    /// editor removes it from settings when an upload starts.
     PresignedPut {
         url: String,
         public_url: Option<String>,
@@ -95,7 +99,7 @@ pub fn upload_image(
 
     match config {
         CloudUploadConfig::PresignedPut { url, public_url } => {
-            upload_presigned_put(png, &filename, url, public_url.as_deref())
+            upload_presigned_put(png, &filename, url, public_url.as_deref(), UPLOAD_TIMEOUT)
         }
         CloudUploadConfig::S3 {
             bucket,
@@ -153,18 +157,31 @@ fn upload_presigned_put(
     key: &str,
     upload_url: &str,
     public_url: Option<&str>,
+    timeout: Duration,
 ) -> Result<UploadedImage> {
     let mut parsed_upload_url = parse_http_url(upload_url, "presigned PUT URL")?;
 
-    match ureq::put(parsed_upload_url.as_str())
+    // A followed 301/302/303 turns the PUT into a GET without the image, so the
+    // upload succeeds only when this URL itself answers 2xx.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let status = match agent
+        .put(parsed_upload_url.as_str())
         .header("Content-Type", PNG_CONTENT_TYPE)
         .send(png.as_slice())
     {
-        Ok(_) => {}
-        Err(ureq::Error::StatusCode(status)) => {
-            return Err(PlatformError::UploadHttpStatus { status });
-        }
+        Ok(response) => response.status(),
+        Err(ureq::Error::Timeout(_)) => return Err(PlatformError::UploadTimeout),
         Err(_) => return Err(PlatformError::UploadTransport),
+    };
+    if !status.is_success() {
+        return Err(PlatformError::UploadHttpStatus {
+            status: status.as_u16(),
+        });
     }
 
     let url = if let Some(public_url) = public_url {
@@ -216,7 +233,7 @@ fn upload_s3_with_auth(
         .region(destination.region)
         .auth(auth)
         .addressing_style(AddressingStyle::Path)
-        .timeout(Duration::from_secs(30))
+        .timeout(UPLOAD_TIMEOUT)
         .build()
         .map_err(s3_error)?;
 
@@ -297,9 +314,10 @@ fn s3_error(error: s3::Error) -> PlatformError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+    use std::time::Instant;
 
     use image::{GenericImageView, Rgba};
     use s3::Credentials;
@@ -316,12 +334,60 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            read_request(&mut stream, status)
+            let reason = if status == 200 { "OK" } else { "Forbidden" };
+            read_request(&mut stream, &format!("{status} {reason}"))
         });
         (format!("http://{address}"), handle)
     }
 
-    fn read_request(stream: &mut TcpStream, status: u16) -> (String, Vec<u8>) {
+    /// Answers the first request with a 302 to `/landing`, and a request that follows it with
+    /// 200. Returns the head of each request it got.
+    fn redirect_server() -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut heads = vec![read_request(&mut stream, "302 Found\r\nLocation: /landing").0];
+            drop(stream);
+            // A client that follows the redirect connects again at once.
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        heads.push(read_request(&mut stream, "200 OK").0);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            }
+            heads
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    /// Takes one connection and never answers. It reads until the client hangs up, or for ten
+    /// seconds.
+    fn stalled_server() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut sink = [0_u8; 4096];
+            while matches!(stream.read(&mut sink), Ok(read) if read > 0) {}
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    /// Reads one request and answers with `status`, a status code and reason with any extra
+    /// header lines. Returns the request head and body.
+    fn read_request(stream: &mut TcpStream, status: &str) -> (String, Vec<u8>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -354,10 +420,9 @@ mod tests {
             received.extend_from_slice(&chunk[..read]);
         }
 
-        let reason = if status == 200 { "OK" } else { "Forbidden" };
         write!(
             stream,
-            "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
         (
@@ -411,6 +476,49 @@ mod tests {
             PlatformError::UploadHttpStatus { status: 403 }
         ));
         assert!(!error.to_string().contains(secret));
+    }
+
+    #[test]
+    fn presigned_put_fails_on_a_redirect_instead_of_following_it() {
+        // Following a 302 turns the PUT into a GET without the image, so a 200 for that GET
+        // must not count as an upload.
+        let (server, handle) = redirect_server();
+        let config = CloudUploadConfig::PresignedPut {
+            url: format!("{server}/object.png?signature=s"),
+            public_url: None,
+        };
+
+        let result = upload_image(&fixture(), "object.png", &config);
+        let heads = handle.join().unwrap();
+
+        assert!(
+            matches!(result, Err(PlatformError::UploadHttpStatus { status: 302 })),
+            "{result:?}"
+        );
+        assert_eq!(heads.len(), 1, "followed the redirect: {heads:?}");
+        assert!(heads[0].starts_with("PUT /object.png"));
+    }
+
+    #[test]
+    fn presigned_put_times_out_when_the_server_stalls() {
+        let (server, handle) = stalled_server();
+
+        let started = Instant::now();
+        let result = upload_presigned_put(
+            encode_png(&fixture()).unwrap(),
+            "object.png",
+            &format!("{server}/object.png"),
+            None,
+            Duration::from_millis(500),
+        );
+        let elapsed = started.elapsed();
+        handle.join().unwrap();
+
+        assert!(
+            matches!(result, Err(PlatformError::UploadTimeout)),
+            "{result:?}"
+        );
+        assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
     }
 
     #[test]
