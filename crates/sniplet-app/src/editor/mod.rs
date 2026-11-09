@@ -155,7 +155,7 @@ pub struct Editor {
     space: bool,
     quick_zoom: bool,
     measure: Option<MeasureSession>,
-    measure_pending: Option<(String, u64, bool)>,
+    measure_pending: Option<(String, bool)>,
     /// Where the measurement overlay sits in image space, and its pixels.
     measure_overlay: Option<ImageRect>,
     measure_pixels: Pixels,
