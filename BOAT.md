@@ -160,9 +160,10 @@ changed dependencies. That takes minutes instead of seconds.
 The **Boat base** GitHub workflow (`.github/workflows/boat-base.yml`) rebuilds the snapshot
 from `main` when a push to `main` changes `Cargo.lock`, `scripts/boat.py`, or the CI
 workflow. To rebuild it at another time, run `gh workflow run boat-base.yml`. A rebuild
-takes 5 to 10 minutes. The workflow uses the repository secret `BOAT_API_KEY`: a boat key
-that can only manage VMs and snapshots, and that expires 365 days after it was made. When
-it expires, make a new key with the same actions and replace the secret.
+takes 5 to 10 minutes. The workflow uses the repository secret `BOAT_API_KEY`, which holds
+the same key as `BOAT_API_KEY` in The Vault. If that key changes, copy it to the secret
+again: pipe `infisical secrets get BOAT_API_KEY ... --plain --silent` into
+`gh secret set BOAT_API_KEY`.
 
 To test a change to the base before it is on `main`, build from your commit on this
 machine: `python scripts/boat.py base --ref HEAD`. Either way, `base` creates a temporary
