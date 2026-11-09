@@ -4,7 +4,7 @@ use std::{
 };
 
 use image::{
-    ExtendedColorType, ImageEncoder, ImageReader, RgbaImage,
+    DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageReader, Limits, RgbaImage,
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
 };
 
@@ -40,22 +40,23 @@ pub(crate) fn encoded_dimensions(encoded: &[u8]) -> Result<(u32, u32)> {
 /// Decodes PNG, JPEG, or WebP bytes. The header is checked against
 /// [`MAX_IMAGE_PIXELS`] first, so the RGBA8 result also stays in that budget.
 pub fn decode_image(encoded: &[u8]) -> Result<RgbaImage> {
-    decode_with(|| Ok(ImageReader::new(Cursor::new(encoded))))
+    decode(ImageReader::new(Cursor::new(encoded)))
 }
 
 /// Opens an image file like [`decode_image`]. The file is streamed, never read whole
 /// before the header check, so a huge or endless file fails early.
 pub fn open_image(path: impl AsRef<Path>) -> Result<RgbaImage> {
-    decode_with(|| ImageReader::open(path.as_ref()))
+    decode(ImageReader::open(path)?)
 }
 
-/// Reads the header from one reader, then decodes from a fresh one.
-fn decode_with<R: BufRead + Seek>(
-    reader: impl Fn() -> std::io::Result<ImageReader<R>>,
-) -> Result<RgbaImage> {
-    let (width, height) = reader()?.with_guessed_format()?.into_dimensions()?;
+/// Checks the header, then decodes with the same decoder.
+fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<RgbaImage> {
+    let decoder = reader.with_guessed_format()?.into_decoder()?;
+    let (width, height) = decoder.dimensions();
     check_image_size(width, height)?;
-    Ok(reader()?.with_guessed_format()?.decode()?.to_rgba8())
+    // The allocation check that `ImageReader::decode` makes.
+    Limits::default().reserve(decoder.total_bytes())?;
+    Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
 }
 
 impl Document {
