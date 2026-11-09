@@ -895,6 +895,9 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         log: Mutex<Vec<String>>,
+        /// While a test holds this lock, backend calls cannot finish, so the test can look at the
+        /// editor while a check or download runs.
+        gate: Mutex<()>,
         fail_check: AtomicBool,
         fail_install: AtomicBool,
         fail_restart: AtomicBool,
@@ -915,8 +918,10 @@ mod tests {
     struct FakeBackend(Arc<Fake>);
 
     impl Fake {
+        /// Log a backend call, then wait while a test holds `gate`.
         fn record(&self, entry: String) {
             self.log.lock().unwrap().push(entry);
+            drop(self.gate.lock().unwrap());
         }
 
         fn take(&self) -> Vec<String> {
@@ -1053,10 +1058,14 @@ mod tests {
         assert!(matches!(editor.updates.phase, Phase::CheckFailed(_)));
 
         fake.fail_check.store(false, Ordering::SeqCst);
+        // Hold the backend, so the checks still run when the test looks at the phase. A drain
+        // also runs results that come back during it, so instant checks could finish first.
+        let held = fake.gate.lock().unwrap();
         click(&mut settings, "update-check");
         click(&mut settings, "update-channel/segment1");
         Inbox::drain(&mut editor, |e| &e.inbox, &mut Tx::default());
         assert!(matches!(editor.updates.phase, Phase::Checking));
+        drop(held);
         sync(&mut editor, &mut settings);
         assert_eq!(
             fake.take(),
@@ -1067,6 +1076,8 @@ mod tests {
         };
         assert_eq!(release.version, "9.1.0-nightly.20261104.1");
 
+        // Hold the download until the channel click is queued, so the click lands mid-download.
+        let held = fake.gate.lock().unwrap();
         click(&mut settings, "update-download");
         Inbox::drain(&mut editor, |e| &e.inbox, &mut Tx::default());
         assert!(matches!(editor.updates.phase, Phase::Downloading(_)));
@@ -1076,6 +1087,7 @@ mod tests {
             "no check while downloading"
         );
         click(&mut settings, "update-channel/segment0");
+        drop(held);
         sync(&mut editor, &mut settings);
         assert_eq!(editor.settings.update_channel, ReleaseChannel::Nightly);
         assert_eq!(fake.take(), ["download 9.1.0-nightly.20261104.1"]);
