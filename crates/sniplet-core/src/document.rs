@@ -232,7 +232,6 @@ impl Document {
             check_image_size(document.canvas_size.width, document.canvas_size.height)?;
         }
         document.annotations = project.annotations;
-        let mut ids = HashSet::new();
         for annotation in &mut document.annotations {
             annotation
                 .kind
@@ -240,11 +239,15 @@ impl Document {
             if !annotation.is_finite() {
                 return Err(SnipletError::NonFiniteValue);
             }
-            // A hand-edited file can repeat an id. A new id keeps each annotation editable.
-            if !ids.insert(annotation.id) {
-                annotation.id = AnnotationId(next_id);
-                next_id = next_id.saturating_add(1);
+        }
+        // A hand-edited file can repeat an id, or use ids that leave none for new
+        // annotations. Renumber it, so each annotation stays editable on its own.
+        let mut ids = HashSet::new();
+        if !document.annotations.iter().all(|a| ids.insert(a.id)) || next_id == u64::MAX {
+            for (index, annotation) in document.annotations.iter_mut().enumerate() {
+                annotation.id = AnnotationId(index as u64 + 1);
             }
+            next_id = document.annotations.len() as u64 + 1;
         }
         if !project.backdrop.is_finite() {
             return Err(SnipletError::NonFiniteValue);

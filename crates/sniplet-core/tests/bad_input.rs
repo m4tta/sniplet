@@ -198,14 +198,21 @@ fn image_size_comes_from_the_header_before_any_pixels_are_decoded() {
 #[test]
 fn repeated_annotation_ids_get_new_ids_on_open() {
     let mut document = document();
-    document.add_annotation(rectangle(), AnnotationStyle::default());
-    document.add_annotation(rectangle(), AnnotationStyle::default());
+    for _ in 0..3 {
+        document.add_annotation(rectangle(), AnnotationStyle::default());
+    }
 
-    let mut opened = reopen(&document, |json| json["annotations"][1]["id"] = json!(1)).unwrap();
+    let mut opened = reopen(&document, |json| {
+        json["annotations"][1]["id"] = json!(1);
+        json["annotations"][2]["id"] = json!(u64::MAX);
+    })
+    .unwrap();
     let ids: Vec<_> = opened.annotations().iter().map(|a| a.id).collect();
-    assert_eq!(ids, [AnnotationId(1), AnnotationId(2)]);
+    assert_eq!(ids, [AnnotationId(1), AnnotationId(2), AnnotationId(3)]);
     opened.delete_annotation(AnnotationId(1)).unwrap();
-    assert_eq!(opened.annotations().len(), 1);
+    assert_eq!(opened.annotations().len(), 2);
+    let added = opened.add_annotation(rectangle(), AnnotationStyle::default());
+    assert_eq!(added, AnnotationId(4));
 }
 
 #[test]
