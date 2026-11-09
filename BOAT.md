@@ -157,10 +157,18 @@ Every new thread VM starts from the saved snapshot `sniplet-base`. It contains:
 If a thread's `Cargo.lock` is different from the base's, its first `sync` compiles the
 changed dependencies. That takes minutes instead of seconds.
 
-A T3 scheduled task on the user's PC rebuilds the snapshot from `origin/main` every Monday.
-Run `python scripts/boat.py base` yourself when `Cargo.lock` or the CI Linux packages change on
-`main`, or when the user asks. It takes 5 to 10 minutes. To test a change to the base
-before it is on `main`, build from that commit: `python scripts/boat.py base --ref HEAD`. It creates a temporary
+The **Boat base** GitHub workflow (`.github/workflows/boat-base.yml`) rebuilds the snapshot
+from `main` when a push to `main` changes `Cargo.lock`, `scripts/boat.py`, or the CI
+workflow. To rebuild it at another time, run `gh workflow run boat-base.yml`. A rebuild
+takes 5 to 10 minutes. The workflow uses the repository secret `BOAT_API_KEY`, which holds
+the same key as `BOAT_API_KEY` in The Vault. If that key changes, copy it to the secret
+again: pipe `infisical secrets get BOAT_API_KEY ... --plain --silent` into
+`gh secret set BOAT_API_KEY`.
+
+To test a change to the base before it is on `main`, build from your commit on this
+machine: `python scripts/boat.py base --ref HEAD`. That replaces the shared snapshot, so
+after the test, rebuild it from `main` with `gh workflow run boat-base.yml`, and check
+that the run passes. Either way, `base` creates a temporary
 `sniplet-base-build` VM, replaces the snapshot, and deletes the temporary VM. If a step
 fails, it keeps the temporary VM for debugging, and that VM stops by itself after
 2 hours. Existing thread VMs keep their own disks. Only one agent at a time may run

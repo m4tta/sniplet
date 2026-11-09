@@ -1,0 +1,46 @@
+name: Boat base
+
+# Rebuilds the sniplet-base snapshot on boat.dev that agent threads start their VMs from
+# (BOAT.md). It runs when main changes something the snapshot holds, or by hand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - scripts/boat.py
+      - .github/workflows/ci.yml
+      - .github/workflows/boat-base.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One rebuild at a time. A newer push waits for the running rebuild.
+concurrency:
+  group: boat-base
+  cancel-in-progress: false
+
+jobs:
+  base:
+    name: Rebuild sniplet-base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # The rebuild runs a downloaded CLI and fetches the public repo without credentials.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the boat CLI
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://boat.dev/api/boat/cli/download?platform=linux-x64&channel=prod" \
+            -o "$HOME/.local/bin/boat"
+          chmod +x "$HOME/.local/bin/boat"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Rebuild the snapshot from origin/main
+        env:
+          BOAT_API_KEY: ${{ secrets.BOAT_API_KEY }}
+          BOAT_NO_UPDATE: "1"
+        run: python3 scripts/boat.py base
