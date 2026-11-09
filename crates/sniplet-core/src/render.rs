@@ -3,7 +3,7 @@ use image::{Pixel, Rgba, RgbaImage};
 use imageproc::{
     drawing::{
         draw_filled_circle_mut, draw_filled_ellipse_mut, draw_filled_rect_mut,
-        draw_hollow_ellipse_mut, draw_hollow_rect_mut, draw_text_mut, text_size,
+        draw_hollow_ellipse_mut, draw_text_mut, text_size,
     },
     rect::Rect,
 };
@@ -908,6 +908,10 @@ fn draw_thick_line(image: &mut RgbaImage, start: Point, end: Point, width: f32, 
     }
 }
 
+/// Arrow points and widths past this many pixels are skipped. f32 has no sub-pixel
+/// precision there, and tiny-skia's fixed-point edges overflow a few times further out.
+const MAX_ARROW_EXTENT: f32 = 4_194_304.0;
+
 fn draw_arrow(
     image: &mut RgbaImage,
     points: [Point; 3],
@@ -917,6 +921,27 @@ fn draw_arrow(
     mode: CompositeMode,
 ) {
     let [start, middle, end] = points;
+    // Also false for NaN and infinity.
+    let in_range = |value: f32| value.abs() <= MAX_ARROW_EXTENT;
+    if image.width() == 0
+        || image.height() == 0
+        || color[3] == 0
+        || !in_range(width)
+        || !points
+            .iter()
+            .all(|point| in_range(point.x) && in_range(point.y))
+    {
+        return;
+    }
+    if start == end && start == middle {
+        // A zero-length arrow has no direction, so every variant draws a dot as wide as its shaft.
+        let width = arrow_geometry(start, middle, end, width, variant).stroke_width;
+        match mode {
+            CompositeMode::Replace => draw_thick_line(image, start, start, width, color),
+            CompositeMode::Over => draw_thick_line_over(image, start, start, width, color),
+        }
+        return;
+    }
     match variant {
         ArrowVariant::Solid => draw_solid_arrow(image, start, middle, end, width, color, mode),
         ArrowVariant::HandDrawn | ArrowVariant::Thin | ArrowVariant::DoubleEnded => {
@@ -940,20 +965,6 @@ fn draw_solid_arrow(
     color: Rgba<u8>,
     mode: CompositeMode,
 ) {
-    if image.width() == 0
-        || image.height() == 0
-        || !start.x.is_finite()
-        || !start.y.is_finite()
-        || !middle.x.is_finite()
-        || !middle.y.is_finite()
-        || !end.x.is_finite()
-        || !end.y.is_finite()
-        || !width.is_finite()
-        || color[3] == 0
-    {
-        return;
-    }
-
     let geometry = arrow_geometry(start, middle, end, width, ArrowVariant::Solid);
     let width = geometry.stroke_width;
     let control = geometry.control;
@@ -1058,30 +1069,7 @@ fn draw_open_arrow(
     mode: CompositeMode,
 ) {
     let [start, middle, end] = points;
-    if image.width() == 0
-        || image.height() == 0
-        || !start.x.is_finite()
-        || !start.y.is_finite()
-        || !middle.x.is_finite()
-        || !middle.y.is_finite()
-        || !end.x.is_finite()
-        || !end.y.is_finite()
-        || !size.is_finite()
-        || color[3] == 0
-    {
-        return;
-    }
-
     let geometry = arrow_geometry(start, middle, end, size, variant);
-    if start == end && start == geometry.control {
-        if matches!(mode, CompositeMode::Replace) {
-            draw_thick_line(image, start, start, geometry.stroke_width, color);
-        } else {
-            draw_thick_line_over(image, start, start, geometry.stroke_width, color);
-        }
-        return;
-    }
-
     let mut bounds = quadratic_bounds(start, geometry.control, end);
     for head in geometry.heads() {
         let ArrowHeadGeometry::Open(arms) = head else {
@@ -1238,19 +1226,37 @@ fn draw_rect_fill(image: &mut RgbaImage, rect: ImageRect, color: Rgba<u8>) {
     }
 }
 
+/// Strokes `width` pixels inward from the rectangle's pixel edges. A stroke as
+/// wide as half the rectangle fills it, and no stroke reaches outside it.
 fn draw_rect_outline(image: &mut RgbaImage, rect: ImageRect, width: f32, color: Rgba<u8>) {
     let rect = rect.normalized();
-    for inset in 0..width.ceil() as u32 {
-        let inset = inset as f32;
-        let inner = ImageRect::new(
-            rect.x + inset,
-            rect.y + inset,
-            (rect.width - inset * 2.0).max(0.0),
-            (rect.height - inset * 2.0).max(0.0),
+    let left = rect.x.floor();
+    let top = rect.y.floor();
+    let outer_width = (rect.x + rect.width).ceil() - left;
+    let outer_height = (rect.y + rect.height).ceil() - top;
+    let stroke = width.ceil();
+    // Written so NaN takes this branch too, where `pixel_bounds` then draws nothing.
+    if !(outer_width > stroke * 2.0 && outer_height > stroke * 2.0) {
+        draw_rect_fill(
+            image,
+            ImageRect::new(left, top, outer_width, outer_height),
+            color,
         );
-        if let Some(rect) = draw_rect(inner, image.width(), image.height()) {
-            draw_hollow_rect_mut(image, rect, color);
-        }
+        return;
+    }
+    let side_height = outer_height - stroke * 2.0;
+    for band in [
+        ImageRect::new(left, top, outer_width, stroke),
+        ImageRect::new(left, top + outer_height - stroke, outer_width, stroke),
+        ImageRect::new(left, top + stroke, stroke, side_height),
+        ImageRect::new(
+            left + outer_width - stroke,
+            top + stroke,
+            stroke,
+            side_height,
+        ),
+    ] {
+        draw_rect_fill(image, band, color);
     }
 }
 
@@ -1266,7 +1272,19 @@ fn draw_ellipse(
     stroke: Rgba<u8>,
     fill: Option<Color>,
 ) {
+    // imageproc squares radii as i32, so it overflows past this radius.
+    const MAX_RADIUS: f32 = 46_340.0;
     let rect = rect.normalized();
+    // Off the canvas (or NaN) the ellipse has nothing to draw. The 2px margin covers
+    // imageproc's 2r + 1 pixel diameter and the rounded center.
+    if rect
+        .expanded(2.0)
+        .pixel_bounds(image.width(), image.height())
+        .is_none()
+        || !(rect.width * 0.5 <= MAX_RADIUS && rect.height * 0.5 <= MAX_RADIUS)
+    {
+        return;
+    }
     let center = (
         (rect.x + rect.width * 0.5).round() as i32,
         (rect.y + rect.height * 0.5).round() as i32,
@@ -1276,10 +1294,8 @@ fn draw_ellipse(
     if let Some(fill) = fill {
         draw_filled_ellipse_mut(image, center, rx, ry, fill.into());
     }
-    for inset in 0..width.ceil() as i32 {
-        if rx - inset > 0 && ry - inset > 0 {
-            draw_hollow_ellipse_mut(image, center, rx - inset, ry - inset, stroke);
-        }
+    for inset in 0..(width.ceil() as i32).min(rx.min(ry)) {
+        draw_hollow_ellipse_mut(image, center, rx - inset, ry - inset, stroke);
     }
 }
 
