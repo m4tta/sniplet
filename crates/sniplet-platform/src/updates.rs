@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 const REPOSITORY: &str = "m4tta/sniplet";
 const PUBLIC_KEY: &str = include_str!("../../../assets/update-public-key.hex");
 const MAX_PACKAGE_SIZE: u64 = 512 * 1024 * 1024;
+/// The manifest format this app can install. A newer release with another schema
+/// installs a different way, so the app asks the user to download it by hand.
+const SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,6 +109,8 @@ pub struct UpdateRelease {
     pub sha: String,
     pub tag: String,
     pub size: u64,
+    /// The release cannot install over this copy. The user downloads it from the website.
+    pub reinstall: bool,
     asset_name: String,
     sha256: String,
 }
@@ -227,7 +232,6 @@ fn select_manifest(
     if version <= semver::Version::parse(&current.version)? {
         return Ok(None);
     }
-    ensure!(manifest.schema == 3, "Unsupported update manifest");
     ensure!(
         version_channel(&version) == Some(channel),
         "Invalid release version"
@@ -246,6 +250,17 @@ fn select_manifest(
             && tag == format!("v{}", manifest.version),
         "The update channel does not match its signature"
     );
+    if manifest.schema != SCHEMA {
+        return Ok(Some(UpdateRelease {
+            version: manifest.version,
+            sha: manifest.sha,
+            tag: manifest.tag,
+            size: 0,
+            reinstall: true,
+            asset_name: String::new(),
+            sha256: String::new(),
+        }));
+    }
     let asset = manifest
         .assets
         .iter()
@@ -277,6 +292,7 @@ fn select_manifest(
         sha: manifest.sha,
         tag: manifest.tag,
         size: asset.size,
+        reinstall: false,
         asset_name: asset.name.clone(),
         sha256: asset.sha256.clone(),
     }))
@@ -355,6 +371,7 @@ fn verify_package(path: &Path, release: &UpdateRelease) -> Result<()> {
 
 /// Download and verify only. The installed app is unchanged until `install`.
 pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
+    ensure!(!release.reinstall, "Download this version from the website");
     let directory = tempfile::Builder::new()
         .prefix("sniplet-update-")
         .tempdir()?;
@@ -552,6 +569,16 @@ mod tests {
         };
         let selected = select_manifest(old, "v0.2.0", Stable, &current, "windows-x64", ".zip");
         assert!(selected.unwrap().is_none());
+        // A newer release in a newer format asks for a new install, and never downloads.
+        let mut newer: Manifest = serde_json::from_slice(&payload("0.3.0")).unwrap();
+        newer.schema = SCHEMA + 1;
+        newer.assets.clear();
+        let selected = select_manifest(newer, "v0.3.0", Stable, &current, "windows-x64", ".zip")
+            .unwrap()
+            .unwrap();
+        assert!(selected.reinstall);
+        assert_eq!(selected.version, "0.3.0");
+        assert!(download(&selected).is_err());
     }
 
     #[test]
@@ -583,6 +610,7 @@ mod tests {
             sha: String::new(),
             tag: String::new(),
             size: 4,
+            reinstall: false,
             asset_name: String::new(),
             sha256: hex::encode(Sha256::digest(b"good")),
         };
@@ -618,6 +646,7 @@ mod tests {
                 sha: String::new(),
                 tag: String::new(),
                 size: bytes.len() as u64,
+                reinstall: false,
                 asset_name: "fixture.zip".into(),
                 sha256: hex::encode(Sha256::digest(&bytes)),
             };
@@ -703,6 +732,7 @@ mod tests {
                 sha: String::new(),
                 tag: String::new(),
                 size: bytes.len() as u64,
+                reinstall: false,
                 asset_name: "fixture.zip".into(),
                 sha256: hex::encode(Sha256::digest(&bytes)),
             };
