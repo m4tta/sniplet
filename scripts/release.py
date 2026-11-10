@@ -288,8 +288,11 @@ def package(target, build):
     shutil.rmtree(output, ignore_errors=True)
     downloads = {}
     if target == 'windows-x64':
+        # Release builds sign with Azure Artifact Signing (docs/releases.md).
+        signing = os.environ.get('SNIPLET_AZURE_SIGNING')
         made = vpk_pack(target, build, bundle, 'Sniplet.exe', output,
-                        '--icon', str(ROOT / 'assets/icons/sniplet.ico'))
+                        '--icon', str(ROOT / 'assets/icons/sniplet.ico'),
+                        *(['--azureTrustedSignFile', str(ROOT / signing)] if signing else []))
         downloads = {ending: made(ending) for ending in DOWNLOADS[target]}
     elif mac:
         # vpk adds its updater to the bundle and signs it again, with hardened runtime.

@@ -116,6 +116,7 @@ releases. Install a new build by hand once.
 | --- | --- |
 | `UPDATER_SIGNING_KEY` | Ed25519 private key (PEM) that signs `release.json`. Only the publish job gets it. |
 | `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD` | Optional. A self-signed "Sniplet Self-Signed" code signing certificate (base64 `.p12`). |
+| `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | IDs for Windows signing through Azure Artifact Signing. They are not secret values. Infisical "The Vault" (`dev`) has copies as `SNIPLET_RELEASE_AZURE_*`. |
 
 ### Update key
 
@@ -147,6 +148,34 @@ The command limits file access to the current user (and SYSTEM on Windows). It
 refuses to overwrite a file or to put the backup in this repository. Keep an
 offline copy too.
 
+### Windows signing
+
+The Windows build job signs `Sniplet.exe` right after `cargo build`, before
+packaging. So the zip, `SHA256SUMS`, and `release.json` all hold the signed
+file. The signature uses SHA-256 and a timestamp from
+`http://timestamp.acs.microsoft.com`, and shows "Matthew Anderson" as publisher.
+
+| Item | Value |
+| --- | --- |
+| Artifact Signing account | `m4tta` (resource group `code-signing`, East US, `https://eus.codesigning.azure.net/`) |
+| Certificate profile | `PublicTrust`, subject `CN=Matthew Anderson, O=Matthew Anderson, L=Chino, S=ca, C=US` |
+| CI identity | Entra app `sniplet-release-signing` (app ID `1dba9d40-44dc-4c4a-835d-8fbb1a64461b`). Only for this repository. |
+| Role | **Artifact Signing Certificate Profile Signer**, scoped to the `PublicTrust` profile only |
+| Sign-in | GitHub OIDC through `azure/login`. There is no client secret. |
+| OIDC subject | `repo:m4tta@427218/sniplet@1404794552:ref:refs/heads/main` |
+
+GitHub sends the subject with the owner and repository IDs. A release that
+runs from a branch other than `main` cannot sign. If `azure/login` fails with
+`AADSTS700213`, the error shows the subject GitHub sent. Add a federated
+credential for that exact subject.
+
+To stop signing for this repository only, delete the `sniplet-release-signing`
+app. Other apps that use the same account are not affected.
+
+**Renew the identity validation before 2027-11-10.** After it expires, the
+account cannot sign. Renew it in the Azure portal: **Artifact Signing account
+`m4tta` → Identity validations**.
+
 ### Mac signing identity
 
 Without the Mac secrets, packages use ad hoc signing. Each update then has a new
@@ -171,12 +200,14 @@ If the identity changes, macOS asks for the permission again one time.
 
 ## Platform limits
 
-Releases are not signed by Apple or Microsoft.
+Mac releases are not signed by Apple. Windows releases have an Authenticode
+signature from Azure Artifact Signing.
 
 - macOS: packages are not notarized. Gatekeeper blocks the first launch. Open
   **System Settings → Privacy & Security**, then select **Open Anyway**.
-- Windows: the installer and app have no Authenticode signature. SmartScreen can
-  warn on first launch.
+- Windows: SmartScreen shows "Matthew Anderson" as publisher for the installer
+  and the app. It can still warn on first launch until downloads build
+  reputation for the certificate.
 - Linux: packages are built on Ubuntu 24.04 and need compatible system
   libraries, including the graphics and capture libraries listed in the README.
   They are not distribution packages.
