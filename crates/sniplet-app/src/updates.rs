@@ -31,6 +31,8 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 pub(crate) struct Release {
     version: String,
     size: u64,
+    /// The release installs a different way, so the user gets it from the website.
+    reinstall: bool,
     /// Absent for test doubles, which cannot build a signed platform release.
     package: Option<UpdateRelease>,
 }
@@ -46,6 +48,7 @@ impl From<UpdateRelease> for Release {
         Self {
             version: package.version.clone(),
             size: package.size,
+            reinstall: package.reinstall,
             package: Some(package),
         }
     }
@@ -276,7 +279,9 @@ impl Editor {
             Ok(None) => Phase::UpToDate,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
-        if automatic && matches!(self.updates.phase, Phase::Available(_)) {
+        if automatic
+            && matches!(&self.updates.phase, Phase::Available(release) if !release.reinstall)
+        {
             self.download_update();
         }
     }
@@ -285,7 +290,11 @@ impl Editor {
         let release = match &self.updates.phase {
             Phase::Available(release)
             | Phase::DownloadFailed(release, _)
-            | Phase::InstallFailed(release, _) => release.clone(),
+            | Phase::InstallFailed(release, _)
+                if !release.reinstall =>
+            {
+                release.clone()
+            }
             _ => return,
         };
         self.updates.phase = Phase::Downloading(release.clone());
@@ -417,6 +426,12 @@ impl Editor {
         }
         let phase = &self.updates.phase;
         let (title, description, glyph, failed) = match phase {
+            Phase::Available(release) if release.reinstall => (
+                format!("Sniplet {} needs a new install", release.version),
+                "This version installs a new way. Download it from the website and install it over this copy. Your settings stay.".to_owned(),
+                &icons::DOWNLOAD,
+                false,
+            ),
             Phase::Ready(release) => (
                 format!("Sniplet {} is ready", release.version),
                 "Sniplet restarts. Your screenshot and edits come back.".to_owned(),
@@ -438,6 +453,7 @@ impl Editor {
             _ => return None,
         };
         let installing = matches!(phase, Phase::Installing(_));
+        let reinstall = matches!(phase, Phase::Available(release) if release.reinstall);
         let card = Card::new()
             .accent(if failed {
                 k.c.danger.icon
@@ -454,7 +470,16 @@ impl Editor {
                     .build(k)
                     .key("update-later"),
             )
-            .action(
+            .action(if reinstall {
+                Button::new("Open website")
+                    .variant(ButtonVariant::Contrast)
+                    .on_press_tx(|s: &mut Editor, tx: &mut Tx| {
+                        s.updates.notice_dismissed = true;
+                        let _ = tx.open_url(RELEASES_URL);
+                    })
+                    .build(k)
+                    .key("update-website")
+            } else {
                 Button::new(if failed {
                     "Try again"
                 } else {
@@ -464,8 +489,8 @@ impl Editor {
                 .disabled(installing)
                 .on_press(|s: &mut Editor| s.restart_to_update())
                 .build(k)
-                .key("update-restart"),
-            )
+                .key("update-restart")
+            })
             .build(k);
         Some(
             ui::surface::<Editor>(k, el().w(440.0).padding(4.0))
@@ -481,6 +506,9 @@ impl Editor {
             return None;
         }
         match &self.updates.phase {
+            Phase::Available(release) if release.reinstall => {
+                Some(format!("Get Sniplet {} from the website", release.version))
+            }
             Phase::Ready(release)
             | Phase::InstallFailed(release, _)
             | Phase::RestartFailed(release, _) => {
@@ -582,6 +610,12 @@ pub(crate) fn settings_section<S: 'static>(
             &icons::CIRCLE_CHECK,
             false,
         ),
+        Phase::Available(release) if release.reinstall => (
+            format!("Sniplet {} needs a new install", release.version),
+            format!("You have {version}. Get the new version from the website."),
+            &icons::DOWNLOAD,
+            false,
+        ),
         Phase::Available(release) => (
             format!("Sniplet {} is available", release.version),
             format!("{current} Size: {}.{last_check}", size_label(release.size)),
@@ -662,6 +696,15 @@ pub(crate) fn settings_section<S: 'static>(
         );
     }
     controls = match phase {
+        Phase::Available(release) if release.reinstall => controls.child(
+            button("Open website", true)
+                .icon(&icons::GLOBE)
+                .on_press_tx(|_: &mut S, tx: &mut Tx| {
+                    let _ = tx.open_url(RELEASES_URL);
+                })
+                .build(k)
+                .key("update-website"),
+        ),
         Phase::Available(_) | Phase::Downloading(_) => controls.child(
             button("Download", true)
                 .icon(&icons::DOWNLOAD)
@@ -874,12 +917,21 @@ pub(crate) const SCENES: &[Scene] = &[
     ("update-installing", |s| {
         s.updates.phase = Phase::Installing(scene_release())
     }),
+    ("update-reinstall", |s| {
+        s.updates.phase = Phase::Available(Arc::new(Release {
+            version: "9.0.0".into(),
+            size: 0,
+            reinstall: true,
+            package: None,
+        }))
+    }),
 ];
 
 fn scene_release() -> Arc<Release> {
     Arc::new(Release {
         version: "9.0.0".into(),
         size: 6_400_000,
+        reinstall: false,
         package: None,
     })
 }
@@ -899,6 +951,8 @@ mod tests {
         /// editor while a check or download runs.
         gate: Mutex<()>,
         fail_check: AtomicBool,
+        /// Checks find a release that needs a new install.
+        reinstall: AtomicBool,
         fail_install: AtomicBool,
         fail_restart: AtomicBool,
     }
@@ -945,6 +999,7 @@ mod tests {
                     ReleaseChannel::Nightly => "9.1.0-nightly.20261104.1".into(),
                 },
                 size: 6_400_000,
+                reinstall: self.0.reinstall.load(Ordering::SeqCst),
                 package: None,
             }))
         }
@@ -1188,5 +1243,26 @@ mod tests {
         assert!(!recovery_path(&store).exists());
         assert!(!recovery_path(&store).with_extension("png").exists());
         assert!(restore(&store).is_err());
+    }
+
+    #[test]
+    fn a_release_that_needs_a_new_install_links_to_the_website_and_never_downloads() {
+        let (mut editor, fake, _directory) = fixture();
+        fake.reinstall.store(true, Ordering::SeqCst);
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        editor.download_update();
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["check Stable"], "it must never download");
+        let mut rt = rune::Runtime::new(editor, crate::editor::view, (1280.0, 850.0), env());
+        rt.frame(0.0);
+        assert!(rt.find("update-restart").is_none());
+        click(&mut rt, "update-website");
+        assert_eq!(rt.take_url_requests(), [RELEASES_URL]);
+        assert!(rt.find("update-notice").is_none());
+        assert_eq!(
+            rt.state.waiting_update_label().as_deref(),
+            Some("Get Sniplet 9.0.0 from the website")
+        );
     }
 }
