@@ -53,7 +53,7 @@ Each release has these files (a nightly uses its full version in the names):
 | `Sniplet-0.2.1-linux-x64.AppImage` | Linux app in one executable file |
 | `Sniplet-0.2.1-linux-x64.tar.gz` | Linux executable, desktop entry, icons, and support files. It does not update itself. |
 | `Sniplet-0.2.1-<target>-full.nupkg` | One Velopack package for each target, for in-app updates |
-| `SHA256SUMS` | SHA-256 checksums for all fourteen packages |
+| `SHA256SUMS` | SHA-256 checksums for all ten packages |
 | `release.json` | Version, channel, source commit, package sizes, and checksums |
 | `release.json.sig` | Ed25519 signature over the exact `release.json` bytes |
 
