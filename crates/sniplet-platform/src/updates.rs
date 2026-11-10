@@ -324,7 +324,11 @@ pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
         "https://github.com/{REPOSITORY}/releases/download/{}/",
         release.tag
     ));
-    let manager = UpdateManager::new(source, None, None)?;
+    #[cfg(target_os = "linux")]
+    let locator = Some(updater_outside_appimage()?);
+    #[cfg(not(target_os = "linux"))]
+    let locator = None;
+    let manager = UpdateManager::new(source, None, locator)?;
     let asset = VelopackAsset {
         PackageId: PACK_ID.into(),
         Version: release.version.clone(),
@@ -351,6 +355,31 @@ pub fn install(downloaded: DownloadedUpdate, restart_args: &[&str]) -> Result<()
         .manager
         .wait_exit_then_apply_updates(&downloaded.asset, false, true, restart_args)
         .context("Could not start the updater")
+}
+
+/// The AppImage unmounts as soon as the app exits, so an updater that runs from inside it
+/// dies partway through. Run a copy from a temporary folder instead. The copy finds its
+/// manifest beside it, in a folder that ends in `usr/bin` like the AppImage's own.
+#[cfg(target_os = "linux")]
+fn updater_outside_appimage() -> Result<velopack::locator::VelopackLocatorConfig> {
+    use velopack::locator::{LocationContext, VelopackLocatorConfig, auto_locate_app_manifest};
+    let locator = auto_locate_app_manifest(LocationContext::FromCurrentExe)?;
+    let bin = std::env::temp_dir()
+        .join(format!("sniplet-updater-{}", std::process::id()))
+        .join("usr/bin");
+    std::fs::create_dir_all(&bin)?;
+    let updater = bin.join("UpdateNix");
+    let manifest = bin.join("sq.version");
+    std::fs::copy(locator.get_update_path(), &updater)?;
+    std::fs::copy(locator.get_current_bin_dir().join("sq.version"), &manifest)?;
+    Ok(VelopackLocatorConfig {
+        RootAppDir: locator.get_appimage_path(),
+        UpdateExePath: updater,
+        PackagesDir: locator.get_packages_dir(),
+        ManifestPath: manifest,
+        CurrentBinaryDir: locator.get_current_bin_dir(),
+        IsPortable: true,
+    })
 }
 
 #[cfg(test)]
