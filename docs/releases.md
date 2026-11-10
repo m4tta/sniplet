@@ -32,8 +32,9 @@ stable run that waits.
 
 A pull request that changes packaging (the paths at the top of
 `.github/workflows/release.yml`) runs the four build jobs with a throwaway
-version such as `0.0.0-nightly.20261110.42`. It pushes no tag and publishes
-nothing. Its packages stay on the run as artifacts for 7 days.
+version such as `0.0.1-nightly.20261110.42` (vpk needs 0.0.1 or higher). It
+pushes no tag and publishes nothing. Its packages stay on the run as artifacts
+for 7 days.
 
 If one build fails, use **Re-run failed jobs**. It keeps the same version. Do
 not use **Re-run all jobs** on a nightly: the nightly tag already exists, so the

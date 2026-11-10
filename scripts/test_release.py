@@ -133,7 +133,7 @@ class ReleaseTests(unittest.TestCase):
         sha = self.commit()
         planned = self.plan(checkout, 1793793600, GITHUB_EVENT_NAME='pull_request',
                             GITHUB_REF='refs/pull/30/merge')
-        self.assertEqual(planned, {'channel': 'nightly', 'version': '0.0.0-nightly.20261104.17',
+        self.assertEqual(planned, {'channel': 'nightly', 'version': '0.0.1-nightly.20261104.17',
                                    'sha': sha, 'skip': False})
         self.assertEqual(release.git('tag', '-l', root=self.origin), '')
 

@@ -147,7 +147,7 @@ def plan(env=os.environ, root=ROOT, now=None):
     A pull request gets a throwaway nightly version, no tag, and no release."""
     if env.get('GITHUB_EVENT_NAME') == 'pull_request':
         date = datetime.fromtimestamp(now or time.time(), timezone.utc).strftime('%Y%m%d')
-        build = Build(f'0.0.0-nightly.{date}.{env["GITHUB_RUN_NUMBER"]}', git('rev-parse', 'HEAD', root=root))
+        build = Build(f'0.0.1-nightly.{date}.{env["GITHUB_RUN_NUMBER"]}', git('rev-parse', 'HEAD', root=root))
         return output(channel=build.channel, version=build.version, sha=build.sha, skip=False)
     require(env.get('GITHUB_REF') == 'refs/heads/main', 'Run releases from main')
     channel = env.get('CHANNEL') or 'nightly'
