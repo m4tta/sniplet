@@ -357,6 +357,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue((mount / '.VolumeIcon.icns').is_file())
             from ds_store import DSStore
             with DSStore.open(str(mount / '.DS_Store'), 'r') as view:
+                self.assertEqual(view['.']['bwsp']['WindowBounds'], '{{200, 200}, {540, 340}}')
                 self.assertFalse(view['.']['bwsp']['ShowToolbar'])
                 self.assertFalse(view['.']['bwsp']['ShowSidebar'])
                 self.assertEqual(view['.']['icvp']['iconSize'], 128)
