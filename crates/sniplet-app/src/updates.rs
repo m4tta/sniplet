@@ -33,6 +33,8 @@ pub(crate) struct Release {
     size: u64,
     /// The release installs a different way, so the user gets it from the website.
     reinstall: bool,
+    /// This copy cannot update itself, so the user gets the release from the website.
+    manual: bool,
     /// Absent for test doubles, which cannot build a signed platform release.
     package: Option<UpdateRelease>,
 }
@@ -43,12 +45,20 @@ impl PartialEq for Release {
     }
 }
 
+impl Release {
+    /// The app can download and install this release itself.
+    fn in_app(&self) -> bool {
+        !self.reinstall && !self.manual
+    }
+}
+
 impl From<UpdateRelease> for Release {
     fn from(package: UpdateRelease) -> Self {
         Self {
             version: package.version.clone(),
             size: package.size,
             reinstall: package.reinstall,
+            manual: false,
             package: Some(package),
         }
     }
@@ -62,23 +72,23 @@ pub(crate) trait Backend: Send + Sync {
         current: &BuildIdentity,
     ) -> anyhow::Result<Option<Release>>;
     fn download(&self, release: &Release) -> anyhow::Result<Box<dyn Staged>>;
-    fn relaunch(&self, restore: bool) -> anyhow::Result<()>;
 }
 
-/// A downloaded update. Dropping it removes the staged files.
+/// A downloaded update.
 pub(crate) trait Staged: Send {
-    fn install(self: Box<Self>) -> anyhow::Result<()>;
+    /// Start the updater, which installs after the app quits and then opens the new version.
+    /// `restore` opens the recovery snapshot there.
+    fn install(self: Box<Self>, restore: bool) -> anyhow::Result<()>;
 }
 
 impl Staged for DownloadedUpdate {
-    fn install(self: Box<Self>) -> anyhow::Result<()> {
-        platform::install(*self)
+    fn install(self: Box<Self>, restore: bool) -> anyhow::Result<()> {
+        let args: &[&str] = if restore { &[RESTORE_ARG] } else { &[] };
+        platform::install(*self, args)
     }
 }
 
-struct Platform {
-    executable: Option<PathBuf>,
-}
+struct Platform;
 
 impl Backend for Platform {
     fn check(
@@ -86,7 +96,11 @@ impl Backend for Platform {
         channel: ReleaseChannel,
         current: &BuildIdentity,
     ) -> anyhow::Result<Option<Release>> {
-        Ok(platform::check(channel, current)?.map(Release::from))
+        let manual = !platform::can_update();
+        Ok(platform::check(channel, current)?.map(|package| Release {
+            manual,
+            ..Release::from(package)
+        }))
     }
 
     fn download(&self, release: &Release) -> anyhow::Result<Box<dyn Staged>> {
@@ -95,33 +109,6 @@ impl Backend for Platform {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("This release cannot be downloaded"))?;
         Ok(Box::new(platform::download(package)?))
-    }
-
-    fn relaunch(&self, restore: bool) -> anyhow::Result<()> {
-        // The installer may move the running file aside, so prefer the path from startup.
-        let executable = match &self.executable {
-            Some(path) => path.clone(),
-            None => std::env::current_exe()?,
-        };
-        let mut args = vec![format!("--update-parent={}", std::process::id())];
-        if restore {
-            args.push(RESTORE_ARG.to_owned());
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(bundle) = executable
-            .ancestors()
-            .find(|path| path.extension().is_some_and(|extension| extension == "app"))
-        {
-            std::process::Command::new("/usr/bin/open")
-                .arg("-n")
-                .arg(bundle)
-                .arg("--args")
-                .args(&args)
-                .spawn()?;
-            return Ok(());
-        }
-        std::process::Command::new(executable).args(&args).spawn()?;
-        Ok(())
     }
 }
 
@@ -138,8 +125,6 @@ pub(crate) enum Phase {
     CheckFailed(String),
     DownloadFailed(Arc<Release>, String),
     InstallFailed(Arc<Release>, String),
-    /// The new version is on disk, but the new process did not start.
-    RestartFailed(Arc<Release>, String),
 }
 
 impl Phase {
@@ -169,9 +154,7 @@ pub(crate) struct Updates {
 
 impl Updates {
     pub(crate) fn new() -> Self {
-        Self::with_backend(Arc::new(Platform {
-            executable: std::env::current_exe().ok(),
-        }))
+        Self::with_backend(Arc::new(Platform))
     }
 
     pub(crate) fn with_backend(backend: Arc<dyn Backend>) -> Self {
@@ -204,9 +187,8 @@ impl Updates {
 
 enum InstallError {
     /// Nothing changed on disk; the staged update can be installed again.
-    Prepare(anyhow::Error, Option<Box<dyn Staged>>),
+    Prepare(anyhow::Error, Box<dyn Staged>),
     Install(anyhow::Error),
-    Restart(anyhow::Error),
 }
 
 impl Editor {
@@ -279,8 +261,7 @@ impl Editor {
             Ok(None) => Phase::UpToDate,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
-        if automatic
-            && matches!(&self.updates.phase, Phase::Available(release) if !release.reinstall)
+        if automatic && matches!(&self.updates.phase, Phase::Available(release) if release.in_app())
         {
             self.download_update();
         }
@@ -291,7 +272,7 @@ impl Editor {
             Phase::Available(release)
             | Phase::DownloadFailed(release, _)
             | Phase::InstallFailed(release, _)
-                if !release.reinstall =>
+                if release.in_app() =>
             {
                 release.clone()
             }
@@ -321,24 +302,23 @@ impl Editor {
         );
     }
 
-    /// Save settings and the open screenshot, install, then start the new version.
+    /// Save settings and the open screenshot, start the updater, then quit. The updater
+    /// installs and starts the new version.
     pub(crate) fn restart_to_update(&mut self) {
-        let (release, installed) = match &self.updates.phase {
-            Phase::Ready(release) | Phase::InstallFailed(release, _) => (release.clone(), false),
-            Phase::RestartFailed(release, _) => (release.clone(), true),
+        let release = match &self.updates.phase {
+            Phase::Ready(release) | Phase::InstallFailed(release, _) => release.clone(),
             _ => return,
         };
-        let staged = self.updates.staged.take();
-        if !installed && staged.is_none() {
+        let Some(staged) = self.updates.staged.take() else {
             self.download_update();
             return;
-        }
+        };
         self.updates.phase = Phase::Installing(release.clone());
         self.install_when_saved(release, staged);
     }
 
     /// The single settings writer finishes first, so the final snapshot is the last write.
-    fn install_when_saved(&mut self, release: Arc<Release>, staged: Option<Box<dyn Staged>>) {
+    fn install_when_saved(&mut self, release: Arc<Release>, staged: Box<dyn Staged>) {
         if self.settings_save_running {
             self.inbox.spawn(
                 || std::thread::sleep(Duration::from_millis(10)),
@@ -349,7 +329,6 @@ impl Editor {
         let settings = self.settings.clone();
         let store = self.settings_store();
         let document = self.document.clone();
-        let backend = self.updates.backend.clone();
         let install = move || {
             let prepared = store.and_then(|store| {
                 store.save(&settings)?;
@@ -361,14 +340,9 @@ impl Editor {
                 Ok(recovery) => recovery,
                 Err(error) => return Err(InstallError::Prepare(error, staged)),
             };
-            if let Some(staged) = staged
-                && let Err(error) = staged.install()
-            {
-                return Err(InstallError::Install(error));
-            }
-            backend
-                .relaunch(recovery.is_some())
-                .map_err(InstallError::Restart)
+            staged
+                .install(recovery.is_some())
+                .map_err(InstallError::Install)
         };
         self.inbox.spawn(install, move |editor, result, tx| {
             editor.finish_install(release, result, tx)
@@ -388,18 +362,11 @@ impl Editor {
             }
             Err(InstallError::Prepare(error, staged)) => {
                 let message = format!("Sniplet could not save your work first: {error}");
-                self.updates.phase = if staged.is_some() {
-                    Phase::InstallFailed(release, message)
-                } else {
-                    Phase::RestartFailed(release, message)
-                };
-                self.updates.staged = staged;
+                self.updates.phase = Phase::InstallFailed(release, message);
+                self.updates.staged = Some(staged);
             }
             Err(InstallError::Install(error)) => {
                 self.updates.phase = Phase::InstallFailed(release, error.to_string());
-            }
-            Err(InstallError::Restart(error)) => {
-                self.updates.phase = Phase::RestartFailed(release, error.to_string());
             }
         }
         self.updates.notice_dismissed = false;
@@ -444,7 +411,7 @@ impl Editor {
                 &icons::DOWNLOAD,
                 false,
             ),
-            Phase::InstallFailed(_, error) | Phase::RestartFailed(_, error) => (
+            Phase::InstallFailed(_, error) => (
                 failure_title(phase).to_owned(),
                 error.clone(),
                 &icons::CIRCLE_ALERT,
@@ -509,9 +476,7 @@ impl Editor {
             Phase::Available(release) if release.reinstall => {
                 Some(format!("Get Sniplet {} from the website", release.version))
             }
-            Phase::Ready(release)
-            | Phase::InstallFailed(release, _)
-            | Phase::RestartFailed(release, _) => {
+            Phase::Ready(release) | Phase::InstallFailed(release, _) => {
                 Some(format!("Update to Sniplet {}", release.version))
             }
             _ => None,
@@ -616,6 +581,14 @@ pub(crate) fn settings_section<S: 'static>(
             &icons::DOWNLOAD,
             false,
         ),
+        Phase::Available(release) if release.manual => (
+            format!("Sniplet {} is available", release.version),
+            format!(
+                "You have {version}. This copy cannot update itself. Get the new version from the website."
+            ),
+            &icons::DOWNLOAD,
+            false,
+        ),
         Phase::Available(release) => (
             format!("Sniplet {} is available", release.version),
             format!("{current} Size: {}.{last_check}", size_label(release.size)),
@@ -661,12 +634,6 @@ pub(crate) fn settings_section<S: 'static>(
             &icons::CIRCLE_ALERT,
             true,
         ),
-        Phase::RestartFailed(_, error) => (
-            failure_title(phase).into(),
-            format!("Close Sniplet and open it again to use the new version. ({error})"),
-            &icons::CIRCLE_ALERT,
-            true,
-        ),
     };
     // A button that runs `run` on the editor.
     let send = |run: fn(&mut Editor)| {
@@ -696,7 +663,7 @@ pub(crate) fn settings_section<S: 'static>(
         );
     }
     controls = match phase {
-        Phase::Available(release) if release.reinstall => controls.child(
+        Phase::Available(release) if !release.in_app() => controls.child(
             button("Open website", true)
                 .icon(&icons::GLOBE)
                 .on_press_tx(|_: &mut S, tx: &mut Tx| {
@@ -742,12 +709,6 @@ pub(crate) fn settings_section<S: 'static>(
                     .build(k)
                     .key("update-install-retry"),
             ),
-        Phase::RestartFailed(..) => controls.child(
-            button("Restart", false)
-                .on_press_tx(send(install))
-                .build(k)
-                .key("update-install-retry"),
-        ),
         _ => controls,
     };
     let busy = phase.busy();
@@ -822,7 +783,6 @@ fn failure_title(phase: &Phase) -> &'static str {
     match phase {
         Phase::CheckFailed(_) => "Sniplet could not check for updates",
         Phase::DownloadFailed(..) => "Sniplet could not download the update",
-        Phase::RestartFailed(..) => "Sniplet is updated, but it could not restart",
         _ => "The update did not install",
     }
 }
@@ -922,6 +882,7 @@ pub(crate) const SCENES: &[Scene] = &[
             version: "9.0.0".into(),
             size: 0,
             reinstall: true,
+            manual: false,
             package: None,
         }))
     }),
@@ -932,6 +893,7 @@ fn scene_release() -> Arc<Release> {
         version: "9.0.0".into(),
         size: 6_400_000,
         reinstall: false,
+        manual: false,
         package: None,
     })
 }
@@ -953,15 +915,16 @@ mod tests {
         fail_check: AtomicBool,
         /// Checks find a release that needs a new install.
         reinstall: AtomicBool,
+        /// Checks run in a copy that cannot update itself.
+        manual: AtomicBool,
         fail_install: AtomicBool,
-        fail_restart: AtomicBool,
     }
 
     struct FakeStaged(Arc<Fake>, String);
 
     impl Staged for FakeStaged {
-        fn install(self: Box<Self>) -> anyhow::Result<()> {
-            self.0.record(format!("install {}", self.1));
+        fn install(self: Box<Self>, restore: bool) -> anyhow::Result<()> {
+            self.0.record(format!("install {} {restore}", self.1));
             if self.0.fail_install.load(Ordering::SeqCst) {
                 anyhow::bail!("disk is full");
             }
@@ -1000,6 +963,7 @@ mod tests {
                 },
                 size: 6_400_000,
                 reinstall: self.0.reinstall.load(Ordering::SeqCst),
+                manual: self.0.manual.load(Ordering::SeqCst),
                 package: None,
             }))
         }
@@ -1010,14 +974,6 @@ mod tests {
                 self.0.clone(),
                 release.version.clone(),
             )))
-        }
-
-        fn relaunch(&self, restore: bool) -> anyhow::Result<()> {
-            self.0.record(format!("relaunch {restore}"));
-            if self.0.fail_restart.load(Ordering::SeqCst) {
-                anyhow::bail!("Could not start the new process");
-            }
-            Ok(())
         }
     }
 
@@ -1184,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_install_keeps_the_document_and_a_retry_restarts_with_recovery() {
+    fn a_failed_install_keeps_the_document_and_a_retry_installs_with_recovery() {
         let (mut editor, fake, directory) = fixture();
         let store = SettingsStore::at(directory.path().join("settings.json"));
         let original = editor.export_pixels().unwrap();
@@ -1203,23 +1159,18 @@ mod tests {
 
         fake.fail_install.store(true, Ordering::SeqCst);
         restart(&mut rt);
-        assert_eq!(fake.take(), ["install 9.0.0"]);
+        assert_eq!(fake.take(), ["install 9.0.0 true"]);
         assert!(matches!(rt.state.updates.phase, Phase::InstallFailed(..)));
         assert_eq!(rt.state.export_pixels().unwrap(), original);
         assert!(!store.load().unwrap().check_for_updates);
         assert!(recovery_path(&store).exists());
+        assert_eq!(rt.shell_request, None);
 
+        // The failed install used up the staged package, so a retry downloads it again.
+        // Edits made after the failure must replace the earlier snapshot.
         fake.fail_install.store(false, Ordering::SeqCst);
         restart(&mut rt);
         assert_eq!(fake.take(), ["download 9.0.0"]);
-        fake.fail_restart.store(true, Ordering::SeqCst);
-        restart(&mut rt);
-        assert_eq!(fake.take(), ["install 9.0.0", "relaunch true"]);
-        assert!(recovery_path(&store).exists());
-        assert!(matches!(rt.state.updates.phase, Phase::RestartFailed(..)));
-        assert_eq!(rt.shell_request, None);
-
-        // Edits made after a failed restart must replace the earlier snapshot.
         rt.update(|editor, _| {
             editor
                 .document
@@ -1229,10 +1180,9 @@ mod tests {
         });
         let latest = rt.state.export_pixels().unwrap();
         assert_ne!(latest.dimensions(), original.dimensions());
-        fake.fail_restart.store(false, Ordering::SeqCst);
         rt.frame(1.0 / 60.0);
         restart(&mut rt);
-        assert_eq!(fake.take(), ["relaunch true"]);
+        assert_eq!(fake.take(), ["install 9.0.0 true"]);
         assert_eq!(rt.shell_request, Some(rune::Shell::Quit));
         let restored = restore(&store).unwrap();
         assert_eq!(
@@ -1264,5 +1214,30 @@ mod tests {
             rt.state.waiting_update_label().as_deref(),
             Some("Get Sniplet 9.0.0 from the website")
         );
+    }
+
+    #[test]
+    fn a_copy_that_cannot_update_itself_links_to_the_website_and_never_downloads() {
+        let (mut editor, fake, _directory) = fixture();
+        fake.manual.store(true, Ordering::SeqCst);
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        editor.download_update();
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["check Stable"], "it must never download");
+        assert!(editor.render_update_notice(&ui::kit(true)).is_none());
+        let mut settings = rune::Runtime::new(
+            Section {
+                summary: editor.update_summary(),
+                editor: editor.inbox.clone(),
+            },
+            section_view,
+            (900.0, 600.0),
+            env(),
+        );
+        settings.frame(0.0);
+        assert!(settings.find("update-download").is_none());
+        click(&mut settings, "update-website");
+        assert_eq!(settings.take_url_requests(), [RELEASES_URL]);
     }
 }
