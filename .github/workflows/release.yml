@@ -141,6 +141,9 @@ jobs:
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
           echo "SNIPLET_SIGNING_IDENTITY=Sniplet Self-Signed" >> "$GITHUB_ENV"
 
+      - name: Install Mac disk image tools
+        if: runner.os == 'macOS'
+        run: python -m pip install -r scripts/requirements-release.txt
       - name: Package application
         env:
           TARGET: ${{ matrix.target }}

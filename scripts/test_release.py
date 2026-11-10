@@ -354,6 +354,15 @@ class ReleaseTests(unittest.TestCase):
                         '-mountpoint', str(mount), str(image)], check=True)
         try:
             self.assertEqual(os.readlink(mount / 'Applications'), '/Applications')
+            self.assertTrue((mount / '.VolumeIcon.icns').is_file())
+            from ds_store import DSStore
+            with DSStore.open(str(mount / '.DS_Store'), 'r') as view:
+                self.assertEqual(view['.']['bwsp']['WindowBounds'], '{{200, 200}, {540, 340}}')
+                self.assertFalse(view['.']['bwsp']['ShowToolbar'])
+                self.assertFalse(view['.']['bwsp']['ShowSidebar'])
+                self.assertEqual(view['.']['icvp']['iconSize'], 128)
+                self.assertEqual(view['Sniplet.app']['Iloc'], (140, 150))
+                self.assertEqual(view['Applications']['Iloc'], (400, 150))
             installed = self.root / 'Applications/Sniplet.app'
             subprocess.run(['ditto', str(mount / 'Sniplet.app'), str(installed)], check=True)
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)

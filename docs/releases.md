@@ -97,7 +97,7 @@ once.
 
 ### Update key
 
-Install the release tool dependency:
+Install the release tool dependencies:
 
 ```sh
 python3 -m pip install -r scripts/requirements-release.txt
