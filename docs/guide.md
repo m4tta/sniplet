@@ -172,7 +172,9 @@ The shell script creates `dist/Sniplet.app` and `dist/Sniplet.dmg` on macOS,
 or a portable Linux directory under `dist/`. On Mac, open the DMG and drag
 Sniplet to its Applications shortcut. Eject the image, then open the installed
 app. Debug packages use `Sniplet-debug.app` and `Sniplet-debug.dmg`.
-Mac packaging also requires Python 3.11 or newer.
+Mac packaging also requires Python 3.11 or newer and `dmgbuild`, which sets
+the disk image's Finder window. Install it with
+`python3 -m pip install -r scripts/requirements-release.txt`.
 Packages contain the executable, README, and licenses.
 The app icon is included in the macOS bundle and Windows executable. Linux
 packages include a desktop entry and icons under `share/icons/hicolor`; install

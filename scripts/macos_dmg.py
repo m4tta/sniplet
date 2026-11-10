@@ -8,6 +8,22 @@ import subprocess
 import sys
 import tempfile
 
+ICON = Path(__file__).resolve().parent.parent / 'assets/icons/sniplet.icns'
+
+
+def layout(app_name):
+    """Finder view for the mounted image: a small window with the app beside its Applications target."""
+    return {
+        'format': 'UDZO',
+        'filesystem': 'HFS+',
+        'symlinks': {'Applications': '/Applications'},
+        'icon': str(ICON),
+        'window_rect': ((200, 200), (540, 340)),
+        'icon_size': 128,
+        'text_size': 13,
+        'icon_locations': {app_name: (140, 150), 'Applications': (400, 150)},
+    }
+
 
 def create(bundle, destination):
     if sys.platform != 'darwin':
@@ -23,16 +39,18 @@ def create(bundle, destination):
         raise ValueError('The disk image must be outside the signed app bundle')
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(bundle)], check=True)
+    try:
+        from dmgbuild.core import DMGError, build_dmg
+    except ImportError as error:
+        raise ValueError('Install the Mac packaging tools: '
+                         'python3 -m pip install -r scripts/requirements-release.txt') from error
     with tempfile.TemporaryDirectory(prefix='.sniplet-dmg-', dir=destination.parent) as temporary:
         root = Path(temporary)
-        contents = root / 'contents'
-        contents.mkdir()
-        subprocess.run(['ditto', '--rsrc', '--extattr', str(bundle),
-                        str(contents / bundle.name)], check=True)
-        (contents / 'Applications').symlink_to('/Applications', target_is_directory=True)
         image = root / 'Sniplet.dmg'
-        subprocess.run(['hdiutil', 'create', '-volname', 'Sniplet', '-fs', 'HFS+',
-                        '-format', 'UDZO', '-srcfolder', str(contents), str(image)], check=True)
+        try:
+            build_dmg(str(image), 'Sniplet', settings={'files': [str(bundle)], **layout(bundle.name)})
+        except DMGError as error:
+            raise ValueError(f'dmgbuild failed: {error}') from error
         subprocess.run(['hdiutil', 'verify', str(image)], check=True)
         mount = root / 'mounted'
         mount.mkdir()
@@ -43,6 +61,8 @@ def create(bundle, destination):
                 raise ValueError('The disk image is not read-only')
             if not (mount / 'Applications').is_symlink() or os.readlink(mount / 'Applications') != '/Applications':
                 raise ValueError('The disk image has no Applications shortcut')
+            if not (mount / '.DS_Store').is_file():
+                raise ValueError('The disk image has no Finder window layout')
             installed = mount / bundle.name
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)
             for path in [binary, Path('Contents/Info.plist')]:
