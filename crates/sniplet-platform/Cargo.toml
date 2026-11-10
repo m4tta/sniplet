@@ -8,6 +8,7 @@ anyhow = "1"
 ed25519-dalek = "2"
 hex = "0.4"
 semver = "1"
+sha2 = "0.10"
 sniplet-core = { path = "../sniplet-core" }
 arboard = "3.6"
 directories = "6"

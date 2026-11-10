@@ -3,13 +3,19 @@
 //! exits. Checking and downloading never change the installed app. Call `install` only after
 //! the editor has saved recovery data and the user has requested a restart.
 
-use std::{io::Read, time::Duration};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use velopack::{
     UpdateInfo, UpdateManager, VelopackApp, VelopackAsset,
+    locator::{LocationContext, auto_locate_app_manifest},
     sources::{HttpSource, NoneSource},
 };
 
@@ -83,6 +89,7 @@ pub fn can_update() -> bool {
 pub struct DownloadedUpdate {
     manager: UpdateManager,
     asset: VelopackAsset,
+    package: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -316,8 +323,24 @@ pub fn check(channel: ReleaseChannel, current: &BuildIdentity) -> Result<Option<
     )
 }
 
-/// Download and verify only. Velopack checks the size and SHA-256 from the signed manifest.
-/// The installed app is unchanged until `install`.
+/// Velopack skips its own size and checksum checks for a package that is already in its
+/// folder, so check every package against the signed manifest here.
+fn verify_package(path: &Path, size: u64, sha256: &str) -> Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    ensure!(
+        file.metadata()?.len() == size,
+        "The update download is incomplete"
+    );
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash)?;
+    ensure!(
+        hex::encode(hash.finalize()) == sha256,
+        "The update checksum is invalid. No files were installed"
+    );
+    Ok(())
+}
+
+/// Download and verify only. The installed app is unchanged until `install`.
 pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
     ensure!(!release.reinstall, "Download this version from the website");
     let source = HttpSource::new(format!(
@@ -329,6 +352,13 @@ pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
     #[cfg(not(target_os = "linux"))]
     let locator = None;
     let manager = UpdateManager::new(source, None, locator)?;
+    let package = auto_locate_app_manifest(LocationContext::FromCurrentExe)?
+        .get_packages_dir()
+        .join(&release.asset_name);
+    // Velopack would use a damaged or replaced copy as it is. Remove it, so it downloads again.
+    if verify_package(&package, release.size, &release.sha256).is_err() {
+        let _ = std::fs::remove_file(&package);
+    }
     let asset = VelopackAsset {
         PackageId: PACK_ID.into(),
         Version: release.version.clone(),
@@ -345,12 +375,19 @@ pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
     manager
         .download_updates(&update, None)
         .context("Could not download the update")?;
-    Ok(DownloadedUpdate { manager, asset })
+    verify_package(&package, release.size, &release.sha256)?;
+    Ok(DownloadedUpdate {
+        manager,
+        asset,
+        package,
+    })
 }
 
 /// Start Velopack's updater. It waits for this process to exit, replaces the app, and
 /// opens the new version with `restart_args`. The caller must exit next.
 pub fn install(downloaded: DownloadedUpdate, restart_args: &[&str]) -> Result<()> {
+    let asset = &downloaded.asset;
+    verify_package(&downloaded.package, asset.Size, &asset.SHA256)?;
     downloaded
         .manager
         .wait_exit_then_apply_updates(&downloaded.asset, false, true, restart_args)
@@ -362,10 +399,14 @@ pub fn install(downloaded: DownloadedUpdate, restart_args: &[&str]) -> Result<()
 /// manifest beside it, in a folder that ends in `usr/bin` like the AppImage's own.
 #[cfg(target_os = "linux")]
 fn updater_outside_appimage() -> Result<velopack::locator::VelopackLocatorConfig> {
-    use velopack::locator::{LocationContext, VelopackLocatorConfig, auto_locate_app_manifest};
+    use velopack::locator::VelopackLocatorConfig;
     let locator = auto_locate_app_manifest(LocationContext::FromCurrentExe)?;
-    let bin = std::env::temp_dir()
-        .join(format!("sniplet-updater-{}", std::process::id()))
+    // A new folder that only this user can open. It stays after the app exits, because
+    // the updater still runs from it.
+    let bin = tempfile::Builder::new()
+        .prefix("sniplet-updater-")
+        .tempdir()?
+        .keep()
         .join("usr/bin");
     std::fs::create_dir_all(&bin)?;
     let updater = bin.join("UpdateNix");
@@ -498,5 +539,18 @@ mod tests {
             sha: "local".into(),
         };
         assert!(select_manifest(manifest, "v0.2.0", Stable, &current, "windows-x64").is_err());
+    }
+
+    #[test]
+    fn package_verification_rejects_incomplete_or_changed_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("package.nupkg");
+        let sha256 = hex::encode(Sha256::digest(b"good"));
+        std::fs::write(&path, b"good").unwrap();
+        assert!(verify_package(&path, 4, &sha256).is_ok());
+        std::fs::write(&path, b"evil").unwrap();
+        assert!(verify_package(&path, 4, &sha256).is_err());
+        std::fs::write(&path, b"x").unwrap();
+        assert!(verify_package(&path, 4, &sha256).is_err());
     }
 }
