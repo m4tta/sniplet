@@ -350,11 +350,13 @@ pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
     #[cfg(target_os = "linux")]
     let locator = Some(updater_outside_appimage()?);
     #[cfg(not(target_os = "linux"))]
-    let locator = None;
+    let locator: Option<velopack::locator::VelopackLocatorConfig> = None;
+    let packages = match &locator {
+        Some(config) => config.PackagesDir.clone(),
+        None => auto_locate_app_manifest(LocationContext::FromCurrentExe)?.get_packages_dir(),
+    };
     let manager = UpdateManager::new(source, None, locator)?;
-    let package = auto_locate_app_manifest(LocationContext::FromCurrentExe)?
-        .get_packages_dir()
-        .join(&release.asset_name);
+    let package = packages.join(&release.asset_name);
     // Velopack would use a damaged or replaced copy as it is. Remove it, so it downloads again.
     if verify_package(&package, release.size, &release.sha256).is_err() {
         let _ = std::fs::remove_file(&package);
@@ -396,18 +398,22 @@ pub fn install(downloaded: DownloadedUpdate, restart_args: &[&str]) -> Result<()
 
 /// The AppImage unmounts as soon as the app exits, so an updater that runs from inside it
 /// dies partway through. Run a copy from a temporary folder instead. The copy finds its
-/// manifest beside it, in a folder that ends in `usr/bin` like the AppImage's own.
+/// manifest beside it, in a folder that ends in `usr/bin` like the AppImage's own. The
+/// package goes in the same folder, because Velopack's default packages folder is in the
+/// shared `/var/tmp`, where another user can create it first.
 #[cfg(target_os = "linux")]
 fn updater_outside_appimage() -> Result<velopack::locator::VelopackLocatorConfig> {
     use velopack::locator::VelopackLocatorConfig;
     let locator = auto_locate_app_manifest(LocationContext::FromCurrentExe)?;
+    use std::os::unix::fs::PermissionsExt;
     // A new folder that only this user can open. It stays after the app exits, because
     // the updater still runs from it.
-    let bin = tempfile::Builder::new()
+    let root = tempfile::Builder::new()
         .prefix("sniplet-updater-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()?
-        .keep()
-        .join("usr/bin");
+        .keep();
+    let bin = root.join("usr/bin");
     std::fs::create_dir_all(&bin)?;
     let updater = bin.join("UpdateNix");
     let manifest = bin.join("sq.version");
@@ -416,7 +422,7 @@ fn updater_outside_appimage() -> Result<velopack::locator::VelopackLocatorConfig
     Ok(VelopackLocatorConfig {
         RootAppDir: locator.get_appimage_path(),
         UpdateExePath: updater,
-        PackagesDir: locator.get_packages_dir(),
+        PackagesDir: root.join("packages"),
         ManifestPath: manifest,
         CurrentBinaryDir: locator.get_current_bin_dir(),
         IsPortable: true,
