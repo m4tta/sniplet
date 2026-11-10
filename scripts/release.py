@@ -38,6 +38,13 @@ TARGETS = {
 PACK_ID = 'Sniplet'
 # The in-app update package for each target, made by `vpk pack`.
 UPDATE = '-full.nupkg'
+# Velopack's runtime id for each target. Without it, vpk picks x86 on Windows.
+RUNTIMES = {
+    'macos-arm64': 'osx-arm64',
+    'macos-x64': 'osx-x64',
+    'windows-x64': 'win-x64',
+    'linux-x64': 'linux-x64',
+}
 # The files that people download and install, by the end of their names.
 DOWNLOADS = {
     'macos-arm64': ('.dmg',),
@@ -247,7 +254,7 @@ def vpk_pack(target, build, pack_dir, main_exe, output, *options):
     """Make the Velopack update package and installers for one target. The channel is the
     target, so the file names of the four targets never collide in one GitHub release."""
     subprocess.run(['vpk', 'pack', '--yes', '--packId', PACK_ID, '--packTitle', 'Sniplet',
-                    '--packVersion', build.version, '--channel', target,
+                    '--packVersion', build.version, '--channel', target, '--runtime', RUNTIMES[target],
                     '--packDir', str(pack_dir), '--mainExe', main_exe,
                     '--outputDir', str(output), *options], check=True, cwd=ROOT)
     made = output / f'{PACK_ID}-{build.version}-{target}{UPDATE}'
