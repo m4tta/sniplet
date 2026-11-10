@@ -150,10 +150,15 @@ offline copy too.
 
 ### Windows signing
 
-The Windows build job signs `Sniplet.exe` right after `cargo build`, before
-packaging. So the zip, `SHA256SUMS`, and `release.json` all hold the signed
-file. The signature uses SHA-256 and a timestamp from
-`http://timestamp.acs.microsoft.com`, and shows "Matthew Anderson" as publisher.
+On Windows, `vpk pack --azureTrustedSignFile packaging/windows/signing.json`
+signs `Sniplet.exe`, Velopack's `Update.exe` and execution stub, and
+`Setup.exe` before it packs them. So the update package, `Setup.exe`, `Portable.zip`, `SHA256SUMS`, and
+`release.json` all hold signed files. Each signature has a timestamp and shows
+"Matthew Anderson" as publisher. `signing.json` names the account and profile
+only. It holds no secret.
+
+The pull request check of the Release workflow does not sign, because pull
+requests have no Azure access. Only release runs from `main` sign.
 
 | Item | Value |
 | --- | --- |
