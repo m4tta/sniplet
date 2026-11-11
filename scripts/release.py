@@ -171,8 +171,9 @@ def plan(env=os.environ, root=ROOT, now=None):
             if age < MIN_NIGHTLY_GAP:
                 print(f'v{last} is {int(age // 60)} minutes old. Nightly skipped.')
                 return output(skip=True)
-            if not git('rev-list', '-n', '1', f'v{last}..HEAD', root=root):
-                print(f'main has no commits after v{last}. Nightly skipped.')
+            # The website in site/ deploys on its own, so site-only commits do not need a nightly.
+            if not git('rev-list', '-n', '1', f'v{last}..HEAD', '--', '.', ':(exclude)site', root=root):
+                print(f'main has no app commits after v{last}. Nightly skipped.')
                 return output(skip=True)
         major, minor, patch = map(int, latest_stable.split('.'))
         date = datetime.fromtimestamp(now or time.time(), timezone.utc).strftime('%Y%m%d')
