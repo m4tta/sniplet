@@ -152,9 +152,10 @@ offline copy too.
 
 On Windows, `vpk pack --azureTrustedSignFile packaging/windows/signing.json`
 signs `Sniplet.exe`, Velopack's `Update.exe` and execution stub, and
-`Setup.exe` before it packs them. So the update package, `Setup.exe`, `Portable.zip`, `SHA256SUMS`, and
-`release.json` all hold signed files. Each signature has a timestamp and shows
-"Matthew Anderson" as publisher. `signing.json` names the account and profile
+`Setup.exe` before it packs them. So `Setup.exe`, the update package
+(`-full.nupkg`), and `Portable.zip` contain only signed executables. The
+checksums in `SHA256SUMS` and `release.json` are for those signed packages.
+Each signature has a timestamp and shows "Matthew Anderson" as publisher. `signing.json` names the account and profile
 only. It holds no secret.
 
 The pull request check of the Release workflow does not sign, because pull
