@@ -1187,9 +1187,10 @@ function initDownload() {
     .then(rel => {
       const find = re => (rel.assets || []).find(a => re.test(a.name));
       const files = {
-        win: find(/windows-x64\.zip$/),
+        // Prefer the Velopack installers that update themselves. Releases before 0.2.4 have only the archives.
+        win: find(/windows-x64-Setup\.exe$/) || find(/windows-x64\.zip$/),
         mac: find(/macos-arm64\.dmg$/),
-        linux: find(/linux-x64\.tar\.gz$/),
+        linux: find(/linux-x64\.AppImage$/) || find(/linux-x64\.tar\.gz$/),
       };
       for (const [os, a] of Object.entries(files)) {
         const b = $(`.pb[data-os="${os}"]`);
