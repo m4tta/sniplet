@@ -37,6 +37,7 @@ static SMOKE: AtomicBool = AtomicBool::new(false);
 static MINIMIZED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> anyhow::Result<()> {
+    sniplet_platform::updates::startup();
     // Rune reads its own flags (`--snap`, `--tree`, `--script` and the rest) and leaves the rest
     // to Sniplet, so the app runs headless with the same arguments.
     let args: Vec<String> = rune::extra_args().to_vec();
@@ -46,12 +47,6 @@ fn main() -> anyhow::Result<()> {
             serde_json::to_string(&sniplet_platform::updates::current_build())?
         );
         return Ok(());
-    }
-    if let Some(parent) = args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--update-parent="))
-    {
-        sniplet_platform::updates::wait_for_parent(parent.parse()?)?;
     }
     if args.iter().any(|arg| arg == "--help") {
         println!(

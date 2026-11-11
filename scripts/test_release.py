@@ -128,6 +128,15 @@ class ReleaseTests(unittest.TestCase):
         body = self.git('tag', '-l', '--format=%(contents:body)', 'v' + NIGHTLY)
         self.assertEqual(body.strip(), 'https://github.com/o/r/actions/runs/900')
 
+    def test_pull_request_packages_a_throwaway_version_without_a_tag(self):
+        checkout = self.repository()
+        sha = self.commit()
+        planned = self.plan(checkout, 1793793600, GITHUB_EVENT_NAME='pull_request',
+                            GITHUB_REF='refs/pull/30/merge')
+        self.assertEqual(planned, {'channel': 'nightly', 'version': '0.0.1-nightly.20261104.17',
+                                   'sha': sha, 'skip': False})
+        self.assertEqual(release.git('tag', '-l', root=self.origin), '')
+
     def test_scheduled_nightly_waits_for_six_hours_and_new_commits(self):
         checkout = self.repository()
         self.plan(checkout, 1793793600)  # 2026-11-04 12:00 UTC, the date in NIGHTLY
@@ -188,12 +197,12 @@ class ReleaseTests(unittest.TestCase):
         self.signing_key()
         directory = self.root / build.tag
         directory.mkdir()
-        for target in release.TARGETS:
-            kinds = ['update', 'installer'] if target.startswith('macos-') else ['update']
+        for target, endings in release.DOWNLOADS.items():
             assets = []
-            for kind in kinds:
-                path = directory / build.filename(target, kind)
-                path.write_bytes(f'{target} {kind} {build.sha}'.encode())
+            for ending in (release.UPDATE, *endings):
+                kind = 'update' if ending == release.UPDATE else 'download'
+                path = directory / build.filename(target, ending)
+                path.write_bytes(f'{target} {ending} {build.sha}'.encode())
                 assets.append(release.Asset(target, path.name, release.checksum(path),
                                             path.stat().st_size, kind))
             release.write_json(directory / (target + '.json'),
@@ -210,13 +219,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(published['draft'])
         self.assertTrue(published['prerelease'])
         self.assertEqual(published['make_latest'], 'false')
-        self.assertEqual(len(self.github.files[build.tag]), 9)
+        self.assertEqual(len(self.github.files[build.tag]), 13)
         self.assertNotIn('git/refs', [write[0] for write in self.github.writes])
         metadata = json.loads(self.github.files[build.tag]['release.json'])
-        self.assertEqual((metadata['schema'], metadata['channel'], metadata['tag']), (3, 'nightly', build.tag))
+        self.assertEqual((metadata['schema'], metadata['channel'], metadata['tag']), (4, 'nightly', build.tag))
         self.assertEqual(len(metadata['assets']), 4)
-        self.assertEqual(len(metadata['installers']), 2)
-        self.assertEqual(metadata['assets'][0]['name'], f'Sniplet-{NIGHTLY}-linux-x64.tar.gz')
+        self.assertEqual(len(metadata['downloads']), 6)
+        self.assertEqual(metadata['assets'][0], {
+            'target': 'linux-x64', 'name': f'Sniplet-{NIGHTLY}-linux-x64-full.nupkg',
+            'sha256': release.checksum(directory / f'Sniplet-{NIGHTLY}-linux-x64-full.nupkg'),
+            'size': len(f'linux-x64 -full.nupkg {SHA}')})
         update_signing.verify(directory / 'release.json')
         with self.assertRaisesRegex(ValueError, 'already published'):
             release.publish(self.github, build, directory)
@@ -244,7 +256,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.github.release(build.tag)['draft'])
         release.publish(self.github, build, directory)
         self.assertFalse(self.github.release(build.tag)['draft'])
-        self.assertEqual(len(self.github.files[build.tag]), 9)
+        self.assertEqual(len(self.github.files[build.tag]), 13)
 
     def test_draft_after_first_release_page_can_resume(self):
         build = release.Build('0.2.1', SHA)
@@ -264,19 +276,20 @@ class ReleaseTests(unittest.TestCase):
             release.publish(self.github, build, self.packages(build))
         self.assertEqual(self.github.writes, [])
 
-    def test_missing_platforms_disk_images_and_unsafe_names_are_rejected(self):
+    def test_missing_packages_and_unsafe_names_are_rejected(self):
         build = release.Build('0.2.1', SHA)
         directory = self.packages(build)
         assets = release.collect(directory, build)
-        updates = [a for a in assets if a.kind == 'update']
-        installers = [a for a in assets if a.kind == 'installer']
-        with self.assertRaisesRegex(ValueError, 'four platform'):
-            release.manifest(build, updates[:-1] + installers)
-        with self.assertRaisesRegex(ValueError, 'Both Mac'):
-            release.manifest(build, updates + installers[:-1])
-        bad = release.Asset(updates[0].target, '../outside.zip', updates[0].sha256, updates[0].size)
+        for removed in assets:
+            with self.assertRaisesRegex(ValueError, 'all of its downloads'):
+                release.manifest(build, [a for a in assets if a is not removed])
+        bad = release.Asset(assets[0].target, '../outside.zip', assets[0].sha256, assets[0].size)
         with self.assertRaisesRegex(ValueError, 'filename'):
-            release.manifest(build, [bad, *updates[1:], *installers])
+            release.manifest(build, [bad, *assets[1:]])
+        wrong_kind = release.Asset(assets[0].target, assets[0].name, assets[0].sha256, assets[0].size,
+                                   'download' if assets[0].kind == 'update' else 'update')
+        with self.assertRaisesRegex(ValueError, 'filename'):
+            release.manifest(build, [wrong_kind, *assets[1:]])
         other = release.Build('0.2.1', 'b' * 40)
         with self.assertRaisesRegex(ValueError, 'different builds'):
             release.collect(directory, other)
@@ -290,7 +303,7 @@ class ReleaseTests(unittest.TestCase):
         binary.write_bytes(b'fixture')
         binary.chmod(0o755)
         destination = self.root / 'package.tar.gz'
-        release.archive_bundle(bundle, destination, 'linux-x64')
+        release.archive_linux(bundle, destination)
         with tarfile.open(destination) as archive:
             self.assertEqual(archive.getmember('sniplet/bin/sniplet').mode, 0o755)
 

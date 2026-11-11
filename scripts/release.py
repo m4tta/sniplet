@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Plan, package, and publish Sniplet releases on GitHub. Requires Python 3.11+.
+Packaging also needs Velopack's `vpk` tool, and on Mac the `dmgbuild` package.
 
 Git tags hold the version, not Cargo.toml:
 - Nightly: the newest stable tag plus one patch, then `-nightly.<YYYYMMDD>.<run number>`,
@@ -20,6 +21,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,10 +29,28 @@ VERSION = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 NIGHTLY = VERSION + r'-nightly\.([0-9]{8})\.([1-9][0-9]*)'
 MIN_NIGHTLY_GAP = 6 * 60 * 60
 TARGETS = {
-    'macos-arm64': ('aarch64-apple-darwin', '.zip'),
-    'macos-x64': ('x86_64-apple-darwin', '.zip'),
-    'windows-x64': ('x86_64-pc-windows-msvc', '.zip'),
-    'linux-x64': ('x86_64-unknown-linux-gnu', '.tar.gz'),
+    'macos-arm64': 'aarch64-apple-darwin',
+    'macos-x64': 'x86_64-apple-darwin',
+    'windows-x64': 'x86_64-pc-windows-msvc',
+    'linux-x64': 'x86_64-unknown-linux-gnu',
+}
+# Velopack's package id. It must match PACK_ID in crates/sniplet-platform/src/updates.rs.
+PACK_ID = 'Sniplet'
+# The in-app update package for each target, made by `vpk pack`.
+UPDATE = '-full.nupkg'
+# Velopack's runtime id for each target. Without it, vpk picks x86 on Windows.
+RUNTIMES = {
+    'macos-arm64': 'osx-arm64',
+    'macos-x64': 'osx-x64',
+    'windows-x64': 'win-x64',
+    'linux-x64': 'linux-x64',
+}
+# The files that people download and install, by the end of their names.
+DOWNLOADS = {
+    'macos-arm64': ('.dmg',),
+    'macos-x64': ('.dmg',),
+    'windows-x64': ('-Setup.exe', '-Portable.zip'),
+    'linux-x64': ('.AppImage', '.tar.gz'),
 }
 
 
@@ -66,9 +86,8 @@ class Build:
     def tag(self):
         return 'v' + self.version
 
-    def filename(self, target, kind='update'):
-        extension = '.dmg' if kind == 'installer' else TARGETS[target][1]
-        return f'Sniplet-{self.version}-{target}{extension}'
+    def filename(self, target, ending=UPDATE):
+        return f'{PACK_ID}-{self.version}-{target}{ending}'
 
 
 @dataclass(frozen=True)
@@ -81,10 +100,10 @@ class Asset:
 
     def validate(self, build):
         require(self.target in TARGETS, 'Unknown package target')
-        require(self.kind in ('update', 'installer'), 'Unknown package kind')
-        require(self.kind != 'installer' or self.target.startswith('macos-'),
-                'Only Mac packages have disk image installers')
-        require(self.name == build.filename(self.target, self.kind), 'Unexpected package filename')
+        require(self.kind in ('update', 'download'), 'Unknown package kind')
+        endings = (UPDATE,) if self.kind == 'update' else DOWNLOADS[self.target]
+        require(self.name in [build.filename(self.target, ending) for ending in endings],
+                'Unexpected package filename')
         require(re.fullmatch(r'[0-9a-f]{64}', self.sha256), 'Invalid package checksum')
         require(type(self.size) is int and self.size > 0, 'Invalid package size')
 
@@ -131,7 +150,12 @@ def release_tags(root=ROOT):
 
 def plan(env=os.environ, root=ROOT, now=None):
     """Decide what the Release workflow builds. A nightly pushes its tag before it builds,
-    so a failed build also waits for new commits and the 6-hour gap."""
+    so a failed build also waits for new commits and the 6-hour gap.
+    A pull request gets a throwaway nightly version, no tag, and no release."""
+    if env.get('GITHUB_EVENT_NAME') == 'pull_request':
+        date = datetime.fromtimestamp(now or time.time(), timezone.utc).strftime('%Y%m%d')
+        build = Build(f'0.0.1-nightly.{date}.{env["GITHUB_RUN_NUMBER"]}', git('rev-parse', 'HEAD', root=root))
+        return output(channel=build.channel, version=build.version, sha=build.sha, skip=False)
     require(env.get('GITHUB_REF') == 'refs/heads/main', 'Run releases from main')
     channel = env.get('CHANNEL') or 'nightly'
     tags = release_tags(root)
@@ -184,21 +208,22 @@ def plan(env=os.environ, root=ROOT, now=None):
 
 
 def manifest(build, assets):
-    updates = [asset for asset in assets if asset.kind == 'update']
-    installers = [asset for asset in assets if asset.kind == 'installer']
-    require(len(updates) == len(TARGETS) and {asset.target for asset in updates} == set(TARGETS),
-            'All four platform packages are required')
-    require(len(installers) == 2 and {asset.target for asset in installers} == {'macos-arm64', 'macos-x64'},
-            'Both Mac disk image installers are required')
+    """The signed release.json. Apps read `assets`, one Velopack package for each target.
+    Schema 4 keeps the field names of schema 3, so an app that reads schema 3 can tell
+    its user to download this release by hand."""
     for asset in assets:
         asset.validate(build)
+    expected = sorted(build.filename(target, ending)
+                      for target in TARGETS for ending in (UPDATE, *DOWNLOADS[target]))
+    require(sorted(asset.name for asset in assets) == expected,
+            'Every platform needs its update package and all of its downloads')
 
-    def entries(items):
+    def entries(kind):
         return [{key: value for key, value in asdict(item).items() if key != 'kind'}
-                for item in sorted(items, key=lambda item: item.target)]
+                for item in sorted(assets, key=lambda item: item.name) if item.kind == kind]
 
-    return {'schema': 3, **asdict(build), 'channel': build.channel, 'tag': build.tag,
-            'assets': entries(updates), 'installers': entries(installers)}
+    return {'schema': 4, **asdict(build), 'channel': build.channel, 'tag': build.tag,
+            'assets': entries('update'), 'downloads': entries('download')}
 
 
 def verify_files(directory, build, assets):
@@ -219,46 +244,78 @@ def write_metadata(directory, build, assets):
         f'{asset.sha256}  {asset.name}\n' for asset in sorted(assets, key=lambda item: item.name)))
 
 
-def archive_bundle(bundle, destination, target):
-    if target.startswith('macos-'):
-        subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
-                        str(bundle), str(destination)], check=True)
-    elif target == 'linux-x64':
-        with tarfile.open(destination, 'w:gz') as archive:
-            archive.add(bundle, arcname='sniplet')
-    else:
-        shutil.make_archive(str(destination.with_suffix('')), 'zip', bundle.parent, bundle.name)
+def archive_linux(bundle, destination):
+    """The tar.gz for people who install by hand. It does not update itself."""
+    with tarfile.open(destination, 'w:gz') as archive:
+        archive.add(bundle, arcname='sniplet')
+
+
+def vpk_pack(target, build, pack_dir, main_exe, output, *options):
+    """Make the Velopack update package and installers for one target. The channel is the
+    target, so the file names of the four targets never collide in one GitHub release."""
+    subprocess.run(['vpk', 'pack', '--yes', '--packId', PACK_ID, '--packTitle', 'Sniplet',
+                    '--packVersion', build.version, '--channel', target, '--runtime', RUNTIMES[target],
+                    '--packDir', str(pack_dir), '--mainExe', main_exe,
+                    '--outputDir', str(output), *options], check=True, cwd=ROOT)
+    made = output / f'{PACK_ID}-{build.version}-{target}{UPDATE}'
+    require(made.is_file(), f'vpk did not make {made.name}')
+    return lambda name: output / f'{PACK_ID}-{target}{name}'
 
 
 def package(target, build):
     """Package an app that `cargo build -p sniplet-app --release` already built with this identity."""
     require(git('rev-parse', 'HEAD') == build.sha, 'Checkout does not match the requested source commit')
     host = subprocess.check_output(['rustc', '-vV'], text=True)
-    require(f'host: {TARGETS[target][0]}\n' in host, 'Runner architecture does not match the package')
+    require(f'host: {TARGETS[target]}\n' in host, 'Runner architecture does not match the package')
+    mac = target.startswith('macos-')
     if target == 'windows-x64':
         subprocess.run(['pwsh', '-NoProfile', '-File', 'scripts/package.ps1',
                         '-OutputDirectory', 'dist-release', '-SkipBuild'], check=True, cwd=ROOT)
-        bundle = ROOT / 'dist-release' / ('sniplet-' + TARGETS[target][0])
+        bundle = ROOT / 'dist-release' / ('sniplet-' + TARGETS[target])
         executable = bundle / 'Sniplet.exe'
     else:
         subprocess.run(['sh', 'scripts/package.sh', 'dist-release'], check=True, cwd=ROOT,
                        env={**os.environ, 'SNIPLET_PACKAGE_SKIP_BUILD': '1',
                             'SNIPLET_PACKAGE_PROFILE': 'release'})
-        mac = target.startswith('macos-')
-        bundle = ROOT / 'dist-release' / ('Sniplet.app' if mac else 'sniplet-' + TARGETS[target][0])
+        bundle = ROOT / 'dist-release' / ('Sniplet.app' if mac else 'sniplet-' + TARGETS[target])
         executable = bundle / ('Contents/MacOS/Sniplet' if mac else 'bin/sniplet')
     identity = json.loads(subprocess.check_output([str(executable), '--build-info'], text=True, timeout=15))
     require(identity == {'version': build.version, 'sha': build.sha},
             'The executable was not built with this release identity')
     directory = ROOT / 'dist-release' / 'assets'
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / build.filename(target)
-    archive_bundle(bundle, destination, target)
-    assets = [Asset(target, destination.name, checksum(destination), destination.stat().st_size)]
-    if target.startswith('macos-'):
-        image = directory / build.filename(target, 'installer')
-        (bundle.parent / 'Sniplet.dmg').replace(image)
-        assets.append(Asset(target, image.name, checksum(image), image.stat().st_size, 'installer'))
+    output = ROOT / 'dist-release' / 'velopack'
+    shutil.rmtree(output, ignore_errors=True)
+    downloads = {}
+    if target == 'windows-x64':
+        made = vpk_pack(target, build, bundle, 'Sniplet.exe', output,
+                        '--icon', str(ROOT / 'assets/icons/sniplet.ico'))
+        downloads = {ending: made(ending) for ending in DOWNLOADS[target]}
+    elif mac:
+        # vpk adds its updater to the bundle and signs it again, with hardened runtime.
+        made = vpk_pack(target, build, bundle, 'Sniplet', output, '--noInst',
+                        '--signAppIdentity', os.environ.get('SNIPLET_SIGNING_IDENTITY', '-'))
+        import macos_dmg
+        unpacked = Path(tempfile.mkdtemp(prefix='sniplet-portable-', dir=output))
+        subprocess.run(['ditto', '-x', '-k', str(made('-Portable.zip')), str(unpacked)], check=True)
+        macos_dmg.create(unpacked / 'Sniplet.app', directory / build.filename(target, '.dmg'))
+    else:
+        # vpk wants the executable at the top of its folder.
+        app_dir = ROOT / 'dist-release' / 'appimage'
+        shutil.rmtree(app_dir, ignore_errors=True)
+        shutil.copytree(bundle, app_dir, ignore=shutil.ignore_patterns('bin'))
+        shutil.copy2(executable, app_dir / 'sniplet')
+        made = vpk_pack(target, build, app_dir, 'sniplet', output,
+                        '--icon', str(ROOT / 'assets/icons/sniplet-512.png'))
+        downloads = {'.AppImage': made('.AppImage')}
+        archive_linux(bundle, directory / build.filename(target, '.tar.gz'))
+    (output / f'{PACK_ID}-{build.version}-{target}{UPDATE}').replace(directory / build.filename(target))
+    for ending, source in downloads.items():
+        source.replace(directory / build.filename(target, ending))
+    names = [(build.filename(target), 'update')]
+    names += [(build.filename(target, ending), 'download') for ending in DOWNLOADS[target]]
+    assets = [Asset(target, name, checksum(directory / name), (directory / name).stat().st_size, kind)
+              for name, kind in names]
     write_json(directory / (target + '.json'), {**asdict(build), 'assets': [asdict(a) for a in assets]})
 
 
@@ -342,8 +399,10 @@ def publish(github, build, directory):
              'Packages: macOS Apple Silicon and Intel, Windows x64, and Linux x64.\n'
              'Use SHA256SUMS to check the downloads. Mac packages are not notarized. '
              'Linux packages need the native libraries listed in the README.\n\n'
-             'Mac: open the DMG, drag Sniplet to Applications, then eject the disk image. '
-             'ZIP files are used for in-app updates.\n')
+             'Mac: open the DMG, drag Sniplet to Applications, then eject the disk image.\n'
+             'Windows: run the Setup file, or unzip the Portable file into a folder.\n'
+             'Linux: make the AppImage executable and run it. The tar.gz does not update itself.\n'
+             'The .nupkg files are for in-app updates.\n')
     if release is None:
         release = github.api('releases', 'POST', {'tag_name': build.tag, 'target_commitish': build.sha,
                              'name': title, 'body': notes, 'draft': True, 'prerelease': nightly,

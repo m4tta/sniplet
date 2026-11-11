@@ -96,13 +96,14 @@ computer, so a capture is always one shortcut away.
 
    | System | File |
    | --- | --- |
-   | Windows | `Sniplet-…-windows-x64.zip` |
+   | Windows | `Sniplet-…-windows-x64-Setup.exe` |
    | macOS, Apple silicon | `Sniplet-…-macos-arm64.dmg` |
    | macOS, Intel | `Sniplet-…-macos-x64.dmg` |
-   | Linux | `Sniplet-…-linux-x64.tar.gz` |
+   | Linux | `Sniplet-…-linux-x64.AppImage` |
 
-2. **Open Sniplet.** Unzip it, or drag it to Applications on a Mac. It waits in
-   the system tray or menu bar.
+2. **Open Sniplet.** Run the Setup file on Windows, drag Sniplet to Applications
+   on a Mac, or make the AppImage executable on Linux. It waits in the system
+   tray or menu bar, and it updates itself.
 3. **Capture.** Press <kbd>Ctrl/Cmd</kbd> <kbd>Shift</kbd> <kbd>2</kbd> and drag across the screen.
 4. **Share.** Mark it up, then press <kbd>Ctrl/Cmd</kbd> <kbd>C</kbd> to copy.
 
