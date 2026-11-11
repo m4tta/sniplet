@@ -7,13 +7,13 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
 
-/// How long a later launch waits for the running Sniplet to answer.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a later launch tries to reach the running Sniplet, in total.
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum Claim {
     /// This process is the only Sniplet. Pass it to `serve`.
@@ -57,9 +57,10 @@ fn claim_in(folder: &Path, args: &[String]) -> io::Result<Claim> {
         .truncate(false)
         .open(folder.join("sniplet.lock"))?;
     let args = absolute(args);
-    // The lock holder may still be starting its listener, so keep trying for a short time.
+    // The lock holder may still be starting its listener, so keep trying until the deadline.
     // If it quits meanwhile, its lock is free on the next try.
-    for _ in 0..40 {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
         if lock.try_lock().is_ok() {
             // Only the lock holder gets here, so a socket file left now is from a crash.
             #[cfg(unix)]
@@ -67,15 +68,17 @@ fn claim_in(folder: &Path, args: &[String]) -> io::Result<Claim> {
             let listener = ListenerOptions::new().name(name(folder)?).create_sync()?;
             return Ok(Claim::First(Instance { lock, listener }));
         }
-        match send(name(folder)?, args.clone()) {
+        match send(name(folder)?, args.clone(), deadline) {
             Ok(()) => return Ok(Claim::Forwarded),
-            // The running Sniplet is alive but does not answer. Do not wait for it again.
             Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
             Err(_) => {}
         }
-        std::thread::sleep(Duration::from_millis(50));
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(left.min(Duration::from_millis(50)));
     }
-    Err(io::Error::other("the running Sniplet did not answer"))
 }
 
 /// The running Sniplet has another working folder, so send absolute file paths.
@@ -91,9 +94,9 @@ fn absolute(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Connect and hand over `args`, within `REPLY_TIMEOUT`. A Windows connect can wait for a
-/// free pipe instance without limit, so it runs inside the timed part too.
-fn send(name: Name<'static>, args: Vec<String>) -> io::Result<()> {
+/// Connect and hand over `args` before `deadline`. A Windows connect can wait for a free pipe
+/// instance without limit, so it runs inside the timed part too.
+fn send(name: Name<'static>, args: Vec<String>, deadline: Instant) -> io::Result<()> {
     // The running instance comes to the front for this launch, so let it take focus.
     #[cfg(target_os = "windows")]
     // SAFETY: plain Win32 call with no pointers.
@@ -107,7 +110,7 @@ fn send(name: Name<'static>, args: Vec<String>) -> io::Result<()> {
         let _ = done.send(Stream::connect(name).and_then(|stream| exchange(stream, &args)));
     });
     result
-        .recv_timeout(REPLY_TIMEOUT)
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
 }
 

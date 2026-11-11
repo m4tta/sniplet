@@ -859,12 +859,18 @@ impl Editor {
         if self.document.is_some() || self.updates.installing() {
             return;
         }
-        let Ok(store) = self.settings_store() else {
-            return;
-        };
-        if let Ok(document) = restore(&store) {
-            self.load(document, "Sniplet is updated. Your screenshot is back.");
-            clear_recovery(&store);
+        match self
+            .settings_store()
+            .and_then(|store| Ok((restore(&store)?, store)))
+        {
+            Ok((document, store)) => {
+                self.load(document, "Sniplet is updated. Your screenshot is back.");
+                clear_recovery(&store);
+            }
+            Err(error) => {
+                self.status =
+                    format!("Sniplet is updated, but your screenshot could not come back: {error}");
+            }
         }
     }
 }
@@ -1229,6 +1235,13 @@ mod tests {
         empty.restore_forwarded_update();
         assert_eq!(empty.export_pixels().unwrap(), before);
         assert!(!recovery_path(&store).exists());
+
+        // Nothing is left to restore, so a second request says so.
+        let mut again = Editor::new(None, Default::default(), 1.0);
+        again.settings_path = empty.settings_path.clone();
+        again.restore_forwarded_update();
+        assert!(again.document.is_none());
+        assert!(again.status.contains("could not come back"));
     }
 
     #[test]
