@@ -67,13 +67,11 @@ fn claim_in(folder: &Path, args: &[String]) -> io::Result<Claim> {
             let listener = ListenerOptions::new().name(name(folder)?).create_sync()?;
             return Ok(Claim::First(Instance { lock, listener }));
         }
-        if let Ok(stream) = Stream::connect(name(folder)?) {
-            match send(stream, args.clone()) {
-                Ok(()) => return Ok(Claim::Forwarded),
-                // The running Sniplet is alive but does not answer. Do not wait for it again.
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
-                Err(_) => {}
-            }
+        match send(name(folder)?, args.clone()) {
+            Ok(()) => return Ok(Claim::Forwarded),
+            // The running Sniplet is alive but does not answer. Do not wait for it again.
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
+            Err(_) => {}
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -93,7 +91,9 @@ fn absolute(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn send(stream: Stream, args: Vec<String>) -> io::Result<()> {
+/// Connect and hand over `args`, within `REPLY_TIMEOUT`. A Windows connect can wait for a
+/// free pipe instance without limit, so it runs inside the timed part too.
+fn send(name: Name<'static>, args: Vec<String>) -> io::Result<()> {
     // The running instance comes to the front for this launch, so let it take focus.
     #[cfg(target_os = "windows")]
     // SAFETY: plain Win32 call with no pointers.
@@ -104,7 +104,7 @@ fn send(stream: Stream, args: Vec<String>) -> io::Result<()> {
     };
     let (done, result) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = done.send(exchange(stream, &args));
+        let _ = done.send(Stream::connect(name).and_then(|stream| exchange(stream, &args)));
     });
     result
         .recv_timeout(REPLY_TIMEOUT)

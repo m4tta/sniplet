@@ -856,7 +856,7 @@ impl Editor {
     /// A later launch handed over `--restore-update`: bring back the screenshot saved before the
     /// update. Work already open in the editor wins, and the saved screenshot stays on disk.
     pub(crate) fn restore_forwarded_update(&mut self) {
-        if self.document.is_some() {
+        if self.document.is_some() || self.updates.installing() {
             return;
         }
         let Ok(store) = self.settings_store() else {
