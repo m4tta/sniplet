@@ -143,21 +143,21 @@ class ReleaseTests(unittest.TestCase):
                                    'sha': sha, 'skip': False})
         self.assertEqual(release.git('tag', '-l', root=self.origin), '')
 
-    def test_scheduled_nightly_waits_for_six_hours_and_new_commits(self):
+    def test_scheduled_nightly_waits_for_two_hours_and_new_commits(self):
         checkout = self.repository()
         self.plan(checkout, 1793793600)  # 2026-11-04 12:00 UTC, the date in NIGHTLY
         created = release.release_tags(checkout)[NIGHTLY]
         schedule = {'GITHUB_EVENT_NAME': 'schedule', 'GITHUB_RUN_NUMBER': '18'}
-        self.assertEqual(self.plan(checkout, created + 5 * 3600, **schedule), {'skip': True})
-        self.assertEqual(self.plan(checkout, created + 7 * 3600, **schedule), {'skip': True})
+        self.assertEqual(self.plan(checkout, created + 1 * 3600, **schedule), {'skip': True})
+        self.assertEqual(self.plan(checkout, created + 3 * 3600, **schedule), {'skip': True})
         self.commit('site/index.html')  # The website deploys on its own.
-        self.assertEqual(self.plan(checkout, created + 7 * 3600, **schedule), {'skip': True})
+        self.assertEqual(self.plan(checkout, created + 3 * 3600, **schedule), {'skip': True})
         self.commit()
-        self.assertEqual(self.plan(checkout, created + 5 * 3600, **schedule), {'skip': True})
-        planned = self.plan(checkout, created + 7 * 3600, **schedule)
+        self.assertEqual(self.plan(checkout, created + 2 * 3600 - 1, **schedule), {'skip': True})
+        planned = self.plan(checkout, created + 2 * 3600, **schedule)
         self.assertRegex(planned['version'], r'^0\.2\.1-nightly\.[0-9]{8}\.18$')
         # A nightly started by hand always builds.
-        self.assertFalse(self.plan(checkout, created + 7 * 3600, GITHUB_RUN_NUMBER='19')['skip'])
+        self.assertFalse(self.plan(checkout, created + 3 * 3600, GITHUB_RUN_NUMBER='19')['skip'])
 
     def test_stable_rebuilds_the_newest_passing_nightly(self):
         checkout = self.repository()

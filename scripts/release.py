@@ -27,7 +27,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 NIGHTLY = VERSION + r'-nightly\.([0-9]{8})\.([1-9][0-9]*)'
-MIN_NIGHTLY_GAP = 6 * 60 * 60
+MIN_NIGHTLY_GAP = 2 * 60 * 60
 TARGETS = {
     'macos-arm64': 'aarch64-apple-darwin',
     'macos-x64': 'x86_64-apple-darwin',
@@ -150,7 +150,7 @@ def release_tags(root=ROOT):
 
 def plan(env=os.environ, root=ROOT, now=None):
     """Decide what the Release workflow builds. A nightly pushes its tag before it builds,
-    so a failed build also waits for new commits and the 6-hour gap.
+    so a failed build also waits for new commits and the 2-hour gap.
     A pull request gets a throwaway nightly version, no tag, and no release."""
     if env.get('GITHUB_EVENT_NAME') == 'pull_request':
         date = datetime.fromtimestamp(now or time.time(), timezone.utc).strftime('%Y%m%d')

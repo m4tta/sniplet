@@ -8,7 +8,7 @@ itself from there.
 
 | Channel | Trigger | Version |
 | --- | --- | --- |
-| nightly | A check every 2 hours. It builds `main` if `main` has commits after the newest nightly, and that nightly is at least 6 hours old. Or run **Actions → Release → Run workflow** by hand. | `0.2.1-nightly.20261104.17` |
+| nightly | A check every hour. It builds `main` if `main` has commits after the newest nightly, and that nightly is at least 2 hours old. Or run **Actions → Release → Run workflow** by hand. | `0.2.1-nightly.20261104.17` |
 | stable | Run **Release** by hand with channel **stable**. | `0.2.1` |
 
 `python scripts/release.py plan` makes these decisions. Git tags hold the
@@ -18,7 +18,7 @@ version, not `Cargo.toml`:
   workflow run number. After `v0.2.0`, nightlies are `0.2.1-nightly.*`. Each
   nightly is newer than the newest stable and older than the next stable. Each
   nightly run pushes its tag before it builds, so a failed build does not run
-  again until there are new commits and 6 hours have passed.
+  again until there are new commits and 2 hours have passed.
 - **Stable:** finds the newest nightly whose run passed, and rebuilds that
   nightly's commit. Stable ships only code that nightly users already ran. The
   version is the nightly's base (`0.2.1-nightly.*` becomes `0.2.1`). For a minor

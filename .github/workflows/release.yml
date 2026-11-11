@@ -1,7 +1,7 @@
 name: Release
 
-# Nightly: a check every 2 hours builds main when it has new commits and the
-# newest nightly is at least 6 hours old. Run the workflow by hand to build one now.
+# Nightly: a check every hour builds main when it has new commits and the
+# newest nightly is at least 2 hours old. Run the workflow by hand to build one now.
 # Stable: run the workflow by hand with channel "stable". It rebuilds the newest
 # nightly that passed. `scripts/release.py plan` makes these decisions.
 # Releases go to GitHub Releases. See docs/releases.md.
@@ -21,7 +21,7 @@ on:
       - crates/sniplet-platform/src/updates.rs
   schedule:
     # Not at minute zero, when GitHub delays scheduled runs the most.
-    - cron: '8 */2 * * *'
+    - cron: '8 * * * *'
   workflow_dispatch:
     inputs:
       channel:
