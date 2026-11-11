@@ -82,6 +82,9 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write # Windows signs through Azure with GitHub OIDC
     env:
       # Read by crates/sniplet-platform/build.rs and scripts/package.sh.
       SNIPLET_VERSION: ${{ needs.plan.outputs.version }}
@@ -166,9 +169,20 @@ jobs:
           dotnet tool install vpk --version 1.2.161 --tool-path "$RUNNER_TEMP/vpk"
           echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
           python -m pip install -r scripts/requirements-release.txt
+      # Windows: vpk signs Sniplet.exe, Update.exe, and Setup.exe with Azure
+      # Artifact Signing before it packs them. It finds this sign-in through
+      # the Azure CLI. A pull request check has no Azure access and does not sign.
+      - name: Sign in to Azure
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Package application
         env:
           TARGET: ${{ matrix.target }}
+          SNIPLET_AZURE_SIGNING: ${{ runner.os == 'Windows' && github.event_name != 'pull_request' && 'packaging/windows/signing.json' || '' }}
         run: python scripts/release.py package "$TARGET" --version "$SNIPLET_VERSION" --sha "$SNIPLET_BUILD_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
