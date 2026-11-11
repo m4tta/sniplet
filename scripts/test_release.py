@@ -153,8 +153,8 @@ class ReleaseTests(unittest.TestCase):
         self.commit('site/index.html')  # The website deploys on its own.
         self.assertEqual(self.plan(checkout, created + 3 * 3600, **schedule), {'skip': True})
         self.commit()
-        self.assertEqual(self.plan(checkout, created + 1 * 3600, **schedule), {'skip': True})
-        planned = self.plan(checkout, created + 3 * 3600, **schedule)
+        self.assertEqual(self.plan(checkout, created + 2 * 3600 - 1, **schedule), {'skip': True})
+        planned = self.plan(checkout, created + 2 * 3600, **schedule)
         self.assertRegex(planned['version'], r'^0\.2\.1-nightly\.[0-9]{8}\.18$')
         # A nightly started by hand always builds.
         self.assertFalse(self.plan(checkout, created + 3 * 3600, GITHUB_RUN_NUMBER='19')['skip'])
