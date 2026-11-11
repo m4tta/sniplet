@@ -18,7 +18,23 @@ pub enum Claim {
 
 /// Become the running Sniplet, or hand `args` to the one that runs.
 pub fn claim(args: &[String]) -> io::Result<Claim> {
-    claim_name(name()?, args)
+    #[cfg(target_os = "windows")]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        // Named pipes live in one machine-wide namespace, so the name carries the user.
+        let name = format!("sniplet-{}", user()).to_ns_name::<GenericNamespaced>()?;
+        claim_name(name, None, args)
+    }
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        let path = socket_path();
+        claim_name(
+            path.clone().to_fs_name::<GenericFilePath>()?,
+            Some(&path),
+            args,
+        )
+    }
 }
 
 /// Accept arguments from later launches on a background thread, in the order they arrive.
@@ -32,24 +48,32 @@ pub fn serve(listener: Listener, mut on_args: impl FnMut(Vec<String>) + Send + '
     });
 }
 
-fn claim_name(name: Name<'static>, args: &[String]) -> io::Result<Claim> {
+/// `socket_file` is the Unix socket file behind `name`, which a crash can leave behind.
+fn claim_name(
+    name: Name<'static>,
+    socket_file: Option<&std::path::Path>,
+    args: &[String],
+) -> io::Result<Claim> {
     let mut last_error = None;
     // Two launches at the same time can both miss a listener and race to create one. The loser
     // gets an error, retries, and connects to the winner.
     for attempt in 0..10 {
-        if let Ok(stream) = Stream::connect(name.borrow()) {
-            send(stream, args)?;
+        // A send fails when the running Sniplet quits meanwhile. Then try to take its place.
+        if let Ok(stream) = Stream::connect(name.borrow())
+            && send(stream, args).is_ok()
+        {
             return Ok(Claim::Forwarded);
         }
         match ListenerOptions::new().name(name.borrow()).create_sync() {
             Ok(listener) => return Ok(Claim::First(listener)),
             Err(error) => {
                 // A socket file that refuses connections twice is left over from a crash.
-                #[cfg(unix)]
-                if attempt == 1 && error.kind() == io::ErrorKind::AddrInUse {
-                    let _ = std::fs::remove_file(socket_path());
+                if let Some(file) = socket_file
+                    && attempt == 1
+                    && error.kind() == io::ErrorKind::AddrInUse
+                {
+                    let _ = std::fs::remove_file(file);
                 }
-                let _ = attempt;
                 last_error = Some(error);
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -106,13 +130,6 @@ fn user() -> String {
         .unwrap_or_default()
 }
 
-/// Named pipes live in one machine-wide namespace, so the name carries the user.
-#[cfg(target_os = "windows")]
-fn name() -> io::Result<Name<'static>> {
-    use interprocess::local_socket::GenericNamespaced;
-    format!("sniplet-{}", user()).to_ns_name::<GenericNamespaced>()
-}
-
 /// A file in a folder only this user can write: the runtime folder on Linux, the per-user
 /// temporary folder on macOS.
 #[cfg(unix)]
@@ -120,12 +137,6 @@ fn socket_path() -> std::path::PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
         .join(format!("sniplet-{}.sock", user()))
-}
-
-#[cfg(unix)]
-fn name() -> io::Result<Name<'static>> {
-    use interprocess::local_socket::GenericFilePath;
-    socket_path().to_fs_name::<GenericFilePath>()
 }
 
 #[cfg(test)]
@@ -137,7 +148,7 @@ mod tests {
     #[test]
     fn a_second_launch_hands_its_arguments_to_the_first() {
         let name = || test_name(&format!("sniplet-test-{}", std::process::id()));
-        let Claim::First(listener) = claim_name(name(), &[]).unwrap() else {
+        let Claim::First(listener) = claim_name(name(), None, &[]).unwrap() else {
             panic!("the first claim must own the lock");
         };
         let (sender, received) = mpsc::channel();
@@ -145,7 +156,7 @@ mod tests {
 
         let args = vec!["--settings".to_owned(), "shot.png".to_owned()];
         assert!(matches!(
-            claim_name(name(), &args).unwrap(),
+            claim_name(name(), None, &args).unwrap(),
             Claim::Forwarded
         ));
         let got = received.recv_timeout(Duration::from_secs(5)).unwrap();
