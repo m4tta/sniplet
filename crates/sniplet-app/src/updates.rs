@@ -852,6 +852,23 @@ pub(crate) fn restore(store: &SettingsStore) -> anyhow::Result<Document> {
     Ok(document)
 }
 
+impl Editor {
+    /// A later launch handed over `--restore-update`: bring back the screenshot saved before the
+    /// update. Work already open in the editor wins, and the saved screenshot stays on disk.
+    pub(crate) fn restore_forwarded_update(&mut self) {
+        if self.document.is_some() {
+            return;
+        }
+        let Ok(store) = self.settings_store() else {
+            return;
+        };
+        if let Ok(document) = restore(&store) {
+            self.load(document, "Sniplet is updated. Your screenshot is back.");
+            clear_recovery(&store);
+        }
+    }
+}
+
 pub(crate) fn clear_recovery(store: &SettingsStore) {
     let project = recovery_path(store);
     let _ = std::fs::remove_file(project.with_extension("png"));
@@ -1193,6 +1210,25 @@ mod tests {
         assert!(!recovery_path(&store).exists());
         assert!(!recovery_path(&store).with_extension("png").exists());
         assert!(restore(&store).is_err());
+    }
+
+    #[test]
+    fn a_forwarded_restore_fills_an_empty_editor_and_never_replaces_open_work() {
+        let (busy, _fake, directory) = fixture();
+        let store = SettingsStore::at(directory.path().join("settings.json"));
+        save_recovery(&recovery_path(&store), busy.document.as_ref().unwrap()).unwrap();
+
+        let mut busy = busy;
+        let before = busy.export_pixels().unwrap();
+        busy.restore_forwarded_update();
+        assert_eq!(busy.export_pixels().unwrap(), before);
+        assert!(recovery_path(&store).exists());
+
+        let mut empty = Editor::new(None, Default::default(), 1.0);
+        empty.settings_path = busy.settings_path.clone();
+        empty.restore_forwarded_update();
+        assert_eq!(empty.export_pixels().unwrap(), before);
+        assert!(!recovery_path(&store).exists());
     }
 
     #[test]
