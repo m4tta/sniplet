@@ -17,6 +17,7 @@ mod quick_menu;
 mod self_test;
 mod settings_window;
 mod shell;
+mod single_instance;
 mod startup;
 mod tools;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -61,6 +62,20 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "artifacts/self-test".into()),
         );
     }
+    let smoke = args.iter().any(|arg| arg == "--smoke");
+    // Test runs start their own copies next to a running Sniplet.
+    let listener = if smoke || rune::is_headless() {
+        None
+    } else {
+        match single_instance::claim(&args) {
+            Ok(single_instance::Claim::First(listener)) => Some(listener),
+            Ok(single_instance::Claim::Forwarded) => return Ok(()),
+            Err(error) => {
+                eprintln!("Sniplet could not check for a running copy: {error}");
+                None
+            }
+        }
+    };
     let mut startup_messages = Vec::new();
     let restoring = args.iter().any(|arg| arg == updates::RESTORE_ARG);
     let document_result = if restoring {
@@ -107,7 +122,6 @@ fn main() -> anyhow::Result<()> {
     if recovered && let Ok(store) = sniplet_platform::SettingsStore::for_app() {
         updates::clear_recovery(&store);
     }
-    let smoke = args.iter().any(|arg| arg == "--smoke");
     SMOKE.store(smoke, Ordering::Relaxed);
     // macOS reports a login launch only once its event loop runs; `setup` checks it there.
     let minimized = !smoke && startup::start_minimized(&args, false);
@@ -138,6 +152,12 @@ fn main() -> anyhow::Result<()> {
     let app = rune::App::new(spec)
         .init(move || {
             let mut editor = Editor::new(document, settings, scale);
+            if let Some(listener) = listener {
+                let inbox = editor.inbox.clone();
+                single_instance::serve(listener, move |args| {
+                    inbox.send(move |editor, _| relaunched(editor, &args));
+                });
+            }
             if !startup_messages.is_empty() {
                 editor.status = startup_messages.join(" · ");
             }
@@ -160,6 +180,23 @@ fn main() -> anyhow::Result<()> {
     shell::set_editor(app.handle());
     app.run();
     Ok(())
+}
+
+/// Another launch of Sniplet handed over its arguments: act on them as a fresh start would.
+fn relaunched(editor: &mut Editor, args: &[String]) {
+    // A login launch while Sniplet already runs changes nothing.
+    if startup::start_minimized(args, false) {
+        return;
+    }
+    shell::show_editor();
+    if args.iter().any(|arg| arg == "--demo") {
+        editor.load(self_test::demo(), "Ready");
+    } else if let Some(path) = args.iter().find(|arg| !arg.starts_with('-')) {
+        editor.load_path(path.into());
+    }
+    if args.iter().any(|arg| arg == "--settings") {
+        editor.open_settings(settings_window::Page::General);
+    }
 }
 
 /// Runs once when the editor's runtime starts, with the waker that wakes its loop.
