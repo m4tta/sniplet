@@ -1,12 +1,13 @@
 name: CI
 
-# Checks PRs and pushes to main. Docs-only changes skip it.
+# Checks PRs and pushes to main. Changes only to docs, the website (site/), or release.yml skip it.
 # Release builds live in release.yml.
 on:
   pull_request:
     paths-ignore: &docs
       - 'docs/**'
       - '**.md'
+      - 'site/**'
       - '.github/workflows/release.yml'
   push:
     branches: [main]

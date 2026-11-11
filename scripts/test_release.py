@@ -104,8 +104,14 @@ class ReleaseTests(unittest.TestCase):
         self.origin = origin
         return checkout
 
-    def commit(self):
-        self.git('commit', '-q', '--allow-empty', '-m', 'change')
+    def commit(self, path='app.txt'):
+        """Commit one more line to path, so commits differ and a pathspec can match them."""
+        file = self.root / 'checkout' / path
+        file.parent.mkdir(exist_ok=True)
+        with file.open('a') as handle:
+            handle.write('change\n')
+        self.git('add', path)
+        self.git('commit', '-q', '-m', 'change')
         return self.git('rev-parse', 'HEAD')
 
     def plan(self, checkout, now=None, **values):
@@ -143,6 +149,8 @@ class ReleaseTests(unittest.TestCase):
         created = release.release_tags(checkout)[NIGHTLY]
         schedule = {'GITHUB_EVENT_NAME': 'schedule', 'GITHUB_RUN_NUMBER': '18'}
         self.assertEqual(self.plan(checkout, created + 5 * 3600, **schedule), {'skip': True})
+        self.assertEqual(self.plan(checkout, created + 7 * 3600, **schedule), {'skip': True})
+        self.commit('site/index.html')  # The website deploys on its own.
         self.assertEqual(self.plan(checkout, created + 7 * 3600, **schedule), {'skip': True})
         self.commit()
         self.assertEqual(self.plan(checkout, created + 5 * 3600, **schedule), {'skip': True})
