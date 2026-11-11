@@ -64,11 +64,11 @@ fn main() -> anyhow::Result<()> {
     }
     let smoke = args.iter().any(|arg| arg == "--smoke");
     // Test runs start their own copies next to a running Sniplet.
-    let listener = if smoke || rune::is_headless() {
+    let instance = if smoke || rune::is_headless() {
         None
     } else {
         match single_instance::claim(&args) {
-            Ok(single_instance::Claim::First(listener)) => Some(listener),
+            Ok(single_instance::Claim::First(instance)) => Some(instance),
             Ok(single_instance::Claim::Forwarded) => return Ok(()),
             Err(error) => {
                 eprintln!("Sniplet could not check for a running copy: {error}");
@@ -152,9 +152,9 @@ fn main() -> anyhow::Result<()> {
     let app = rune::App::new(spec)
         .init(move || {
             let mut editor = Editor::new(document, settings, scale);
-            if let Some(listener) = listener {
+            if let Some(instance) = instance {
                 let inbox = editor.inbox.clone();
-                single_instance::serve(listener, move |args| {
+                single_instance::serve(instance, move |args| {
                     inbox.send(move |editor, _| relaunched(editor, &args));
                 });
             }
@@ -189,7 +189,9 @@ fn relaunched(editor: &mut Editor, args: &[String]) {
         return;
     }
     shell::show_editor();
-    if args.iter().any(|arg| arg == "--demo") {
+    if args.iter().any(|arg| arg == updates::RESTORE_ARG) {
+        editor.restore_forwarded_update();
+    } else if args.iter().any(|arg| arg == "--demo") {
         editor.load(self_test::demo(), "Ready");
     } else if let Some(path) = args.iter().find(|arg| !arg.starts_with('-')) {
         editor.load_path(path.into());
