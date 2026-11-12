@@ -200,34 +200,28 @@ Without `MACOS_DEVELOPER_ID_P12`, packages use ad hoc signing and are not
 notarized. Pull request checks from this repository get the secrets, so they
 sign and notarize too.
 
-Only the Apple Developer account holder can make a Developer ID certificate:
-
-1. Make a private key and a certificate signing request (CSR):
-   `openssl req -new -newkey rsa:2048 -nodes -keyout developer-id.key -out developer-id.csr -subj "/CN=Sniplet Developer ID"`.
-2. In the Apple Developer portal, open **Certificates → +**, select
-   **Developer ID Application** (G2 Sub-CA), upload the CSR, and download
-   `developerID_application.cer`.
-3. Make the `.p12` and set the secrets:
-
-   ```sh
-   openssl x509 -inform DER -in developerID_application.cer -out developer-id.pem
-   openssl pkcs12 -export -legacy -inkey developer-id.key -in developer-id.pem -out developer-id.p12
-   base64 -w0 developer-id.p12 | gh secret set MACOS_DEVELOPER_ID_P12
-   gh secret set MACOS_DEVELOPER_ID_P12_PASSWORD
-   ```
-
-For notarization, open **App Store Connect → Users and Access → Integrations →
-App Store Connect API → Team Keys**, and make a key with the **Developer** role.
-Apple lets you download the `.p8` file one time only.
+The Developer ID certificates are shared by all of Matthew Anderson's apps
+(team `9HJ5C43XM8`). Do not make a new one: Apple allows only a few. Infisical
+"The Vault" (`dev`) keeps them as `APPLE_DEVELOPER_ID_APP_P12` (base64 `.p12`,
+3DES so `security import` accepts it) and `APPLE_DEVELOPER_ID_P12_PASSWORD`.
+They expire on 2027-12-12. To set or renew the GitHub secrets:
 
 ```sh
-gh secret set APPLE_API_KEY_P8 < AuthKey_XXXXXXXXXX.p8
-gh secret set APPLE_API_KEY_ID --body XXXXXXXXXX
-gh secret set APPLE_API_ISSUER_ID --body <issuer UUID>
+vault="--projectId 0ba2b37b-c423-46d1-bba0-b6b8256d0da7 --env dev --plain --silent"
+infisical secrets get APPLE_DEVELOPER_ID_APP_P12 $vault | tr -d '\r\n' | gh secret set MACOS_DEVELOPER_ID_P12
+infisical secrets get APPLE_DEVELOPER_ID_P12_PASSWORD $vault | tr -d '\r\n' | gh secret set MACOS_DEVELOPER_ID_P12_PASSWORD
 ```
 
-Infisical "The Vault" (`dev`) has copies as `SNIPLET_RELEASE_APPLE_*`. Keep them
-there and nowhere else. A Developer ID certificate is valid for five years.
+Each app has its own App Store Connect API key for notarization. Sniplet uses
+the Team key `sniplet-notarize` (**Developer** role). Infisical keeps it as
+`SNIPLET_APPLE_NOTARY_KEY_P8` (base64 `.p8`) and `SNIPLET_APPLE_NOTARY_KEY_ID`.
+The issuer ID is the same for the whole account.
+
+```sh
+infisical secrets get SNIPLET_APPLE_NOTARY_KEY_P8 $vault | base64 -d | gh secret set APPLE_API_KEY_P8
+infisical secrets get SNIPLET_APPLE_NOTARY_KEY_ID $vault | tr -d '\r\n' | gh secret set APPLE_API_KEY_ID
+gh secret set APPLE_API_ISSUER_ID --body fcc2a9a6-5446-4c9b-bd37-04b0e947816c
+```
 
 ## Platform limits
 
