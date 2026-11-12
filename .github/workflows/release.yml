@@ -6,7 +6,8 @@ name: Release
 # nightly that passed. `scripts/release.py plan` makes these decisions.
 # Releases go to GitHub Releases. See docs/releases.md.
 # Pull request: a pull request that changes packaging runs the build jobs with a
-# throwaway version, so `vpk` and Mac signing are tested before merge. It has no
+# throwaway version, so `vpk`, Mac signing, and notarization are tested
+# before merge. It has no
 # tag and no release.
 on:
   pull_request:
@@ -15,6 +16,7 @@ on:
       - scripts/release.py
       - scripts/macos_dmg.py
       - scripts/package.sh
+      - packaging/macos/**
       - scripts/package.ps1
       - scripts/requirements-release.txt
       - crates/sniplet-platform/Cargo.toml
@@ -132,17 +134,20 @@ jobs:
       - name: Build application
         run: cargo build -p sniplet-app --release --locked
 
-      # A fixed self-signed identity keeps the macOS Screen Recording permission
-      # across updates. Without the secrets, packages use ad hoc signing.
-      - name: Import macOS signing identity
+      # Developer ID signing and Apple notarization. The Developer ID keeps the
+      # macOS Screen Recording permission across updates. Without the secrets
+      # (for example, a fork), packages use ad hoc signing and are not notarized.
+      - name: Import Developer ID certificate and notary key
         if: runner.os == 'macOS'
         env:
-          P12: ${{ secrets.MACOS_SIGNING_P12 }}
-          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           if [ -z "$P12" ]; then
-            echo "::warning::MACOS_SIGNING_P12 is not set. Using ad hoc signing."
-            echo "SNIPLET_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "::warning::MACOS_DEVELOPER_ID_P12 is not set. Using ad hoc signing without notarization."
             exit 0
           fi
           keychain="$RUNNER_TEMP/release.keychain-db"
@@ -152,11 +157,24 @@ jobs:
           security unlock-keychain -p "$password" "$keychain"
           echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
           security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/signing.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          security find-certificate -c "Sniplet Self-Signed" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
-          echo "SNIPLET_SIGNING_IDENTITY=Sniplet Self-Signed" >> "$GITHUB_ENV"
+          # The SHA-1 hash names the identity, so the workflow does not repeat the team name.
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application: / {print $2; exit}')
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_DEVELOPER_ID_P12 has no Developer ID Application identity."
+            exit 1
+          fi
+          printf '%s\n' "$API_KEY" > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials sniplet-notary --keychain "$keychain" \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID"
+          rm "$RUNNER_TEMP/notary.p8"
+          {
+            echo "SNIPLET_SIGNING_IDENTITY=$identity"
+            echo "SNIPLET_MACOS_KEYCHAIN=$keychain"
+            echo "SNIPLET_NOTARY_PROFILE=sniplet-notary"
+          } >> "$GITHUB_ENV"
 
       # vpk makes the Velopack update packages and installers. Keep its version the
       # same as the velopack crate in crates/sniplet-platform/Cargo.toml.

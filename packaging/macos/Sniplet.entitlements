@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened runtime with no exceptions. vpk uses this file instead of its .NET
+     defaults, which allow JIT, unsigned memory, and other libraries. -->
+<plist version="1.0">
+<dict/>
+</plist>

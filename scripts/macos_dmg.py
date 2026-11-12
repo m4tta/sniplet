@@ -2,6 +2,7 @@
 """Create and check a drag-to-Applications disk image on macOS."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -74,6 +75,31 @@ def create(bundle, destination):
         image.replace(destination)
     print(f'Created and verified Mac disk image: {destination}')
     return destination
+
+
+def notarize(image, identity, profile, keychain=None):
+    """Sign the disk image with Developer ID, notarize it with Apple, and staple the ticket.
+
+    `profile` is a `notarytool store-credentials` profile. The stapled ticket lets
+    Gatekeeper accept the first open without a network check.
+    """
+    keychain = ['--keychain', str(keychain)] if keychain else []
+    subprocess.run(['codesign', '--force', '--timestamp', '--sign', identity, *keychain, str(image)], check=True)
+    result = subprocess.run(['xcrun', 'notarytool', 'submit', str(image), '--keychain-profile', profile,
+                             *keychain, '--wait', '--output-format', 'json'],
+                            capture_output=True, text=True)
+    try:
+        status = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise ValueError(f'notarytool failed: {result.stdout}{result.stderr}') from None
+    if status.get('status') != 'Accepted':
+        log = subprocess.run(['xcrun', 'notarytool', 'log', status.get('id', ''), '--keychain-profile', profile,
+                              *keychain], capture_output=True, text=True)
+        raise ValueError(f'Notarization failed: {result.stdout}\n{log.stdout}{log.stderr}')
+    subprocess.run(['xcrun', 'stapler', 'staple', str(image)], check=True)
+    subprocess.run(['spctl', '--assess', '--type', 'open', '--context', 'context:primary-signature',
+                    '-vv', str(image)], check=True)
+    print(f'Notarized and stapled Mac disk image: {image}')
 
 
 if __name__ == '__main__':

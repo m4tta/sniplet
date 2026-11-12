@@ -297,12 +297,25 @@ def package(target, build):
         downloads = {ending: made(ending) for ending in DOWNLOADS[target]}
     elif mac:
         # vpk adds its updater to the bundle and signs it again, with hardened runtime.
+        # With a notary profile (release.yml), vpk also notarizes and staples the app.
+        identity = os.environ.get('SNIPLET_SIGNING_IDENTITY', '-')
+        notary = os.environ.get('SNIPLET_NOTARY_PROFILE')
+        keychain = os.environ.get('SNIPLET_MACOS_KEYCHAIN')
         made = vpk_pack(target, build, bundle, 'Sniplet', output, '--noInst',
-                        '--signAppIdentity', os.environ.get('SNIPLET_SIGNING_IDENTITY', '-'))
+                        '--signAppIdentity', identity,
+                        '--signEntitlements', str(ROOT / 'packaging/macos/Sniplet.entitlements'),
+                        *(['--notaryProfile', notary] if notary else []),
+                        *(['--keychain', keychain] if keychain else []))
         import macos_dmg
         unpacked = Path(tempfile.mkdtemp(prefix='sniplet-portable-', dir=output))
         subprocess.run(['ditto', '-x', '-k', str(made('-Portable.zip')), str(unpacked)], check=True)
-        macos_dmg.create(unpacked / 'Sniplet.app', directory / build.filename(target, '.dmg'))
+        app = unpacked / 'Sniplet.app'
+        if notary:
+            # Gatekeeper must accept the app that the update package and the DMG carry.
+            subprocess.run(['spctl', '--assess', '--type', 'execute', '-vv', str(app)], check=True)
+        image = macos_dmg.create(app, directory / build.filename(target, '.dmg'))
+        if notary:
+            macos_dmg.notarize(image, identity, notary, keychain)
     else:
         # vpk wants the executable at the top of its folder.
         app_dir = ROOT / 'dist-release' / 'appimage'
@@ -401,7 +414,7 @@ def publish(github, build, directory):
     title = f'Sniplet {"Nightly " if nightly else ""}{build.version}'
     notes = (f'Source commit: `{build.sha}`.\n\n'
              'Packages: macOS Apple Silicon and Intel, Windows x64, and Linux x64.\n'
-             'Use SHA256SUMS to check the downloads. Mac packages are not notarized. '
+             'Use SHA256SUMS to check the downloads. '
              'Linux packages need the native libraries listed in the README.\n\n'
              'Mac: open the DMG, drag Sniplet to Applications, then eject the disk image.\n'
              'Windows: run the Setup file, or unzip the Portable file into a folder.\n'

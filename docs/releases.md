@@ -115,7 +115,8 @@ releases. Install a new build by hand once.
 | GitHub secret | Use |
 | --- | --- |
 | `UPDATER_SIGNING_KEY` | Ed25519 private key (PEM) that signs `release.json`. Only the publish job gets it. |
-| `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD` | Optional. A self-signed "Sniplet Self-Signed" code signing certificate (base64 `.p12`). |
+| `MACOS_DEVELOPER_ID_P12`, `MACOS_DEVELOPER_ID_P12_PASSWORD` | Developer ID Application certificate and private key (base64 `.p12`) that sign the Mac app and DMG. |
+| `APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` | App Store Connect API key that `notarytool` uses to notarize. |
 | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | IDs for Windows signing through Azure Artifact Signing. They are not secret values. Infisical "The Vault" (`dev`) has copies as `SNIPLET_RELEASE_AZURE_*`. |
 
 ### Update key
@@ -182,35 +183,59 @@ app. Other apps that use the same account are not affected.
 account cannot sign. Renew it in the Azure portal: **Artifact Signing account
 `m4tta` → Identity validations**.
 
-### Mac signing identity
+### Mac signing and notarization
 
-Without the Mac secrets, packages use ad hoc signing. Each update then has a new
-code identity, and macOS can ask for the Screen Recording permission again. A
-fixed self-signed identity keeps the permission across updates. It does not need
-an Apple developer account. Make it once:
+Mac builds are signed with a Developer ID Application certificate, with
+hardened runtime and a secure timestamp. `vpk` notarizes and staples
+`Sniplet.app`, so the in-app update package also carries a notarized app.
+`scripts/macos_dmg.py` then signs, notarizes, and staples the DMG, and checks it
+with `spctl`. `packaging/macos/Sniplet.entitlements` has no hardened runtime
+exceptions. Add an exception only when a feature needs it.
+
+The Developer ID also keeps the Screen Recording permission across updates,
+because macOS ties the permission to the team ID. The first release after a
+change of signing identity asks for the permission again one time.
+
+Without `MACOS_DEVELOPER_ID_P12`, packages use ad hoc signing and are not
+notarized. Pull request checks from this repository get the secrets, so they
+sign and notarize too.
+
+Only the Apple Developer account holder can make a Developer ID certificate:
+
+1. Make a private key and a certificate signing request (CSR):
+   `openssl req -new -newkey rsa:2048 -nodes -keyout developer-id.key -out developer-id.csr -subj "/CN=Sniplet Developer ID"`.
+2. In the Apple Developer portal, open **Certificates → +**, select
+   **Developer ID Application** (G2 Sub-CA), upload the CSR, and download
+   `developerID_application.cer`.
+3. Make the `.p12` and set the secrets:
+
+   ```sh
+   openssl x509 -inform DER -in developerID_application.cer -out developer-id.pem
+   openssl pkcs12 -export -legacy -inkey developer-id.key -in developer-id.pem -out developer-id.p12
+   base64 -w0 developer-id.p12 | gh secret set MACOS_DEVELOPER_ID_P12
+   gh secret set MACOS_DEVELOPER_ID_P12_PASSWORD
+   ```
+
+For notarization, open **App Store Connect → Users and Access → Integrations →
+App Store Connect API → Team Keys**, and make a key with the **Developer** role.
+Apple lets you download the `.p8` file one time only.
 
 ```sh
-openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -subj "/CN=Sniplet Self-Signed" \
-  -addext "keyUsage=critical,digitalSignature" \
-  -addext "extendedKeyUsage=critical,codeSigning" \
-  -keyout sniplet-signing.key -out sniplet-signing.crt
-openssl pkcs12 -export -legacy -name "Sniplet Self-Signed" \
-  -inkey sniplet-signing.key -in sniplet-signing.crt -out sniplet-signing.p12
-base64 < sniplet-signing.p12 | gh secret set MACOS_SIGNING_P12
-gh secret set MACOS_SIGNING_P12_PASSWORD
+gh secret set APPLE_API_KEY_P8 < AuthKey_XXXXXXXXXX.p8
+gh secret set APPLE_API_KEY_ID --body XXXXXXXXXX
+gh secret set APPLE_API_ISSUER_ID --body <issuer UUID>
 ```
 
-Keep the `.p12` and its password outside the repository, with an offline copy.
-If the identity changes, macOS asks for the permission again one time.
+Infisical "The Vault" (`dev`) has copies as `SNIPLET_RELEASE_APPLE_*`. Keep them
+there and nowhere else. A Developer ID certificate is valid for five years.
 
 ## Platform limits
 
-Mac releases are not signed by Apple. Windows releases have an Authenticode
-signature from Azure Artifact Signing.
+Mac releases are signed with a Developer ID and notarized by Apple. Windows
+releases have an Authenticode signature from Azure Artifact Signing.
 
-- macOS: packages are not notarized. Gatekeeper blocks the first launch. Open
-  **System Settings → Privacy & Security**, then select **Open Anyway**.
+- macOS: Gatekeeper asks one time to confirm that you want to open an app from
+  the internet.
 - Windows: SmartScreen shows "Matthew Anderson" as publisher for the installer
   and the app. It can still warn on first launch until downloads build
   reputation for the certificate.
