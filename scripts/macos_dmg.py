@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 ICON = Path(__file__).resolve().parent.parent / 'assets/icons/sniplet.icns'
 
@@ -24,6 +25,16 @@ def layout(app_name):
         'text_size': 13,
         'icon_locations': {app_name: (140, 150), 'Applications': (400, 150)},
     }
+
+
+def detach(mount):
+    """Unmount a checked image. macOS can scan a signed app on a new mount and
+    keep the disk busy for a few seconds, so wait for that before forcing."""
+    for _ in range(5):
+        if subprocess.run(['hdiutil', 'detach', str(mount)]).returncode == 0:
+            return
+        time.sleep(3)
+    subprocess.run(['hdiutil', 'detach', '-force', str(mount)], check=True)
 
 
 def create(bundle, destination):
@@ -70,7 +81,7 @@ def create(bundle, destination):
                 if (bundle / path).read_bytes() != (installed / path).read_bytes():
                     raise ValueError('The disk image changed the app bundle')
         finally:
-            subprocess.run(['hdiutil', 'detach', str(mount)], check=True)
+            detach(mount)
         # Replace the output only after the new image passes all checks.
         image.replace(destination)
     print(f'Created and verified Mac disk image: {destination}')
