@@ -20,7 +20,7 @@ mod upload;
 mod window_background;
 
 #[cfg(target_os = "macos")]
-pub use capture::capture_desktop_region;
+pub use capture::{capture_desktop_region, request_screen_recording};
 
 pub use capture::{
     CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_monitor,

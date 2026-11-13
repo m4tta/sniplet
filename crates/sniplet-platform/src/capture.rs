@@ -252,6 +252,14 @@ pub fn capture_monitors() -> Result<Vec<CapturedFrame>> {
     })
 }
 
+/// Ask macOS for the Screen Recording permission that captures need, and return whether
+/// Sniplet has it. macOS shows its prompt one time and does not wait for the answer. Later
+/// calls only read the state.
+#[cfg(target_os = "macos")]
+pub fn request_screen_recording() -> bool {
+    core_graphics::access::ScreenCaptureAccess.request()
+}
+
 /// Capture a live rectangle in Quartz desktop points, excluding selector windows.
 #[cfg(target_os = "macos")]
 pub fn capture_desktop_region(

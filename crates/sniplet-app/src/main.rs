@@ -216,6 +216,18 @@ fn setup(editor: &mut Editor, waker: Waker) {
         return;
     }
     shell::install(editor);
+    // Ask at startup, so that the first capture does not meet the system prompt. The request
+    // waits on the macOS permission service, so it runs on a worker.
+    #[cfg(target_os = "macos")]
+    editor.inbox.spawn(
+        sniplet_platform::request_screen_recording,
+        |editor, allowed, _| {
+            if !allowed {
+                // Opening Sniplet again only shows this copy, so the user must quit first.
+                editor.status = "To capture, allow Sniplet in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen Sniplet.".into();
+            }
+        },
+    );
     #[cfg(target_os = "macos")]
     if startup::start_minimized(rune::extra_args(), macos::launched_at_login()) {
         MINIMIZED.store(true, Ordering::Relaxed);
