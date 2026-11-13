@@ -84,8 +84,15 @@ The app checks the Ed25519 signature on `release.json` with the public key in
 `assets/update-public-key.hex`. The signed manifest gives the name, size, and
 SHA-256 checksum of the Velopack package for each target. Velopack downloads
 that package and checks its size and checksum. The app does not read
-Velopack's own `releases.<channel>.json` feed. Automatic checks download a
-verified update in the background. Installation waits for **Restart & update**.
+Velopack's own `releases.<channel>.json` feed. Automatic checks run each hour
+and download a verified update in the background. Installation waits for
+**Restart & update**.
+
+A check always goes to the newest release, and never steps through the ones
+between. While an update waits for a restart, the hourly check still runs. If
+a newer release is out, the app downloads it in the background and swaps it in.
+The waiting update stays ready until then. A restart during that download waits
+for it, then installs the newer release.
 
 The app never installs an older version:
 

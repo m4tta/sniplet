@@ -22,8 +22,11 @@ use crate::{
 
 pub(crate) const RESTORE_ARG: &str = "--restore-update";
 const RELEASES_URL: &str = "https://github.com/m4tta/sniplet/releases";
-const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Nightlies come every few hours, so check each hour. A ready update is then at most an
+/// hour behind the newest release.
+const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How often the timer asks whether a check is due.
+const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 
 /// A release found by a check.
@@ -147,6 +150,8 @@ pub(crate) struct Updates {
     generation: u64,
     check_running: bool,
     check_pending: Option<bool>,
+    /// A newer release downloads behind the ready one, which stays installable until then.
+    replacing: bool,
     last_check: Option<Instant>,
     next_automatic: Option<Instant>,
     pub(crate) notice_dismissed: bool,
@@ -166,6 +171,7 @@ impl Updates {
             generation: 0,
             check_running: false,
             check_pending: None,
+            replacing: false,
             last_check: None,
             next_automatic: None,
             notice_dismissed: false,
@@ -178,7 +184,8 @@ impl Updates {
 
     fn automatic_check_due(&self) -> bool {
         !self.check_running
-            && !self.phase.transferring()
+            && !self.replacing
+            && !self.phase.busy()
             && self
                 .next_automatic
                 .is_none_or(|next| Instant::now() >= next)
@@ -192,7 +199,7 @@ enum InstallError {
 }
 
 impl Editor {
-    /// Check at startup and once a day. Debug and test builds only check when asked.
+    /// Check at startup and each hour. Debug and test builds only check when asked.
     pub(crate) fn schedule_updates(&mut self) {
         if cfg!(any(test, debug_assertions)) {
             return;
@@ -206,17 +213,22 @@ impl Editor {
                         editor.check_for_updates(true);
                     }
                 });
-                std::thread::sleep(RETRY_INTERVAL);
+                std::thread::sleep(POLL_INTERVAL);
             }
         });
     }
 
     /// An automatic check downloads what it finds; a check from Settings only shows it.
+    /// While an update is ready, an automatic check looks for a newer one and keeps the
+    /// ready one on screen.
     pub(crate) fn check_for_updates(&mut self, automatic: bool) {
-        if self.updates.phase.transferring() {
+        let ready = matches!(self.updates.phase, Phase::Ready(_));
+        if self.updates.phase.busy() || self.updates.replacing || (ready && !automatic) {
             return;
         }
-        self.updates.phase = Phase::Checking;
+        if !ready {
+            self.updates.phase = Phase::Checking;
+        }
         if self.updates.check_running {
             self.updates.check_pending = Some(automatic);
             return;
@@ -249,13 +261,20 @@ impl Editor {
         }
         let now = Instant::now();
         updates.last_check = Some(now);
-        updates.next_automatic = Some(
-            now + if result.is_ok() {
-                CHECK_INTERVAL
-            } else {
-                RETRY_INTERVAL
-            },
-        );
+        updates.next_automatic = Some(now + CHECK_INTERVAL);
+        // A restart started while this check ran. The install keeps the ready update.
+        if updates.phase.busy() {
+            return;
+        }
+        if let Phase::Ready(ready) = &updates.phase {
+            if let Ok(Some(release)) = result
+                && release.in_app()
+                && release.version != ready.version
+            {
+                self.replace_ready_update(Arc::new(release));
+            }
+            return;
+        }
         updates.phase = match result {
             Ok(Some(release)) => Phase::Available(Arc::new(release)),
             Ok(None) => Phase::UpToDate,
@@ -302,6 +321,41 @@ impl Editor {
         );
     }
 
+    /// Download a newer release while the ready one stays installable, then swap it in.
+    /// A restart in the meantime waits for this, because Velopack deletes the older
+    /// package when the newer one arrives.
+    fn replace_ready_update(&mut self, release: Arc<Release>) {
+        self.updates.replacing = true;
+        let generation = self.updates.generation;
+        let backend = self.updates.backend.clone();
+        let package = release.clone();
+        self.inbox.spawn(
+            move || backend.download(&package),
+            move |editor, result, _| {
+                let updates = &mut editor.updates;
+                updates.replacing = false;
+                if updates.generation != generation {
+                    return;
+                }
+                let restart = match &updates.phase {
+                    Phase::Ready(_) => false,
+                    Phase::Installing(ready) => {
+                        updates.phase = Phase::Ready(ready.clone());
+                        true
+                    }
+                    _ => return,
+                };
+                if let Ok(staged) = result {
+                    updates.staged = Some(staged);
+                    updates.phase = Phase::Ready(release);
+                }
+                if restart {
+                    editor.restart_to_update();
+                }
+            },
+        );
+    }
+
     /// Save settings and the open screenshot, start the updater, then quit. The updater
     /// installs and starts the new version.
     pub(crate) fn restart_to_update(&mut self) {
@@ -309,6 +363,10 @@ impl Editor {
             Phase::Ready(release) | Phase::InstallFailed(release, _) => release.clone(),
             _ => return,
         };
+        if self.updates.replacing {
+            self.updates.phase = Phase::Installing(release);
+            return;
+        }
         let Some(staged) = self.updates.staged.take() else {
             self.download_update();
             return;
@@ -357,6 +415,8 @@ impl Editor {
     ) {
         match result {
             Ok(()) => {
+                // Drop a check that is still running, so it cannot start a download.
+                self.updates.generation += 1;
                 self.updates.phase = Phase::Idle;
                 tx.quit();
             }
@@ -374,7 +434,10 @@ impl Editor {
 
     /// A new channel drops what the old one found, and checks again.
     pub(crate) fn set_update_channel(&mut self, channel: ReleaseChannel) {
-        if self.settings.update_channel == channel || self.updates.phase.busy() {
+        if self.settings.update_channel == channel
+            || self.updates.phase.busy()
+            || self.updates.replacing
+        {
             return;
         }
         self.settings.update_channel = channel;
@@ -773,7 +836,7 @@ pub(crate) fn settings_section<S: 'static>(
             .child(view::setting_row(
                 k,
                 "Check for updates automatically",
-                "One time each day. Sniplet asks before it installs.",
+                "One time each hour. Sniplet asks before it installs.",
                 automatic,
             )),
     )
@@ -941,6 +1004,8 @@ mod tests {
         /// Checks run in a copy that cannot update itself.
         manual: AtomicBool,
         fail_install: AtomicBool,
+        /// Checks on Stable find this version instead of 9.0.0.
+        stable: Mutex<Option<String>>,
     }
 
     struct FakeStaged(Arc<Fake>, String);
@@ -981,7 +1046,13 @@ mod tests {
             }
             Ok(Some(Release {
                 version: match channel {
-                    ReleaseChannel::Stable => "9.0.0".into(),
+                    ReleaseChannel::Stable => self
+                        .0
+                        .stable
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "9.0.0".into()),
                     ReleaseChannel::Nightly => "9.1.0-nightly.20261104.1".into(),
                 },
                 size: 6_400_000,
@@ -1024,6 +1095,7 @@ mod tests {
             Inbox::drain(editor, |editor| &editor.inbox, tx);
             let updates = &editor.updates;
             let running = updates.check_running
+                || updates.replacing
                 || matches!(updates.phase, Phase::Downloading(_) | Phase::Installing(_))
                 || editor.settings_save_running;
             if !running {
@@ -1141,6 +1213,71 @@ mod tests {
         };
         assert_eq!(release.version, "9.0.0");
         assert!(editor.render_update_notice(&ui::kit(true)).is_none());
+    }
+
+    #[test]
+    fn a_ready_update_moves_to_the_newest_release_and_stays_ready_meanwhile() {
+        let (mut editor, fake, _directory) = fixture();
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["check Stable", "download 9.0.0"]);
+
+        // A check from Settings never replaces a ready update.
+        editor.check_for_updates(false);
+        settle(&mut editor, &mut Tx::default());
+        assert!(fake.take().is_empty());
+
+        // The next automatic check finds 9.0.2. Until it downloads, 9.0.0 stays ready.
+        *fake.stable.lock().unwrap() = Some("9.0.2".into());
+        let held = fake.gate.lock().unwrap();
+        editor.check_for_updates(true);
+        let ready = |editor: &Editor| match &editor.updates.phase {
+            Phase::Ready(release) => release.version.clone(),
+            phase => panic!("expected a ready update, got {phase:?}"),
+        };
+        assert_eq!(ready(&editor), "9.0.0");
+        drop(held);
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["check Stable", "download 9.0.2"]);
+        assert_eq!(ready(&editor), "9.0.2");
+
+        // The same release again downloads nothing.
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["check Stable"]);
+
+        // A restart while 9.0.3 downloads waits for it, then installs 9.0.3.
+        let held = fake.gate.lock().unwrap();
+        editor.replace_ready_update(Arc::new(Release {
+            version: "9.0.3".into(),
+            size: 6_400_000,
+            reinstall: false,
+            manual: false,
+            package: None,
+        }));
+        editor.restart_to_update();
+        assert!(editor.updates.installing());
+        drop(held);
+        settle(&mut editor, &mut Tx::default());
+        assert_eq!(fake.take(), ["download 9.0.3", "install 9.0.3 true"]);
+
+        // A restart while a check runs installs the ready update, and the check's result
+        // neither replaces the install nor downloads.
+        let (mut editor, fake, _directory) = fixture();
+        editor.check_for_updates(true);
+        settle(&mut editor, &mut Tx::default());
+        fake.take();
+        *fake.stable.lock().unwrap() = Some("9.0.4".into());
+        let held = fake.gate.lock().unwrap();
+        editor.check_for_updates(true);
+        editor.restart_to_update();
+        assert!(editor.updates.installing());
+        drop(held);
+        settle(&mut editor, &mut Tx::default());
+        let mut log = fake.take();
+        log.sort();
+        assert_eq!(log, ["check Stable", "install 9.0.0 true"]);
+        assert_eq!(editor.updates.phase, Phase::Idle);
     }
 
     #[test]
