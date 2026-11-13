@@ -96,3 +96,8 @@ pub fn set_launch_at_startup(enabled: bool) -> Result<bool, String> {
         Ok(service.status() == SMAppServiceStatus::Enabled)
     })
 }
+
+/// Whether AppKit has `window` as its key window now.
+pub fn is_key(window: &WindowHandle) -> bool {
+    with_native(window, |native| native.isKeyWindow()).unwrap_or(false)
+}

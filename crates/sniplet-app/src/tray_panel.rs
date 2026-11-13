@@ -69,16 +69,34 @@ pub(crate) fn toggle(rect: tray_icon::Rect, editor: &mut Editor) {
             open.window.close();
         }
         Click::Open => {
-            let size = (quick_menu::WIDTH, quick_menu::TRAY.height());
-            if let Some((position, scale)) = placement(rect, &screens(), size) {
-                let physical = (
-                    (position.0 * scale).round() as i32,
-                    (position.1 * scale).round() as i32,
-                );
-                open(physical, size, editor);
-            }
+            open_beside(rect, editor);
         }
     }
+}
+
+/// Sniplet was opened again from the Dock, Finder or Spotlight: open the panel at the menu
+/// bar icon, as a click on it does, and keep a panel that is already open. False when there is
+/// no icon to open it at.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_at_tray(editor: &mut Editor) -> bool {
+    if PANEL.with(|panel| matches!(&*panel.borrow(), Lifecycle::Open(_))) {
+        return true;
+    }
+    crate::shell::tray_rect().is_some_and(|rect| open_beside(rect, editor))
+}
+
+/// Open the panel beside the tray icon at `rect`. False when no display holds a place for it.
+fn open_beside(rect: tray_icon::Rect, editor: &mut Editor) -> bool {
+    let size = (quick_menu::WIDTH, quick_menu::TRAY.height());
+    let Some((position, scale)) = placement(rect, &screens(), size) else {
+        return false;
+    };
+    let physical = (
+        (position.0 * scale).round() as i32,
+        (position.1 * scale).round() as i32,
+    );
+    open(physical, size, editor);
+    true
 }
 
 /// Mark panel `id` closed, if it is still the open one.
@@ -119,7 +137,7 @@ fn open(position: (i32, i32), size: (f32, f32), editor: &Editor) {
         WindowSpec::new(format!("tray-panel-{id}"), spec)
             .state(state)
             .on_focus(|panel, focused, tx| {
-                if !focused {
+                if !focused && !still_key(panel.id) {
                     panel.dismiss(tx);
                 }
             })
@@ -138,6 +156,22 @@ fn open(position: (i32, i32), size: (f32, f32), editor: &Editor) {
     window.focus();
     PANEL.with(|panel| *panel.borrow_mut() = Lifecycle::Open(Open { id, window }));
     crate::shell::show_tray_tooltip(false);
+}
+
+/// Whether panel `id` is still AppKit's key window. Just after the panel opens, winit sends a
+/// stale focus loss from its hidden source window while the panel stays key. Rune skips it
+/// only for its native panels, so without this check the menu closes as soon as it opens.
+#[cfg(target_os = "macos")]
+fn still_key(id: u64) -> bool {
+    PANEL.with(|panel| match &*panel.borrow() {
+        Lifecycle::Open(open) if open.id == id => crate::macos::is_key(&open.window),
+        _ => false,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn still_key(_: u64) -> bool {
+    false
 }
 
 /// Keep the panel off the taskbar, as a pop-up menu is: a tool window gets no button.
