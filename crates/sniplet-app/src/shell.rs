@@ -62,6 +62,12 @@ pub fn has_tray() -> bool {
     with(|services| services.tray.is_some())
 }
 
+/// Where the menu bar icon is, in physical pixels.
+#[cfg(target_os = "macos")]
+pub(crate) fn tray_rect() -> Option<tray_icon::Rect> {
+    with(|services| services.tray.as_ref().and_then(TrayIcon::rect))
+}
+
 /// Hide the editor without dropping its document or leaving a taskbar or Dock icon.
 pub fn hide_editor() {
     with(|services| {

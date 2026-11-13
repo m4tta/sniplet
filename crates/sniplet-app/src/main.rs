@@ -177,6 +177,8 @@ fn main() -> anyhow::Result<()> {
             min_size: Some((900.0, 560.0)),
             ..Default::default()
         });
+    #[cfg(target_os = "macos")]
+    let app = app.on_reopen(reopened);
     shell::set_editor(app.handle());
     app.run();
     Ok(())
@@ -199,6 +201,21 @@ fn relaunched(editor: &mut Editor, args: &[String]) {
     if args.iter().any(|arg| arg == "--settings") {
         editor.open_settings(settings_window::Page::General);
     }
+}
+
+/// macOS opened Sniplet again (a Dock, Finder or Spotlight click). It does not start a second
+/// copy, and a Sniplet hidden to the menu bar is an accessory app, which Rune's default never
+/// brings back. With no window on screen, open the tray menu at the menu bar icon, or else
+/// show the editor.
+#[cfg(target_os = "macos")]
+fn reopened(editor: &mut Editor, has_visible_windows: bool, _: &mut Tx) -> bool {
+    if has_visible_windows {
+        return false;
+    }
+    if !tray_panel::open_at_tray(editor) {
+        shell::show_editor();
+    }
+    true
 }
 
 /// Runs once when the editor's runtime starts, with the waker that wakes its loop.
