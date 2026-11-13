@@ -146,9 +146,13 @@ fn hide_from_taskbar(window: &WindowHandle) {
     use raw_window_handle::RawWindowHandle;
     use windows::Win32::{
         Foundation::HWND,
-        UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SetWindowLongPtrW, ShowWindow,
-            WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        UI::{
+            Shell::{ITaskbarList, TaskbarList},
+            WindowsAndMessaging::{
+                GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_APPWINDOW,
+                WS_EX_TOOLWINDOW,
+            },
         },
     };
     let _ = window.with_raw_handle(|handle| {
@@ -156,14 +160,19 @@ fn hide_from_taskbar(window: &WindowHandle) {
             return;
         };
         let hwnd = HWND(handle.hwnd.get() as *mut std::ffi::c_void);
-        // Rune has already shown it, still cloaked; the taskbar reads the style when it shows
-        // again.
+        // Rune has already shown it, still cloaked, so the taskbar has its button. Remove the
+        // button directly: hiding and showing the window to apply the style would move focus
+        // away, and the panel closes when it loses focus.
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
             let style = (style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            if let Ok(taskbar) =
+                CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+                && taskbar.HrInit().is_ok()
+            {
+                let _ = taskbar.DeleteTab(hwnd);
+            }
         }
     });
 }
