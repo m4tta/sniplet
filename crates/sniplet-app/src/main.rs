@@ -223,7 +223,8 @@ fn setup(editor: &mut Editor, waker: Waker) {
         sniplet_platform::request_screen_recording,
         |editor, allowed, _| {
             if !allowed {
-                editor.status = "Sniplet cannot capture other apps yet. Allow Sniplet in System Settings > Privacy & Security > Screen & System Audio Recording, then open Sniplet again.".into();
+                // Opening Sniplet again only shows this copy, so the user must quit first.
+                editor.status = "To capture, allow Sniplet in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen Sniplet.".into();
             }
         },
     );

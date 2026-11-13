@@ -215,7 +215,7 @@ open dist/Sniplet-debug.app
 ```
 
 Sniplet asks for the Screen Recording permission when it starts. Allow Sniplet in
-System Settings, then open it again. Test area capture with
+System Settings, then quit Sniplet and open it again. Test area capture with
 Cmd+Shift+2, fullscreen capture with Cmd+Shift+1, and window capture with
 Cmd+Shift+3. Escape should cancel either interactive capture and leave the
 editor hidden; Cmd+Shift+8 reopens it. Press A in the editor to test arrows.
