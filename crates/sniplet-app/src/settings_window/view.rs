@@ -5,17 +5,17 @@ use rune::{
     icon, row, text,
 };
 use rune_kit::{
-    Button, ButtonVariant, Card, ControlSize, Divider, Field as KitField, IconButton,
-    IconButtonVariant, Kit, SegmentedControl, ShortcutRecorder, ShortcutRecorderState, Switch,
-    TextInput, Toast, ToastRegion,
+    Button, ButtonVariant, Card, ControlSize, Dialog, Divider, Field as KitField, IconButton,
+    IconButtonVariant, Keybind, Kit, SegmentedControl, ShortcutRecorder, ShortcutRecorderState,
+    Switch, TextInput, Toast, ToastRegion,
 };
 use sniplet_platform::{
     ExportFormat, HotkeySettings, Settings, ThemePreference, WindowBackground, WindowCaptureStyle,
 };
 
 use super::{
-    Field, Page, SHORTCUT_GROUPS, SettingsUi, Slider, UploadKind, hotkey_text, shortcut_name,
-    step_limit,
+    Field, Page, SHORTCUT_GROUPS, SettingsUi, Slider, UploadKind, hotkey_text,
+    open_keyboard_settings, shortcut_label, shortcut_name, step_limit,
 };
 use crate::ui::{self, icons, rgb};
 
@@ -91,9 +91,140 @@ pub(super) fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
             stick_bottom: false,
         })
         .child(col().w_full().padding(24.0).child(page));
-    root.child(tabs(s, &k))
+    let root = root
+        .child(tabs(s, &k))
         .child(k.scroll_bar(content).w_full().grow(1.0).min_h(0.0))
-        .children(toast(s, &k))
+        .children(toast(s, &k));
+    let mut layer = Vec::new();
+    conflict_sheet(s, &k, &mut layer);
+    rune_kit::root(root, layer)
+}
+
+/// The sheet for shortcuts that macOS also uses. The user picks which side keeps the keys:
+/// Sniplet (they turn the macOS ones off) or macOS (Sniplet moves to free keys).
+fn conflict_sheet(s: &SettingsUi, k: &Kit, layer: &mut Vec<El>) {
+    let conflicts = s.conflicts();
+    if !s.conflict_sheet || conflicts.is_empty() {
+        return;
+    }
+    let slots = s.settings.hotkeys.slots();
+    let moves = crate::system_shortcuts::replacements(&slots, &s.system);
+    let count = |n: usize| {
+        if n == 1 {
+            "1 of Sniplet's shortcuts".to_owned()
+        } else {
+            format!("{n} of Sniplet's shortcuts")
+        }
+    };
+    let mut keys: Vec<String> = conflicts
+        .iter()
+        .map(|&index| shortcut_label(slots[index]))
+        .collect();
+    let last = keys.pop().unwrap_or_default();
+    let keys = if keys.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", keys.join(", "))
+    };
+    let option = |title: &str| {
+        col()
+            .grow(1.0)
+            .shrink()
+            .min_w(0.0)
+            .gap(10.0)
+            .padding(14.0)
+            .radius(k.radius.lg)
+            .fill(k.c.layer_02)
+            .child(
+                text(title.to_owned())
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_base),
+            )
+    };
+    let theirs = option("Give them to Sniplet")
+        .child(note(
+            k,
+            format!(
+                "In Keyboard Shortcuts…, turn off the macOS shortcuts that use {keys}. The \
+                 screenshot ones are under Screenshots."
+            ),
+        ))
+        .child(el().grow(1.0))
+        .child(
+            Button::new("Open Keyboard Settings…")
+                .variant(ButtonVariant::Contrast)
+                .on_press(|_: &mut SettingsUi| open_keyboard_settings())
+                .build(k)
+                .key("open-keyboard-settings"),
+        );
+    let mut ours = option("Leave them with macOS");
+    if moves.is_empty() {
+        ours = ours.child(note(
+            k,
+            "Sniplet found no free keys. Close this and record new ones.",
+        ));
+    } else {
+        ours = ours.child(note(k, "Sniplet moves to keys that are free:"));
+        for (index, keys) in &moves {
+            ours = ours.child(
+                row()
+                    .gap(8.0)
+                    .center_y()
+                    .child(
+                        text(shortcut_name(*index))
+                            .font(k.ty.text_xsmall)
+                            .color(k.c.text_base),
+                    )
+                    .child(text("→").font(k.ty.text_xsmall).color(k.c.text_muted))
+                    .child(Keybind::new(&crate::quick_menu::keycaps(keys)).build(k)),
+            );
+        }
+        ours = ours.child(el().grow(1.0)).child(
+            Button::new(if moves.len() == 1 {
+                "Change 1 shortcut".to_owned()
+            } else {
+                format!("Change {} shortcuts", moves.len())
+            })
+            .on_press(|s: &mut SettingsUi| s.move_conflicts())
+            .build(k)
+            .key("move-conflicts"),
+        );
+    }
+    let footer = row()
+        .justify_between()
+        .center_y()
+        .gap(16.0)
+        .child(
+            el().grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .child(note(k, "Sniplet checks again when you come back.")),
+        )
+        .child(
+            Button::new("Not now")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut SettingsUi| s.conflict_sheet = false)
+                .build(k)
+                .key("conflicts-later"),
+        );
+    Dialog::new(
+        "shortcut-conflicts",
+        format!("macOS already uses {}", count(conflicts.len())),
+    )
+    .description("Both apps act when you press these keys. Pick which one gets them.")
+    .open(true)
+    .fit()
+    .width(560.0)
+    .on_close(|s: &mut SettingsUi| s.conflict_sheet = false)
+    .child(
+        col()
+            .gap(14.0)
+            .px(16.0)
+            .pb(16.0)
+            .child(row().gap(10.0).child(theirs).child(ours))
+            .child(footer),
+    )
+    .build(k, layer);
 }
 
 /// The page tabs, as a preferences window's toolbar shows them: an icon over a title.
@@ -521,6 +652,41 @@ fn shortcuts(s: &SettingsUi, k: &Kit) -> El {
                 .fill(k.c.danger.bg),
         );
     }
+    let conflicts = s.conflicts();
+    if !conflicts.is_empty() {
+        page = page.child(
+            row()
+                .key("shortcut-conflict-notice")
+                .role("alert")
+                .w_full()
+                .center_y()
+                .gap(12.0)
+                .px(16.0)
+                .py(12.0)
+                .radius(k.radius.xl)
+                .fill(k.c.warning.bg)
+                .child(icon(&icons::CIRCLE_ALERT, 16.0).color(k.c.warning.icon))
+                .child(
+                    text(if conflicts.len() == 1 {
+                        "macOS also uses 1 of these shortcuts.".to_owned()
+                    } else {
+                        format!("macOS also uses {} of these shortcuts.", conflicts.len())
+                    })
+                    .grow(1.0)
+                    .shrink()
+                    .min_w(0.0)
+                    .font(k.ty.ui)
+                    .color(k.c.text_base)
+                    .wrap(),
+                )
+                .child(
+                    Button::new("Fix conflicts")
+                        .on_press(|s: &mut SettingsUi| s.conflict_sheet = true)
+                        .build(k)
+                        .key("fix-conflicts"),
+                ),
+        );
+    }
     for (group, items) in SHORTCUT_GROUPS {
         let mut rows = card(k);
         for (position, &(index, label)) in items.iter().enumerate() {
@@ -760,14 +926,14 @@ fn upload_section(s: &SettingsUi, k: &Kit) -> El {
                     &icons::CIRCLE_CHECK,
                     k.c.success.fg,
                     "Found",
-                    "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. AWS_SESSION_TOKEN is optional.",
+                    "Read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or from your AWS credentials file.",
                 )
             } else {
                 (
                     &icons::CIRCLE_ALERT,
                     k.c.danger.fg,
                     "Not found",
-                    "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then restart Sniplet.",
+                    "Add your keys to ~/.aws/credentials, or set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and restart Sniplet.",
                 )
             };
             upload.child(rule(k)).child(setting_row(

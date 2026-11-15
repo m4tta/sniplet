@@ -129,6 +129,20 @@ impl Monitor {
         )
     }
 
+    /// The layout a full capture of the monitor would give.
+    #[cfg(not(target_os = "macos"))]
+    pub fn from_geometry(geometry: &sniplet_platform::MonitorGeometry) -> Self {
+        Self::new(
+            geometry.id,
+            sniplet_platform::ScreenPoint {
+                x: geometry.x,
+                y: geometry.y,
+            },
+            (geometry.width, geometry.height),
+            geometry.scale_factor,
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub fn from_info(info: &sniplet_platform::MonitorInfo) -> Self {
         Self::new(

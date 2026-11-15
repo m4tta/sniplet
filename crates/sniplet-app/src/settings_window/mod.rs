@@ -11,9 +11,9 @@ use rune::{
     Waker, WindowHandle, WindowSpec,
 };
 use rune_kit::ShortcutRecorderState;
-use sniplet_platform::{CloudUploadConfig, HotkeySettings, Settings};
+use sniplet_platform::{CloudUploadConfig, HotkeySettings, Settings, SystemShortcut};
 
-use crate::{editor::Editor, ui::Inbox, ui::icons, updates::UpdateSummary};
+use crate::{editor::Editor, system_shortcuts, ui::Inbox, ui::icons, updates::UpdateSummary};
 
 pub(crate) mod view;
 
@@ -190,7 +190,15 @@ pub(crate) fn open(editor: &mut Editor, page: Page) -> anyhow::Result<()> {
         !rune::is_headless(),
         "Settings opens its own window, which headless runs do not create"
     );
-    let ui = SettingsUi::new(editor, page);
+    let mut ui = SettingsUi::new(editor, page);
+    if ui.conflict_sheet {
+        // The sheet opens by itself one time. This save is not the user's change, so no toast
+        // confirms it.
+        editor.settings.shortcut_conflicts_shown = true;
+        ui.settings.shortcut_conflicts_shown = true;
+        editor.persist_settings();
+        ui.shown_save = editor.settings_revision;
+    }
     ui.refresh_startup();
     let link = Link {
         inbox: ui.inbox.clone(),
@@ -241,7 +249,11 @@ fn poll(ui: &mut SettingsUi, _: f64, tx: &mut Tx) -> bool {
 }
 
 /// Escape and Ctrl/Cmd W close the window. A recording shortcut takes its keys first.
-fn on_key(_: &mut SettingsUi, event: &KeyEvent, tx: &mut Tx) -> bool {
+fn on_key(ui: &mut SettingsUi, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if ui.conflict_sheet && matches!(event.key, Key::Escape) {
+        ui.conflict_sheet = false;
+        return true;
+    }
     let close = matches!(event.key, Key::Escape) || event.is_command('w');
     if close {
         tx.close_window();
@@ -250,10 +262,14 @@ fn on_key(_: &mut SettingsUi, event: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// Leaving the window ends a recording, so global shortcuts work again. Coming back reads the
-/// launch-at-login state, which system settings can change.
+/// launch-at-login state and the system's shortcuts, which system settings can change.
 fn on_focus(ui: &mut SettingsUi, focused: bool, _: &mut Tx) {
     if focused {
         ui.refresh_startup();
+        ui.system = read_system_shortcuts();
+        if ui.conflicts().is_empty() {
+            ui.conflict_sheet = false;
+        }
     } else {
         ui.stop_recording();
         ui.after_input();
@@ -293,6 +309,10 @@ pub(crate) struct SettingsUi {
     sliding: Option<(Slider, u32)>,
     notice: Option<Notice>,
     notice_generation: u64,
+    /// The system's own shortcuts, read when the window opens and when it gets focus.
+    system: Vec<SystemShortcut>,
+    /// Shows the sheet that offers two ways to end a conflict with `system`.
+    conflict_sheet: bool,
 }
 
 impl SettingsUi {
@@ -322,6 +342,9 @@ impl SettingsUi {
             None => values[3] = "us-east-1".into(),
         }
         let snapshot = Snapshot::of(editor);
+        let system = read_system_shortcuts();
+        let conflict_sheet = !settings.shortcut_conflicts_shown
+            && !system_shortcuts::conflicts(&settings.hotkeys.slots(), &system).is_empty();
         let previews = std::array::from_fn(|_| Pixels::new());
         view::render_previews(&previews, settings.window_capture.color);
         Self {
@@ -346,8 +369,26 @@ impl SettingsUi {
             sliding: None,
             notice: None,
             notice_generation: 0,
+            system,
+            conflict_sheet,
             settings,
         }
+    }
+
+    /// The indexes of the shortcuts that the system also uses.
+    fn conflicts(&self) -> Vec<usize> {
+        system_shortcuts::conflicts(&self.settings.hotkeys.slots(), &self.system)
+    }
+
+    /// Give each shortcut in conflict the free keys that the sheet shows.
+    fn move_conflicts(&mut self) {
+        let moves = system_shortcuts::replacements(&self.settings.hotkeys.slots(), &self.system);
+        self.conflict_sheet = false;
+        self.change(move |s| {
+            for (index, text) in &moves {
+                *s.hotkeys.slots_mut()[*index] = text.clone();
+            }
+        });
     }
 
     fn receive(&mut self, snapshot: Snapshot) {
@@ -647,6 +688,26 @@ impl Drop for SettingsUi {
         }
         // `open` registers only one window at a time, so the one closing is the one registered.
         let _ = OPEN.try_with(|open| *open.borrow_mut() = None);
+    }
+}
+
+/// The system's shortcuts. A test sets its own, so that no test depends on the keyboard
+/// settings of the machine it runs on.
+fn read_system_shortcuts() -> Vec<SystemShortcut> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        sniplet_platform::system_shortcuts()
+    }
+}
+
+/// Open the macOS Keyboard settings, where the user turns the system's shortcuts off.
+fn open_keyboard_settings() {
+    let result = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.keyboard?Shortcuts")
+        .spawn();
+    if let Err(error) = result {
+        eprintln!("Could not open Keyboard settings: {error}");
     }
 }
 

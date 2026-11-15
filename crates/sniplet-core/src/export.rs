@@ -8,7 +8,7 @@ use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
 };
 
-use crate::{Document, RenderOptions, Result, SnipletError};
+use crate::{RenderOptions, Result, Scene, SnipletError};
 
 /// Largest image Sniplet builds from file data: 2^27 pixels, 512 MiB as RGBA8.
 ///
@@ -61,7 +61,7 @@ fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<RgbaImage> {
     Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
 }
 
-impl Document {
+impl Scene {
     pub fn encode(&self, format: ExportFormat, options: &RenderOptions<'_>) -> Result<Vec<u8>> {
         let rendered = self.render(options)?;
         let mut bytes = Vec::new();

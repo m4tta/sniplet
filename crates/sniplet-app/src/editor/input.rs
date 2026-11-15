@@ -7,7 +7,7 @@ use sniplet_core::{
 
 use super::{
     Command, Drag as EditDrag, EditHandle, Editor, INLINE_PIXELS, MeasureSession, Panel, handle_at,
-    render_options, resize_from_handle,
+    next_counter, render_options, resize_from_handle,
 };
 use crate::tools::{Size, Tool};
 
@@ -82,6 +82,7 @@ impl Editor {
 
     /// A press on the canvas, in canvas points.
     fn pointer_down(&mut self, event: &Drag, tx: &mut Tx) {
+        self.end_key_group();
         let mods = tx.mods();
         let pan_button = tx.button() == PointerButton::Middle;
         tx.blur();
@@ -228,14 +229,13 @@ impl Editor {
         if !pan && self.tool == Tool::Counter {
             let mut kind = AnnotationKind::Counter {
                 center: p,
-                value: self.counter,
+                value: next_counter(doc.annotations()),
                 font_size: Size::Counter.default_value(),
             };
             let mut style = self.style;
             self.sizes.apply(&mut kind, &mut style);
             let id = doc.add_annotation(kind, style);
             let _ = doc.select(Some(id));
-            self.counter = (self.counter + 1).min(99);
             self.refresh();
             return;
         }
@@ -278,6 +278,8 @@ impl Editor {
                 let _ = doc.select(Some(id));
                 moving = Some(id);
                 magnifier_edit = None;
+                // The copy is an edit: the preview, and exports that reuse it, must show it.
+                self.refresh();
             }
         }
         // A pan keeps the raster selection.
@@ -400,7 +402,12 @@ impl Editor {
                     p,
                     &drag.points,
                     "",
-                    self.counter,
+                    next_counter(
+                        self.document
+                            .as_ref()
+                            .map(|doc| doc.annotations())
+                            .unwrap_or_default(),
+                    ),
                     self.hide,
                     drag.constrain,
                 )
@@ -507,6 +514,11 @@ impl Editor {
     /// A key the window heard. True when the editor used it.
     pub(super) fn key(&mut self, event: &Keystroke, tx: &mut Tx) -> bool {
         let key = event.key.as_str();
+        // The OS repeat of a held arrow or bracket continues its run's undo group. Any other
+        // key, or a new press, ends it.
+        if !(event.held && (is_nudge_key(key) || key == "shift")) {
+            self.end_key_group();
+        }
         if self.recognized_text.is_some() {
             // The dialog's field leaves with it. A blur here would ask Rune to edit a field
             // whose text is gone.
@@ -561,7 +573,7 @@ impl Editor {
                         {
                             return true;
                         }
-                        let document = doc.clone();
+                        let document = doc.snapshot();
                         let key = key.to_owned();
                         let revision = self.preview_revision;
                         self.measure_pending = Some((key.clone(), event.shift));
@@ -740,6 +752,9 @@ impl Editor {
 
     pub(super) fn key_up(&mut self, event: &Keystroke) -> bool {
         let key = event.key.as_str();
+        if is_nudge_key(key) {
+            self.end_key_group();
+        }
         if self
             .measure_pending
             .as_ref()
@@ -774,6 +789,7 @@ impl Editor {
 
     /// The window lost focus: drop held-key modes so none sticks.
     pub(crate) fn deactivated(&mut self) {
+        self.end_key_group();
         self.clear_measure();
         self.space = false;
         self.quick_zoom = false;
@@ -833,9 +849,12 @@ impl Editor {
             "up" => ImagePoint::new(0.0, -step),
             _ => ImagePoint::new(0.0, step),
         };
-        if let Some(doc) = &mut self.document {
+        if let Some(doc) = &self.document {
             if let Some(id) = doc.selected() {
-                let _ = doc.move_annotation(id, delta);
+                self.begin_key_group();
+                if let Some(doc) = &mut self.document {
+                    let _ = doc.move_annotation(id, delta);
+                }
                 self.refresh();
             } else if let Some(r) = self.selection {
                 self.selection = Some(ImageRect::new(
@@ -856,9 +875,6 @@ impl Editor {
             return;
         };
         let selected = selected.map(|a| a.id);
-        let Some(doc) = &mut self.document else {
-            return;
-        };
         if symmetric {
             rect = rect.expanded(if key == "]" { step } else { -step });
         } else {
@@ -873,10 +889,23 @@ impl Editor {
             return;
         }
         if let Some(id) = selected {
-            let _ = doc.resize_annotation(id, rect);
+            self.begin_key_group();
+            if let Some(doc) = &mut self.document {
+                let _ = doc.resize_annotation(id, rect);
+            }
             self.refresh();
-        } else {
+        } else if let Some(doc) = &self.document {
             self.selection = Some(rect.clipped(doc.width(), doc.height()));
+        }
+    }
+
+    /// Opens the undo group of an arrow-key run, so its repeats undo as one step. Every
+    /// path that ends the run calls `end_key_group`.
+    fn begin_key_group(&mut self) {
+        if !self.key_group
+            && let Some(doc) = &mut self.document
+        {
+            self.key_group = doc.begin_group().is_ok();
         }
     }
 
@@ -909,6 +938,11 @@ impl Editor {
         tx.blur();
         self.refresh();
     }
+}
+
+/// Keys that move or resize the selection, one step per press or repeat.
+fn is_nudge_key(key: &str) -> bool {
+    matches!(key, "left" | "right" | "up" | "down" | "[" | "]")
 }
 
 impl EditDrag {

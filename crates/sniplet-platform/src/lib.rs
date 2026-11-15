@@ -15,6 +15,7 @@ mod ocr;
 mod qr;
 mod scroll;
 mod settings;
+mod system_shortcuts;
 pub mod updates;
 mod upload;
 mod window_background;
@@ -23,9 +24,10 @@ mod window_background;
 pub use capture::{capture_desktop_region, request_screen_recording};
 
 pub use capture::{
-    CaptureSource, CapturedFrame, MonitorInfo, ScreenPoint, WindowInfo, capture_monitor,
-    capture_monitor_region, capture_monitor_under_pointer, capture_monitors, capture_window,
-    capture_window_with_background, list_monitors, list_windows, window_at_point,
+    CaptureSource, CapturedFrame, MonitorGeometry, MonitorInfo, ScreenPoint, WindowInfo,
+    capture_monitor, capture_monitor_region, capture_monitor_under_pointer, capture_monitors,
+    capture_window, capture_window_with_background, list_monitor_geometry, list_monitors,
+    list_windows, window_app_names, window_at_point,
 };
 pub use clipboard::Clipboard;
 pub use error::{PlatformError, Result};
@@ -42,6 +44,7 @@ pub use scroll::{
 pub use settings::{
     AnnotationColor, ExportFormat, HotkeySettings, Settings, SettingsStore, ThemePreference,
 };
+pub use system_shortcuts::{SystemShortcut, system_shortcuts};
 pub use upload::{CloudUploadConfig, UploadedImage, s3_credentials_available, upload_image};
 pub use window_background::{
     WindowBackground, WindowCaptureStyle, compose_window_capture, load_wallpaper_image,

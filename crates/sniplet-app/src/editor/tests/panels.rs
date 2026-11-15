@@ -369,13 +369,23 @@ fn the_dragged_file_holds_the_export_of_the_image_or_the_selection() {
     );
     doc.set_crop(ImageRect::new(80.0, 60.0, 200.0, 150.0));
     let mut h = Harness::new(doc, WINDOW, true);
+    let mut paths = Vec::new();
     for selection in [None, Some(ImageRect::new(100.0, 80.0, 70.0, 50.0))] {
         h.update(|e| e.selection = selection);
         let path = h.editor().export_drag_file().unwrap();
         assert_eq!(path.extension().unwrap(), "png");
         assert_eq!(image::open(&path).unwrap().to_rgba8(), h.export());
-        std::fs::remove_file(path).unwrap();
+        paths.push(path);
     }
+    assert!(
+        paths[0].exists(),
+        "a dragged file stays for the app it was dropped on"
+    );
+    drop(h);
+    assert!(
+        !paths[0].exists() && !paths[1].exists(),
+        "the editor deletes its drag files when it closes"
+    );
 }
 
 #[test]

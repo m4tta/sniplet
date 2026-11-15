@@ -176,13 +176,32 @@ fn counter_buttons_clamp_and_set_the_next_number() {
     h.click_image(200.0, 130.0);
     h.click("counter-value-up");
     h.click_image(280.0, 170.0);
-    let values: Vec<u32> = h
-        .annotations()
+    assert_eq!(counter_values(&h), [0, 2, 3]);
+}
+
+#[test]
+fn a_new_counter_follows_the_highest_number_after_undo_and_delete() {
+    let mut h = editor();
+    h.press("c");
+    for x in [100.0, 160.0, 220.0] {
+        h.click_image(x, 90.0);
+    }
+    assert_eq!(counter_values(&h), [1, 2, 3]);
+    h.undo();
+    h.click_image(220.0, 150.0);
+    assert_eq!(counter_values(&h), [1, 2, 3], "undo frees its number");
+    // Delete the selected 3: the next one is 3 again.
+    h.press("delete");
+    h.click_image(280.0, 150.0);
+    assert_eq!(counter_values(&h), [1, 2, 3]);
+}
+
+fn counter_values(h: &Harness) -> Vec<u32> {
+    h.annotations()
         .iter()
         .map(|annotation| match annotation.kind {
             AnnotationKind::Counter { value, .. } => value,
             _ => panic!("expected a counter"),
         })
-        .collect();
-    assert_eq!(values, [0, 2, 3]);
+        .collect()
 }

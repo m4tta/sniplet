@@ -20,6 +20,8 @@ const MARGIN: f32 = 8.0;
 /// A click on the tray icon first deactivates an open panel, closing it, and
 /// arrives here shortly after. That click must not reopen the panel.
 const REOPEN_GUARD: Duration = Duration::from_millis(250);
+/// How long a closed panel takes to leave the screen: a few display frames.
+const PANEL_LEAVES: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Lifecycle<W> {
@@ -224,7 +226,7 @@ struct Screen {
 }
 
 fn screens() -> Vec<Screen> {
-    sniplet_platform::list_monitors()
+    sniplet_platform::list_monitor_geometry()
         .unwrap_or_default()
         .into_iter()
         .map(|monitor| {
@@ -308,8 +310,11 @@ impl TrayPanel {
             return;
         };
         self.dismiss(tx);
-        self.editor
-            .send(move |editor, tx| crate::shell::run(command, editor, tx));
+        // The command can capture the screen, so it starts once the closed panel has left it.
+        self.editor.spawn(
+            || std::thread::sleep(PANEL_LEAVES),
+            move |editor, (), tx| crate::shell::run(command, editor, tx),
+        );
     }
 }
 
@@ -440,9 +445,16 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.shell_request, Some(rune::Shell::Close));
         assert_eq!(editor.shell_request, None);
-        editor.update(|editor, tx| {
-            Inbox::drain(editor, |e| &e.inbox, tx);
-        });
+        // The command waits for the panel to leave the screen.
+        for _ in 0..100 {
+            editor.update(|editor, tx| {
+                Inbox::drain(editor, |e| &e.inbox, tx);
+            });
+            if editor.shell_request.is_some() {
+                break;
+            }
+            std::thread::sleep(PANEL_LEAVES / 5);
+        }
         assert_eq!(editor.shell_request, Some(rune::Shell::Quit));
     }
 }

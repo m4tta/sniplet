@@ -151,8 +151,9 @@ S3-compatible uploads can also be configured in the settings file:
 ```
 
 Merge this field into the existing settings. S3 credentials are read from
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`;
-they are never written into settings. Without a public base URL, upload returns
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`,
+or else from the shared credentials file (`~/.aws/credentials`, profile
+`AWS_PROFILE` or `default`); they are never written into settings. Without a public base URL, upload returns
 a signed GET link valid for up to seven days.
 
 ## Package

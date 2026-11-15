@@ -1,6 +1,6 @@
 //! The window capture picker: a frozen image of every monitor that highlights the frontmost
 //! window under the pointer. A click captures that window; Escape or a right-click cancels.
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use rune::{Color, Cursor, Cx, El, Key, KeyEvent, Pixels, PointerPress, Tx, WindowHandle, el};
 use sniplet_platform::{CapturedFrame, ScreenPoint, WindowInfo};
@@ -15,6 +15,17 @@ use crate::{
 /// What a click on a window does with its ID.
 type CaptureWindow = fn(u32, &Inbox<Editor>);
 
+/// A frozen monitor and the pixels its overlay shows, made on the worker.
+type Frame = (CapturedFrame, (u32, u32, Vec<u8>));
+
+/// How long the closed overlays take to leave the screen before the window capture. Windows
+/// and macOS read the window itself, under any overlay. X11 can read the screen.
+const OVERLAYS_LEAVE: Duration = if cfg!(target_os = "linux") {
+    Duration::from_millis(220)
+} else {
+    Duration::ZERO
+};
+
 /// The picking every monitor's overlay shares.
 struct Selection {
     windows: Vec<WindowHandle>,
@@ -25,6 +36,8 @@ struct Selection {
     escape: EscapeSession,
     editor: Inbox<Editor>,
     capture: CaptureWindow,
+    /// App names by window ID. They arrive after the picker opens, as reading them is slow.
+    app_names: HashMap<u32, String>,
 }
 
 impl Selection {
@@ -41,8 +54,8 @@ impl Selection {
         }
     }
 
-    /// Close every overlay, then capture `id`. The capture hides nothing more, and starts
-    /// once the overlays have left the screen.
+    /// Close every overlay, then capture `id`. The picker hid the editor already, so the
+    /// capture waits only for the overlays to leave the screen.
     fn finish(&mut self, id: u32) {
         if self.completed || self.escape.is_cancelled() {
             return;
@@ -63,7 +76,7 @@ impl Selection {
 }
 
 fn start_capture(id: u32, editor: &Inbox<Editor>) {
-    editor.send(move |editor, _| crate::capture::window(id, editor));
+    editor.send(move |editor, _| crate::capture::window(id, editor, OVERLAYS_LEAVE));
 }
 
 /// One monitor's picker window.
@@ -148,10 +161,23 @@ pub(crate) fn open(editor: &mut Editor) -> Result<(), String> {
         move || {
             std::thread::sleep(delay);
             (!session.is_cancelled()).then(|| {
-                Ok::<_, sniplet_platform::PlatformError>((
-                    sniplet_platform::capture_monitors()?,
-                    sniplet_platform::list_windows()?,
-                ))
+                // Listing windows runs beside the capture.
+                std::thread::scope(|scope| {
+                    let windows = scope.spawn(sniplet_platform::list_windows);
+                    let frames = sniplet_platform::capture_monitors().map(|frames| {
+                        frames
+                            .into_iter()
+                            .map(|frame| {
+                                let pixels = crate::editor::display_pixels(&frame.image);
+                                (frame, pixels)
+                            })
+                            .collect::<Vec<Frame>>()
+                    });
+                    let windows = windows
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    Ok::<_, sniplet_platform::PlatformError>((frames?, windows?))
+                })
             })
         },
         move |editor, snapshot, _| {
@@ -178,6 +204,16 @@ pub(crate) fn open(editor: &mut Editor) -> Result<(), String> {
                             &escape,
                             start_capture,
                         )?;
+                        if let Some((_, picker)) = pickers.first() {
+                            picker.inbox.spawn(
+                                sniplet_platform::window_app_names,
+                                |picker, names, _| {
+                                    let mut selection = picker.selection.borrow_mut();
+                                    selection.app_names = names.unwrap_or_default();
+                                    selection.notify();
+                                },
+                            );
+                        }
                         open_pickers(pickers, &escape);
                         Ok(())
                     });
@@ -193,7 +229,7 @@ pub(crate) fn open(editor: &mut Editor) -> Result<(), String> {
 
 /// One picker state per monitor around a shared selection.
 fn pickers(
-    frames: Vec<CapturedFrame>,
+    frames: Vec<Frame>,
     windows: Vec<WindowInfo>,
     own_process_id: u32,
     editor: &Inbox<Editor>,
@@ -213,14 +249,14 @@ fn pickers(
         escape: escape.clone(),
         editor: editor.clone(),
         capture,
+        app_names: HashMap::new(),
     }));
     let pickers = frames
         .into_iter()
         .enumerate()
-        .map(|(screen, frame)| {
+        .map(|(screen, (frame, (width, height, rgba)))| {
             let monitor = Monitor::from_frame(&frame);
             let pixels = Pixels::new();
-            let (width, height, rgba) = crate::editor::display_pixels(&frame.image);
             pixels.set(width, height, rgba);
             let picker = Picker {
                 inbox: Inbox::default(),
@@ -355,10 +391,14 @@ fn view(s: &Picker, _: &mut Cx<Picker>) -> El {
                 .absolute(bounds.x, bounds.y)
                 .size(bounds.w, bounds.h),
         );
-        let label = if selected.title.trim() == selected.app_name.trim() {
-            selected.app_name.clone()
-        } else {
-            format!("{} · {}", selected.app_name, selected.title)
+        let app_name = selection
+            .app_names
+            .get(&selected.id)
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty() && *name != selected.title.trim());
+        let label = match app_name {
+            Some(app_name) => format!("{app_name} · {}", selected.title),
+            None => selected.title.clone(),
         };
         if let Some(room) = visible
             .iter()
@@ -451,14 +491,12 @@ mod tests {
             id,
             process_id: 1000 + id,
             title: format!("Window {id}"),
-            app_name: format!("App {id}"),
             x,
             y,
             width: 300,
             height: 200,
             z_order,
             is_minimized: false,
-            is_maximized: false,
             is_focused: false,
         }
     }
@@ -478,7 +516,11 @@ mod tests {
         let frames = origins
             .iter()
             .enumerate()
-            .map(|(index, origin)| frame(*origin, index))
+            .map(|(index, origin)| {
+                let frame = frame(*origin, index);
+                let pixels = crate::editor::display_pixels(&frame.image);
+                (frame, pixels)
+            })
             .collect();
         pickers(
             frames,

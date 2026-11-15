@@ -323,3 +323,139 @@ fn caller_supplied_system_font_renders_text_and_counters_when_available() {
         .count();
     assert!(changed > 100);
 }
+
+#[test]
+fn a_magnifier_never_shows_what_a_raster_edit_hides() {
+    let secret = Rgba([12, 200, 90, 255]);
+    for source in [None, Some(Point::new(12.0, 12.0))] {
+        let mut document = Document::new(RgbaImage::from_pixel(60, 40, secret));
+        document.add_annotation(
+            AnnotationKind::Redaction {
+                rect: ImageRect::new(0.0, 0.0, 60.0, 40.0),
+            },
+            AnnotationStyle::default(),
+        );
+        document.add_annotation(
+            AnnotationKind::Magnifier {
+                rect: ImageRect::new(30.0, 8.0, 24.0, 24.0),
+                zoom: 2.0,
+                source,
+            },
+            AnnotationStyle::default(),
+        );
+        let rendered = document.render(&RenderOptions::default()).unwrap();
+        assert!(
+            rendered.pixels().all(|pixel| *pixel != secret),
+            "the lens ({source:?}) showed redacted pixels"
+        );
+    }
+}
+
+#[test]
+fn renders_that_reuse_cached_layers_match_a_fresh_render() {
+    let build = |extra: bool| {
+        let mut document = Document::new(RgbaImage::from_fn(48, 32, |x, y| {
+            Rgba([(x * 5) as u8, (y * 7) as u8, (x ^ y) as u8, 255])
+        }));
+        document.add_annotation(
+            AnnotationKind::Blur {
+                rect: ImageRect::new(4.0, 4.0, 20.0, 12.0),
+                radius: 3.0,
+            },
+            AnnotationStyle::default(),
+        );
+        let mut png = std::io::Cursor::new(Vec::new());
+        RgbaImage::from_pixel(3, 2, Rgba([200, 30, 60, 160]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        document.add_annotation(
+            AnnotationKind::Image {
+                origin: Point::new(20.0, 10.0),
+                png_bytes: png.into_inner().into(),
+                size: Some(sniplet_core::ImageSize {
+                    width: 9,
+                    height: 6,
+                }),
+            },
+            AnnotationStyle::default(),
+        );
+        document.set_backdrop(Backdrop {
+            padding: 5,
+            corner_radius: 3,
+            background: Background::Solid {
+                color: Color::new(240, 240, 250, 255),
+            },
+            shadow: Some(Shadow {
+                offset: Point::new(1.0, 2.0),
+                blur_radius: 2.5,
+                color: Color::new(0, 0, 0, 90),
+            }),
+        });
+        if extra {
+            document.add_annotation(
+                AnnotationKind::Rectangle {
+                    rect: ImageRect::new(2.0, 2.0, 30.0, 20.0),
+                },
+                AnnotationStyle::default(),
+            );
+        }
+        document
+    };
+    let mut document = build(false);
+    let options = RenderOptions::default();
+    let first = document.render(&options).unwrap();
+    assert_eq!(document.render(&options).unwrap(), first);
+    // A drawing reuses the cached base and backdrop.
+    document.add_annotation(
+        AnnotationKind::Rectangle {
+            rect: ImageRect::new(2.0, 2.0, 30.0, 20.0),
+        },
+        AnnotationStyle::default(),
+    );
+    assert_eq!(
+        document.render(&options).unwrap(),
+        build(true).render(&options).unwrap()
+    );
+    assert!(document.undo());
+    assert_eq!(document.snapshot().render(&options).unwrap(), first);
+}
+
+#[test]
+fn text_bounds_hold_the_drawn_glyphs() {
+    let mut document = white_document();
+    let id = document.add_annotation(
+        AnnotationKind::Text {
+            origin: Point::new(3.0, 2.0),
+            text: "Wg".into(),
+            font_size: 16.0,
+        },
+        AnnotationStyle::default(),
+    );
+    let bounds = document.annotation(id).unwrap().kind.bounds();
+    let rendered = document
+        .render(&RenderOptions {
+            font_bytes: Some(sniplet_core::FONT),
+            ..RenderOptions::default()
+        })
+        .unwrap();
+    let inked: Vec<_> = rendered
+        .enumerate_pixels()
+        .filter(|(_, _, pixel)| pixel.0 != [255, 255, 255, 255])
+        .map(|(x, y, _)| (x as f32, y as f32))
+        .collect();
+    assert!(!inked.is_empty());
+    for (x, y) in &inked {
+        assert!(
+            *x >= bounds.x - 1.0
+                && *x < bounds.x + bounds.width + 1.0
+                && *y >= bounds.y - 1.0
+                && *y < bounds.y + bounds.height + 1.0,
+            "ink at ({x}, {y}) is outside {bounds:?}"
+        );
+    }
+    let right = inked.iter().map(|(x, _)| *x).fold(0.0, f32::max);
+    assert!(
+        right > bounds.x + bounds.width - 4.0,
+        "{bounds:?} is wider than the text"
+    );
+}

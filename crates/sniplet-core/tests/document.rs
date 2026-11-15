@@ -155,7 +155,13 @@ fn rectangular_text_counter_and_freehand_geometry_resize_predictably() {
         Point::new(text_bounds.x, text_bounds.y),
         Point::new(2.0, 3.0)
     );
-    assert!(text_bounds.width <= 60.0 && text_bounds.height <= 25.0);
+    // The text fills the target along one side and fits the other, up to float rounding.
+    let fits = |size: f32, target: f32| size <= target + 1e-3;
+    assert!(fits(text_bounds.width, 60.0) && fits(text_bounds.height, 25.0));
+    assert!(
+        (text_bounds.width - 60.0).abs() < 1e-3 || (text_bounds.height - 25.0).abs() < 1e-3,
+        "{text_bounds:?}"
+    );
 
     let counter = document.add_annotation(
         AnnotationKind::Counter {
@@ -216,6 +222,29 @@ fn edit_groups_undo_and_redo_as_one_change() {
     assert!(document.annotation(first).is_some());
     assert!(document.annotation(second).is_some());
     assert_eq!(document.crop(), Some(ImageRect::new(5.0, 5.0, 50.0, 40.0)));
+}
+
+#[test]
+fn undo_keeps_the_newest_two_hundred_steps() {
+    let mut document = document();
+    let id = document.add_annotation(
+        AnnotationKind::Rectangle {
+            rect: ImageRect::new(0.0, 0.0, 4.0, 4.0),
+        },
+        AnnotationStyle::default(),
+    );
+    for _ in 0..250 {
+        document.move_annotation(id, Point::new(0.1, 0.0)).unwrap();
+    }
+    let mut steps = 0;
+    while document.undo() {
+        steps += 1;
+    }
+    assert_eq!(steps, 200);
+    assert!(
+        document.annotation(id).is_some(),
+        "the oldest steps are gone"
+    );
 }
 
 #[test]

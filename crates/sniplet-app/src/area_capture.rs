@@ -3,7 +3,7 @@
 //! of each monitor; macOS selects over the live desktop and captures after the release.
 use std::{cell::RefCell, rc::Rc};
 
-use image::{Rgba, RgbaImage};
+use image::RgbaImage;
 use rune::{Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Pixels, Tx, WindowHandle, el};
 use sniplet_core::{Document, ImageRect, Point as ImagePoint};
 
@@ -29,17 +29,22 @@ struct PixelsInRegion {
 }
 
 #[derive(Clone)]
-struct Screen {
-    /// The monitor's pixels: a frozen frame, or on macOS the selected part once captured.
+pub(crate) struct Screen {
+    /// The monitor's pixels: a frozen frame, or the selected part once captured, on macOS
+    /// and for Repeat Capture.
     frame: Option<PixelsInRegion>,
+    /// What the overlay shows of a frozen frame, made off the UI thread. The overlay takes it.
+    display: Option<(u32, u32, Vec<u8>)>,
     layout: Monitor,
     scale_factor: f32,
 }
 
 impl Screen {
-    fn new(frame: sniplet_platform::CapturedFrame) -> Self {
+    /// A frozen monitor. Call it on a worker: it copies the pixels for the overlay.
+    pub(crate) fn new(frame: sniplet_platform::CapturedFrame) -> Self {
         let layout = Monitor::from_frame(&frame);
         Self {
+            display: Some(crate::editor::display_pixels(&frame.image)),
             frame: Some(PixelsInRegion {
                 image: frame.image,
                 bounds: layout.bounds,
@@ -49,10 +54,22 @@ impl Screen {
         }
     }
 
+    /// A monitor whose pixels are captured only once the area is known.
+    #[cfg(not(target_os = "macos"))]
+    fn empty(geometry: &sniplet_platform::MonitorGeometry) -> Self {
+        Self {
+            frame: None,
+            display: None,
+            layout: Monitor::from_geometry(geometry),
+            scale_factor: geometry.scale_factor,
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn live(info: &sniplet_platform::MonitorInfo) -> Self {
         Self {
             frame: None,
+            display: None,
             layout: Monitor::from_info(info),
             scale_factor: info.scale_factor,
         }
@@ -114,7 +131,7 @@ fn compose(screens: &[Screen], bounds: Rect) -> Option<(RgbaImage, f32)> {
     if width == 0 || height == 0 {
         return None;
     }
-    let mut image = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+    let mut pixels = [0, 0, 0, 255].repeat(width as usize * height as usize);
     for screen in screens {
         if !screen.layout.bounds.overlaps(&bounds) {
             continue;
@@ -128,25 +145,44 @@ fn compose(screens: &[Screen], bounds: Rect) -> Option<(RgbaImage, f32)> {
         let y1 = clamp(display.bottom() * scale - top, height);
         let sx = frame.image.width() as f32 / display.w;
         let sy = frame.image.height() as f32 / display.h;
+        // The source column of each output column is the same on every row.
+        let source_xs = (x0..x1)
+            .map(|x| {
+                (((left + x as f32 + 0.5) / scale - display.x) * sx)
+                    .floor()
+                    .clamp(0.0, (frame.image.width() - 1) as f32) as usize
+            })
+            .collect::<Vec<_>>();
+        // Equal scales map columns one to one, so whole rows copy at once.
+        let contiguous = source_xs.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        let source_row_bytes = frame.image.width() as usize * 4;
         for y in y0..y1 {
             let source_y = (((top + y as f32 + 0.5) / scale - display.y) * sy)
                 .floor()
-                .clamp(0.0, (frame.image.height() - 1) as f32) as u32;
-            for x in x0..x1 {
-                let source_x = (((left + x as f32 + 0.5) / scale - display.x) * sx)
-                    .floor()
-                    .clamp(0.0, (frame.image.width() - 1) as f32)
-                    as u32;
-                image.put_pixel(x, y, *frame.image.get_pixel(source_x, source_y));
+                .clamp(0.0, (frame.image.height() - 1) as f32) as usize;
+            let source = &frame.image.as_raw()[source_y * source_row_bytes..][..source_row_bytes];
+            let start = (y as usize * width as usize + x0 as usize) * 4;
+            let row = &mut pixels[start..start + source_xs.len() * 4];
+            match source_xs.first() {
+                Some(&first) if contiguous => {
+                    row.copy_from_slice(&source[first * 4..first * 4 + row.len()]);
+                }
+                _ => {
+                    for (pixel, &x) in row.chunks_exact_mut(4).zip(&source_xs) {
+                        pixel.copy_from_slice(&source[x * 4..x * 4 + 4]);
+                    }
+                }
             }
         }
     }
-    Some((image, display_scale(screens, bounds)))
+    Some((
+        RgbaImage::from_raw(width, height, pixels)?,
+        display_scale(screens, bounds),
+    ))
 }
 
 /// Round outward to each display's pixel grid. Keeping its desktop origin preserves Retina
 /// pixels and selections spanning displays with different scales.
-#[cfg(target_os = "macos")]
 fn capture_bounds(screen: &Screen, selection: Rect) -> Rect {
     let bounds = selection.intersect(&screen.layout.bounds);
     let scale = screen.layout.scale();
@@ -158,21 +194,20 @@ fn capture_bounds(screen: &Screen, selection: Rect) -> Rect {
     Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&screen.layout.bounds)
 }
 
-/// The selected pixels. macOS reads them from the live desktop now, leaving out the
-/// selection windows in `excluded`.
+/// The selected pixels. Screens without a frozen frame capture only their selected part now:
+/// macOS from the live desktop, leaving out the selection windows in `excluded`, and other
+/// desktops from the monitor, for Repeat Capture.
 fn capture_selected(
-    screens: Vec<Screen>,
+    mut screens: Vec<Screen>,
     bounds: Rect,
     #[cfg(target_os = "macos")] monitors: &[sniplet_platform::MonitorInfo],
     #[cfg(target_os = "macos")] excluded: &[u32],
 ) -> Result<(RgbaImage, f32), String> {
-    #[cfg(target_os = "macos")]
-    let mut screens = screens;
-    #[cfg(target_os = "macos")]
     for screen in &mut screens {
         if screen.frame.is_some() || !screen.layout.bounds.overlaps(&bounds) {
             continue;
         }
+        #[cfg(target_os = "macos")]
         if !monitors
             .iter()
             .any(|info| Monitor::from_info(info) == screen.layout)
@@ -180,13 +215,23 @@ fn capture_selected(
             return Err("Capture stopped because the display layout changed".into());
         }
         let region = capture_bounds(screen, bounds);
+        #[cfg(target_os = "macos")]
         let image = sniplet_platform::capture_desktop_region(
             ImageRect::new(region.x, region.y, region.w, region.h),
             excluded,
+        );
+        // Desktop units are pixels here, and the region is on the monitor's pixel grid.
+        #[cfg(not(target_os = "macos"))]
+        let image = sniplet_platform::capture_monitor_region(
+            screen.layout.id,
+            (region.x - screen.layout.bounds.x) as u32,
+            (region.y - screen.layout.bounds.y) as u32,
+            region.w as u32,
+            region.h as u32,
         )
-        .map_err(|error| error.to_string())?;
+        .map(|frame| frame.image);
         screen.frame = Some(PixelsInRegion {
-            image,
+            image: image.map_err(|error| error.to_string())?,
             bounds: region,
         });
     }
@@ -217,12 +262,28 @@ pub(crate) fn start(
     #[cfg(not(target_os = "macos"))]
     {
         let session = escape.clone();
+        // Repeat Capture shows no selection, so it captures only the stored area later.
+        let repeat = matches!(command, Command::Repeat);
         editor.inbox.spawn(
             move || {
                 std::thread::sleep(delay);
                 (!session.is_cancelled()).then(|| {
-                    sniplet_platform::capture_monitors()
-                        .map(|frames| frames.into_iter().map(Screen::new).collect())
+                    let monitors = if repeat {
+                        sniplet_platform::list_monitor_geometry()?
+                    } else {
+                        Vec::new()
+                    };
+                    // On a scaled Linux desktop xcap reports sizes in logical units, which do
+                    // not match the pixels of the frames the area was selected on. Capture
+                    // whole frames there.
+                    let scaled = cfg!(target_os = "linux")
+                        && monitors.iter().any(|monitor| monitor.scale_factor != 1.0);
+                    if repeat && !scaled {
+                        Ok(monitors.iter().map(Screen::empty).collect())
+                    } else {
+                        sniplet_platform::capture_monitors()
+                            .map(|frames| frames.into_iter().map(Screen::new).collect())
+                    }
                 })
             },
             move |editor, screens, _| match screens {
@@ -315,7 +376,7 @@ fn capture_and_load(
                 Ok((document, scale)) => {
                     capture::copy_capture_if_enabled(editor, &document);
                     editor.scroll_region = None;
-                    editor.scroll_frames.clear();
+                    editor.scroll_image = None;
                     if matches!(command, Command::Area) {
                         editor.last_capture = Some(saved);
                     }
@@ -347,8 +408,8 @@ fn capture_and_load(
 enum Finish {
     /// Capture the area for this command.
     Area(Command),
-    /// Start a scrolling capture of the area on this monitor.
-    Scroll { command: Command, monitor: usize },
+    /// Start a scrolling capture of the area on the one monitor shown.
+    Scroll(Command),
 }
 
 /// The selection every monitor's overlay shares.
@@ -431,7 +492,7 @@ impl Selection {
                 self.escape.clone(),
                 excluded,
             ),
-            Finish::Scroll { command, monitor } => {
+            Finish::Scroll(command) => {
                 let screen = &screens[0];
                 let Some(frame) = &screen.frame else {
                     return;
@@ -447,7 +508,7 @@ impl Selection {
                 capture::scroll_selected(
                     capture::ScrollSelection {
                         command,
-                        monitor,
+                        monitor: screen.layout.id,
                         scale_factor: screen.scale_factor,
                         source: &frame.image,
                         rect,
@@ -543,9 +604,9 @@ fn overlays(
         completed: false,
     }));
     let overlays = selection
-        .borrow()
+        .borrow_mut()
         .screens
-        .iter()
+        .iter_mut()
         .enumerate()
         .map(|(index, screen)| {
             let overlay = Overlay {
@@ -554,9 +615,8 @@ fn overlays(
                 index,
                 bounds: screen.layout.bounds,
                 viewport: capture_overlay::initial_viewport(&screen.layout, screen.scale_factor),
-                pixels: screen.frame.as_ref().map(|frame| {
+                pixels: screen.display.take().map(|(width, height, rgba)| {
                     let pixels = Pixels::new();
-                    let (width, height, rgba) = crate::editor::display_pixels(&frame.image);
                     pixels.set(width, height, rgba);
                     pixels
                 }),
@@ -589,24 +649,14 @@ fn open(screens: Vec<Screen>, finish: Finish, editor: &Inbox<Editor>, escape: &E
     }
 }
 
-/// Select an area of the monitor in `frame` for a scrolling capture.
+/// Select an area of the frozen monitor `screen` for a scrolling capture.
 pub(crate) fn open_scroll(
-    frame: sniplet_platform::CapturedFrame,
+    screen: Screen,
     command: Command,
     editor: &Inbox<Editor>,
     escape: &EscapeSession,
 ) {
-    let monitor = match frame.source {
-        sniplet_platform::CaptureSource::Monitor { index, .. }
-        | sniplet_platform::CaptureSource::MonitorRegion { index, .. } => index,
-        sniplet_platform::CaptureSource::Window { .. } => 0,
-    };
-    open(
-        vec![Screen::new(frame)],
-        Finish::Scroll { command, monitor },
-        editor,
-        escape,
-    );
+    open(vec![screen], Finish::Scroll(command), editor, escape);
 }
 
 fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
@@ -686,6 +736,7 @@ fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
 
 #[cfg(test)]
 mod tests {
+    use image::Rgba;
     use rune::{Env, Runtime};
 
     use super::*;
@@ -704,6 +755,7 @@ mod tests {
                 }),
                 bounds,
             }),
+            display: None,
             layout: Monitor {
                 id,
                 bounds,
@@ -756,7 +808,6 @@ mod tests {
         assert_eq!(image.get_pixel(0, 20), &Rgba([0, 0, 0, 255]));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn selected_region_pixels_match_full_frames_across_different_display_scales() {
         let mut screens = vec![

@@ -6,8 +6,8 @@ use std::{
 
 use image::{Rgba, RgbaImage};
 use sniplet_core::{
-    Annotation, AnnotationId, AnnotationKind, AnnotationStyle, ArrowVariant, Color, Document,
-    ImageRect, Point, Project, RenderOptions,
+    Annotation, AnnotationId, AnnotationKind, AnnotationStyle, ArrowVariant, Backdrop, Background,
+    Color, Document, ImageRect, ImageSize, Point, Project, RenderOptions, Shadow,
 };
 
 const SIZES: &[(u32, u32)] = &[(1600, 900), (2560, 1440), (3840, 2160)];
@@ -80,6 +80,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 iterations,
                 || several.render(&editor_options(std::slice::from_ref(&preview))),
             )?;
+
+            // Each frame changes only a drawing, as a drag does, over layers that renders
+            // can reuse: a backdrop with a shadow, a blurred region, and a pasted image.
+            for (scenario, document) in [
+                (
+                    "backdrop_shadow_drag",
+                    document_with_backdrop(width, height),
+                ),
+                ("blur_region_drag", document_with_blur(width, height)),
+                (
+                    "pasted_image_drag",
+                    document_with_pasted_image(width, height)?,
+                ),
+            ] {
+                let mut frame = 0_u32;
+                record_render(&mut csv, width, height, scenario, iterations, || {
+                    let preview = preview_arrow(width, height, frame);
+                    frame = frame.wrapping_add(1);
+                    document.render(&editor_options(std::slice::from_ref(&preview)))
+                })?;
+            }
 
             let preview_blank = Document::new(background(width, height));
             let mut preview_frame = 0_u32;
@@ -413,6 +434,60 @@ fn document_with_annotations(width: u32, height: u32) -> Document {
         },
     );
     document
+}
+
+fn document_with_backdrop(width: u32, height: u32) -> Document {
+    let mut document = document_with_arrow(width, height, true);
+    document.set_backdrop(Backdrop {
+        padding: 48,
+        corner_radius: 12,
+        background: Background::LinearGradient {
+            start: Color::new(40, 60, 140, 255),
+            end: Color::new(140, 60, 120, 255),
+            angle_degrees: 30.0,
+        },
+        shadow: Some(Shadow {
+            offset: Point::new(0.0, 8.0),
+            blur_radius: 16.0,
+            color: Color::new(0, 0, 0, 110),
+        }),
+    });
+    document
+}
+
+fn document_with_blur(width: u32, height: u32) -> Document {
+    let mut document = document_with_arrow(width, height, true);
+    let (w, h) = (width as f32, height as f32);
+    document.add_annotation(
+        AnnotationKind::Blur {
+            rect: ImageRect::new(w * 0.1, h * 0.1, w * 0.4, h * 0.3),
+            radius: 8.0,
+        },
+        AnnotationStyle::default(),
+    );
+    document
+}
+
+fn document_with_pasted_image(
+    width: u32,
+    height: u32,
+) -> Result<Document, Box<dyn std::error::Error>> {
+    let mut document = document_with_arrow(width, height, true);
+    let pasted = background(width / 3, height / 3);
+    let mut png = std::io::Cursor::new(Vec::new());
+    pasted.write_to(&mut png, image::ImageFormat::Png)?;
+    document.add_annotation(
+        AnnotationKind::Image {
+            origin: Point::new(width as f32 * 0.5, height as f32 * 0.5),
+            png_bytes: png.into_inner().into(),
+            size: Some(ImageSize {
+                width: width / 2,
+                height: height / 2,
+            }),
+        },
+        AnnotationStyle::default(),
+    );
+    Ok(document)
 }
 
 fn preview_arrow(width: u32, height: u32, frame: u32) -> Annotation {

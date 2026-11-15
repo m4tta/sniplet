@@ -52,6 +52,33 @@ fn draw_select_move_resize_and_delete_each_undo_in_one_step() {
 }
 
 #[test]
+fn a_held_arrow_key_is_one_undo_step_and_undo_keeps_the_zoom() {
+    let mut h = editor();
+    h.click(&tool(Tool::Rectangle));
+    h.drag_image((70.0, 30.0), (180.0, 120.0));
+    let drawn = h.only();
+    h.press("ctrl-=");
+    let zoom = h.editor().transform().zoom();
+    let x = |h: &super::Harness| h.only().kind.bounds().x;
+
+    h.press("right");
+    for _ in 0..4 {
+        h.repeat("right");
+    }
+    h.release("right");
+    assert_eq!(x(&h), 75.0);
+    h.press("right");
+    h.release("right");
+    assert_eq!(x(&h), 76.0);
+
+    h.undo();
+    assert_eq!(x(&h), 75.0, "a single press is its own step");
+    h.undo();
+    assert_eq!(h.only(), drawn, "the held run undoes in one step");
+    assert_eq!(h.editor().transform().zoom(), zoom, "undo keeps the camera");
+}
+
+#[test]
 fn escape_discards_a_draft_and_puts_back_a_moved_annotation() {
     let mut h = editor();
     let original = h.editor().preview_image().unwrap();

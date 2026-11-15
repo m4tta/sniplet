@@ -3,7 +3,10 @@
 //! `mod.rs` holds the state and the model operations. `input.rs` turns pointer and key input
 //! into those operations, `commands.rs` runs menu and shortcut commands, and `view.rs` and
 //! `panels.rs` draw it.
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use rune::{Pixels, TextEdit};
 use sniplet_core::{
@@ -13,6 +16,7 @@ use sniplet_core::{
 use sniplet_platform::{Settings, SettingsStore};
 
 use crate::{
+    drag_out::{DragFile, DragFiles},
     tools::{HideStyle, Size, Sizes, Tool},
     ui::Inbox,
 };
@@ -24,11 +28,11 @@ mod panels;
 mod tests;
 mod view;
 
-pub(crate) use commands::Command;
+pub(crate) use commands::{Command, Export};
 pub(crate) use input::Keystroke;
 pub(crate) use view::{on_key, view};
 
-pub const FONT: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans.ttf");
+pub const FONT: &[u8] = sniplet_core::FONT;
 /// The toolbar's height, which is also the window's title bar.
 pub(crate) const BAR: f32 = 54.0;
 /// Canvas height kept clear below the image at fit zoom, for the tool dock.
@@ -104,11 +108,12 @@ pub struct Editor {
     pub tool: Tool,
     pub selection: Option<ImageRect>,
     pub status: String,
+    /// An upload is running. A second one waits for it, see `upload`.
+    pub(crate) uploading: bool,
     pub settings: Settings,
     pub(crate) hotkey_error: Option<String>,
     /// True while Settings records a new shortcut, so the OS does not take the keypress.
     pub(crate) hotkeys_paused: bool,
-    pub monitor_index: usize,
     pub panel: Option<Panel>,
     #[cfg(test)]
     pub settings_path: Option<PathBuf>,
@@ -125,20 +130,27 @@ pub struct Editor {
     size_edit: Option<SizeEdit>,
     /// Shows the sampled color next to the pointer while Tab or C is held.
     color_peek: bool,
-    counter: u32,
+    /// An arrow-key run holds an undo group open, so a held key undoes in one step.
+    key_group: bool,
     drag: Option<Drag>,
     draft: Option<Annotation>,
     /// What the canvas draws: the document rendered with the draft.
     pixels: Pixels,
     /// The same render at full resolution, for color sampling.
     preview: Option<Arc<image::RgbaImage>>,
+    /// The `preview_revision` that `preview` shows with no draft. When it is the current
+    /// one, an export of the whole image uses the preview instead of rendering again.
+    export_revision: Option<u64>,
+    /// The PNG a drag out of the window hands over. A mutex, as the drag asks with `&Editor`.
+    drag_file: Mutex<DragFiles>,
+    drag_file_running: bool,
     preview_dirty: bool,
     preview_running: bool,
     preview_revision: u64,
     document_revision: u64,
     pub(crate) load_revision: u64,
     recognition_revision: u64,
-    settings_revision: u64,
+    pub(crate) settings_revision: u64,
     pub(crate) settings_save_running: bool,
     pub(crate) settings_save_result: Option<(u64, Option<String>)>,
     #[cfg(test)]
@@ -164,8 +176,9 @@ pub struct Editor {
     default_measure_scale: f32,
     physical_units: bool,
     last_saved: Option<PathBuf>,
-    pub scroll_frames: Vec<Arc<image::RgbaImage>>,
-    pub scroll_region: Option<ImageRect>,
+    /// A manual scrolling capture's page so far, and its area.
+    pub scroll_image: Option<Arc<image::RgbaImage>>,
+    pub scroll_region: Option<crate::capture::ScrollRegion>,
     pub last_capture: Option<crate::area_capture::Region>,
     pub(crate) updates: crate::updates::Updates,
 }
@@ -184,19 +197,10 @@ impl Editor {
             tool: Tool::Select,
             selection: None,
             status: "Ready".into(),
+            uploading: false,
             settings,
             hotkey_error: None,
             hotkeys_paused: false,
-            monitor_index: if cfg!(test) {
-                0
-            } else {
-                sniplet_platform::list_monitors()
-                    .ok()
-                    .and_then(|monitors| {
-                        monitors.into_iter().find(|m| m.is_primary).map(|m| m.index)
-                    })
-                    .unwrap_or(0)
-            },
             panel: None,
             #[cfg(test)]
             settings_path: None,
@@ -214,11 +218,14 @@ impl Editor {
             sizes: Sizes::default(),
             size_edit: None,
             color_peek: false,
-            counter: 1,
+            key_group: false,
             drag: None,
             draft: None,
             pixels: Pixels::new(),
             preview: None,
+            export_revision: None,
+            drag_file: Mutex::default(),
+            drag_file_running: false,
             preview_dirty: false,
             preview_running: false,
             preview_revision: 0,
@@ -248,7 +255,7 @@ impl Editor {
             default_measure_scale: scale,
             physical_units: false,
             last_saved: None,
-            scroll_frames: vec![],
+            scroll_image: None,
             scroll_region: None,
             last_capture: None,
             updates: crate::updates::Updates::new(),
@@ -264,9 +271,13 @@ impl Editor {
         self.load_revision += 1;
         self.document_revision += 1;
         self.finish_size_edit();
+        self.end_key_group();
         self.measure_scale = document
             .source_scale_factor()
             .unwrap_or(self.default_measure_scale);
+        let unedited = document
+            .unedited()
+            .filter(|image| image.width().max(image.height()) <= MAX_TEXTURE);
         self.document = Some(document);
         self.selection = None;
         self.drag = None;
@@ -275,10 +286,24 @@ impl Editor {
         self.fit = true;
         self.panel = None;
         self.recognized_text = None;
-        self.counter = 1;
         self.last_saved = None;
         self.status = label.to_owned();
-        self.refresh();
+        match unedited {
+            // A capture with nothing on it is its own preview. Show it now, rather than the
+            // last image until a render finishes; a render still running is for that image.
+            Some(image) => {
+                self.preview_revision += 1;
+                self.preview_dirty = false;
+                let preview = Preview {
+                    size: image.dimensions(),
+                    origin: ImagePoint::default(),
+                    display: display_pixels(&image),
+                    image,
+                };
+                self.apply_preview(Ok(preview), Some(self.preview_revision));
+            }
+            None => self.refresh(),
+        }
     }
 
     pub fn set_measure_scale(&mut self, scale: f32) {
@@ -308,10 +333,11 @@ impl Editor {
             return;
         }
         self.preview_dirty = false;
-        let Some(doc) = self.document.clone() else {
+        let Some(doc) = self.document.as_ref().map(Document::snapshot) else {
             return;
         };
         let draft = self.draft.clone();
+        let export_revision = draft.is_none().then_some(self.preview_revision);
         let document_revision = self.document_revision;
         let padding = doc.backdrop().padding;
         let pixels = (doc.width() as u64 + 2 * padding as u64)
@@ -332,7 +358,7 @@ impl Editor {
         // A small preview fits within one frame. Large images use a worker so pointer input
         // and drawing continue during rasterization.
         if pixels <= INLINE_PIXELS {
-            self.apply_preview(prepare());
+            self.apply_preview(prepare(), export_revision);
         } else {
             self.preview_running = true;
             self.inbox.spawn(prepare, move |this, result, _| {
@@ -340,14 +366,20 @@ impl Editor {
                 // Show completed work during a continuous drag, then render the latest
                 // input. A different document must never use it.
                 if this.document_revision == document_revision {
-                    this.apply_preview(result);
+                    this.apply_preview(result, export_revision);
                 }
                 this.prepare_preview();
             });
         }
     }
 
-    fn apply_preview(&mut self, result: sniplet_core::Result<Preview>) {
+    /// Shows a finished render. `export_revision` is the revision it shows exactly, when it
+    /// has no draft.
+    fn apply_preview(
+        &mut self,
+        result: sniplet_core::Result<Preview>,
+        export_revision: Option<u64>,
+    ) {
         match result {
             Ok(preview) => {
                 self.image_size = preview.size;
@@ -355,6 +387,7 @@ impl Editor {
                 let (width, height, rgba) = preview.display;
                 self.pixels.set(width, height, rgba);
                 self.preview = Some(preview.image);
+                self.export_revision = export_revision;
                 #[cfg(test)]
                 {
                     self.preview_frames += 1;
@@ -362,8 +395,80 @@ impl Editor {
                 if let Some(color) = self.visible_color(self.cursor) {
                     self.sampled = color;
                 }
+                self.prepare_drag_file();
             }
             Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// The preview, when it shows the document exactly as it is now: rendered with export
+    /// options, no draft, and no edit since.
+    fn current_preview(&self) -> Option<Arc<image::RgbaImage>> {
+        self.preview
+            .clone()
+            .filter(|_| self.export_revision == Some(self.preview_revision))
+    }
+
+    /// Writes the file a drag out hands over on a worker once the preview settles, so a drag
+    /// starts at once. Only macOS and Windows drag files out.
+    fn prepare_drag_file(&mut self) {
+        if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
+            return;
+        }
+        if self.drag_file_running
+            || self.drag.is_some()
+            || self.size_edit.is_some()
+            || self.key_group
+        {
+            return;
+        }
+        let Some(image) = self.current_preview() else {
+            return;
+        };
+        let revision = self.preview_revision;
+        let slot = self
+            .drag_file
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if slot
+            .current
+            .as_ref()
+            .is_some_and(|file| file.revision == Some(revision))
+        {
+            return;
+        }
+        self.drag_file_running = true;
+        self.inbox.spawn(
+            move || DragFile::write(&image, Some(revision)),
+            move |this, result, _| {
+                this.drag_file_running = false;
+                // A file for an older preview is dropped, which deletes it. So is one that a
+                // drag already wrote for this preview, so the dragged file stays.
+                let slot = this
+                    .drag_file
+                    .get_mut()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let Ok(file) = result
+                    && this.preview_revision == revision
+                    && slot
+                        .current
+                        .as_ref()
+                        .is_none_or(|old| old.revision != Some(revision))
+                {
+                    slot.replace(file);
+                }
+                this.prepare_drag_file();
+            },
+        );
+    }
+
+    /// Ends the undo group of an arrow-key run, when one is open.
+    fn end_key_group(&mut self) {
+        if std::mem::take(&mut self.key_group) {
+            if let Some(doc) = &mut self.document {
+                let _ = doc.end_group();
+            }
+            self.prepare_drag_file();
         }
     }
 
@@ -480,6 +585,7 @@ impl Editor {
             return;
         };
         if self.size_edit.is_none() {
+            self.end_key_group();
             let grouped = self.selected_annotation().is_some()
                 && self
                     .document
@@ -511,12 +617,15 @@ impl Editor {
     }
 
     fn finish_size_edit(&mut self) {
-        if let Some(edit) = self.size_edit.take()
-            && edit.grouped
+        let Some(edit) = self.size_edit.take() else {
+            return;
+        };
+        if edit.grouped
             && let Some(doc) = &mut self.document
         {
             let _ = doc.end_group();
         }
+        self.prepare_drag_file();
     }
 
     /// Sets the size for new annotations, and for the selected one when it has this size.
@@ -607,7 +716,6 @@ impl Editor {
     }
 
     fn adjust_counter_value(&mut self, delta: i32) {
-        let mut next_counter = None;
         if let Some(doc) = &mut self.document
             && let Some(annotation) = doc.selected().and_then(|id| doc.annotation(id)).cloned()
             && let AnnotationKind::Counter {
@@ -623,10 +731,6 @@ impl Editor {
                 font_size,
             };
             let _ = doc.update_annotation(annotation.id, kind, annotation.style);
-            next_counter = Some((value + 1).min(99));
-        }
-        if let Some(next_counter) = next_counter {
-            self.counter = next_counter;
         }
         self.refresh();
     }
@@ -704,6 +808,19 @@ pub(crate) fn display_pixels(image: &image::RgbaImage) -> (u32, u32, Vec<u8>) {
     );
     let small = image::imageops::resize(image, w, h, image::imageops::FilterType::Triangle);
     (w, h, small.into_raw())
+}
+
+/// The number a new counter shows: one more than the highest counter in `annotations`, so
+/// undo, redo and delete keep the numbering. Counters stop at 99.
+fn next_counter(annotations: &[Annotation]) -> u32 {
+    annotations
+        .iter()
+        .filter_map(|annotation| match annotation.kind {
+            AnnotationKind::Counter { value, .. } => Some(value),
+            _ => None,
+        })
+        .max()
+        .map_or(1, |highest| highest.saturating_add(1).min(99))
 }
 
 /// The style for new annotations after `annotation` is selected. A spotlight's fill is its

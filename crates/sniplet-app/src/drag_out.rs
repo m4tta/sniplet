@@ -5,6 +5,57 @@ use std::path::PathBuf;
 
 use rune::El;
 
+/// A temporary PNG for a drag out of the window. Dropping it deletes the file.
+pub(crate) struct DragFile {
+    /// The editor preview revision it shows. None when it holds a selection.
+    pub revision: Option<u64>,
+    pub path: PathBuf,
+    /// A drag took this file, so the app it was dropped on can still read it.
+    pub taken: bool,
+}
+
+/// The drag file for the current preview, and the files that drags took. A taken file stays
+/// until the editor closes, because the app it was dropped on can read it later.
+#[derive(Default)]
+pub(crate) struct DragFiles {
+    pub current: Option<DragFile>,
+    taken: Vec<DragFile>,
+}
+
+impl DragFiles {
+    /// Makes `file` the current one. The last one is deleted, unless a drag took it.
+    pub fn replace(&mut self, file: DragFile) {
+        if let Some(old) = self.current.replace(file)
+            && old.taken
+        {
+            self.taken.push(old);
+        }
+    }
+}
+
+impl DragFile {
+    /// Writes `image` to a new file in the temporary folder.
+    pub fn write(image: &image::RgbaImage, revision: Option<u64>) -> anyhow::Result<Self> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let file = Self {
+            revision,
+            taken: false,
+            path: std::env::temp_dir().join(format!("Sniplet-{timestamp}.png")),
+        };
+        // On failure `file` drops, which removes what was written.
+        image.save(&file.path)?;
+        Ok(file)
+    }
+}
+
+impl Drop for DragFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Make `control` a drag source for the file `export` writes. `fail` reports an export error.
 pub(crate) fn source<S: 'static>(
     control: El,

@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{Pixel, Rgba, RgbaImage};
 use imageproc::{
@@ -10,8 +12,8 @@ use imageproc::{
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::{
-    Annotation, AnnotationKind, ArrowVariant, Backdrop, Background, Color, Document, ImageRect,
-    Measurement, Point, Result, Shadow, SnipletError,
+    Annotation, AnnotationKind, ArrowVariant, Backdrop, Background, Color, ImageRect, ImageSize,
+    Measurement, Point, Result, Scene, Shadow, SnipletError,
     annotation::CompositeLayer,
     export::{MAX_IMAGE_PIXELS, check_image_size, decode_image},
     geometry::{
@@ -25,6 +27,110 @@ const MAX_FONT_SIZE: f32 = 2048.0;
 const MAX_STROKE_WIDTH: f32 = 1024.0;
 const MAX_BLUR_RADIUS: f32 = 100.0;
 const MAX_BACKDROP_PADDING: u32 = 1024;
+
+/// The font Sniplet draws text with. [`AnnotationKind::bounds`] measures text with it.
+pub const FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
+
+/// The size of `text`'s layout box at a 1 px font size: the advance width that
+/// `draw_text_mut` lays out, by the font's line height. Both grow linearly with the size.
+pub(crate) fn text_extent(text: &str) -> (f32, f32) {
+    let Ok(font) = FontRef::try_from_slice(FONT) else {
+        return (0.0, 0.0);
+    };
+    let font = font.as_scaled(1.0);
+    let mut width = 0.0;
+    let mut previous = None;
+    for character in text.chars() {
+        let glyph = font.glyph_id(character);
+        if let Some(previous) = previous {
+            width += font.kern(previous, glyph);
+        }
+        width += font.h_advance(glyph);
+        previous = Some(glyph);
+    }
+    (width, font.height())
+}
+
+/// Pixels that renders of one source image reuse. Each slot keeps only the newest inputs,
+/// so memory stays bounded. A [`Scene`] and its clones share one cache, so the editor's
+/// renders and its workers' renders reuse each other's work.
+#[derive(Default)]
+pub(crate) struct RenderCache {
+    /// The canvas after raster edits and pasted images, which shade and drawings start from.
+    base: Mutex<Option<CachedBase>>,
+    /// Pasted images, decoded and scaled: the ones the newest base drew.
+    images: Mutex<Vec<CachedImage>>,
+    /// A backdrop's background and shadow, before the image goes on it.
+    backdrop: Mutex<Option<(BackdropKey, Arc<RgbaImage>)>>,
+}
+
+impl std::fmt::Debug for RenderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RenderCache")
+    }
+}
+
+struct CachedBase {
+    /// The raster and image annotations drawn, in order. Only kind and style count.
+    annotations: Vec<Annotation>,
+    canvas: (u32, u32),
+    /// Where the font bytes are, as a measurement imprint draws with them.
+    font: Option<(usize, usize)>,
+    image: Arc<RgbaImage>,
+}
+
+struct CachedImage {
+    png: Arc<[u8]>,
+    size: Option<ImageSize>,
+    image: Arc<RgbaImage>,
+}
+
+/// What a backdrop plate depends on: the backdrop, the plate size and the image size.
+type BackdropKey = (Backdrop, (u32, u32), (u32, u32));
+
+/// A cache slot. Entries go in whole, so a render that panicked leaves at worst a missing
+/// or older entry, and a poisoned lock is still safe to use.
+fn lock<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl RenderCache {
+    /// A pasted image decoded and scaled to `size`, reused while the same bytes show at
+    /// the same size.
+    fn image(&self, png: &Arc<[u8]>, size: Option<ImageSize>) -> Result<Arc<RgbaImage>> {
+        if let Some(cached) = lock(&self.images)
+            .iter()
+            .find(|cached| cached.size == size && cached.png == *png)
+        {
+            return Ok(cached.image.clone());
+        }
+        let decoded = decode_image(png)?;
+        let image = Arc::new(match size {
+            Some(size) if size.width > 0 && size.height > 0 => {
+                check_image_size(size.width, size.height)?;
+                image::imageops::resize(
+                    &decoded,
+                    size.width,
+                    size.height,
+                    image::imageops::FilterType::CatmullRom,
+                )
+            }
+            _ => decoded,
+        });
+        lock(&self.images).push(CachedImage {
+            png: png.clone(),
+            size,
+            image: image.clone(),
+        });
+        Ok(image)
+    }
+}
+
+fn font(bytes: Option<&[u8]>) -> Result<Option<FontRef<'_>>> {
+    bytes
+        .map(|bytes| FontRef::try_from_slice(bytes).map_err(|_| SnipletError::InvalidFont))
+        .transpose()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct RenderOptions<'a> {
@@ -147,19 +253,19 @@ impl Measurement {
     }
 }
 
-impl Document {
+impl Scene {
     /// Measurement reads visible base pixels and reports their origin in source coordinates.
     pub fn render_measurement_source(
         &self,
         options: &RenderOptions<'_>,
     ) -> Result<(RgbaImage, Point)> {
-        let source = self.render_raster(options)?;
+        let source = self.raster_base(options)?;
         let Some(crop) = self.crop() else {
-            return Ok((source, Point::default()));
+            return Ok((Arc::unwrap_or_clone(source), Point::default()));
         };
         Ok(match crop.pixel_bounds(source.width(), source.height()) {
             Some((left, top, right, bottom)) => (
-                image::imageops::crop_imm(&source, left, top, right - left, bottom - top)
+                image::imageops::crop_imm(&*source, left, top, right - left, bottom - top)
                     .to_image(),
                 Point::new(left as f32, top as f32),
             ),
@@ -167,26 +273,22 @@ impl Document {
         })
     }
 
+    /// Base pixels after raster edits, without pasted images, drawings, crop, or backdrop.
     pub fn render_raster(&self, options: &RenderOptions<'_>) -> Result<RgbaImage> {
-        self.raster_copy().render_source(&RenderOptions {
-            extra_annotations: &[],
-            ..*options
-        })
+        Ok(Arc::unwrap_or_clone(self.raster_base(options)?))
+    }
+
+    fn raster_base(&self, options: &RenderOptions<'_>) -> Result<Arc<RgbaImage>> {
+        let raster: Vec<_> = self
+            .annotations()
+            .iter()
+            .filter(|annotation| annotation.kind.composite_layer() == CompositeLayer::Raster)
+            .collect();
+        self.base(&raster, options.font_bytes)
     }
 
     pub fn render(&self, options: &RenderOptions<'_>) -> Result<RgbaImage> {
-        let font = match options.font_bytes {
-            Some(bytes) => {
-                Some(FontRef::try_from_slice(bytes).map_err(|_| SnipletError::InvalidFont)?)
-            }
-            None => None,
-        };
-        let mut canvas = base_canvas(
-            self.original(),
-            self.original_is_opaque(),
-            self.width(),
-            self.height(),
-        );
+        let font = font(options.font_bytes)?;
         let mut annotations: Vec<_> = self
             .annotations()
             .iter()
@@ -196,24 +298,20 @@ impl Document {
         let (base, drawings) = annotations.split_at(annotations.partition_point(|annotation| {
             annotation.kind.composite_layer() < CompositeLayer::Spotlight
         }));
-        let mut annotation_layer = None;
-        for annotation in base {
-            draw_annotation(
-                &mut canvas,
-                self.original(),
-                annotation,
-                font.as_ref(),
-                &mut annotation_layer,
-            )?;
-        }
+        let base = self.base(base, options.font_bytes)?;
+        let mut canvas = RgbaImage::clone(&base);
         draw_spotlights(&mut canvas, &annotations);
+        let mut annotation_layer = None;
         for annotation in drawings {
+            // A magnifier enlarges the base, so its lens never shows what a redaction,
+            // blur, pixelate or erase hides.
             draw_annotation(
                 &mut canvas,
-                self.original(),
+                &base,
                 annotation,
                 font.as_ref(),
                 &mut annotation_layer,
+                &self.cache,
             )?;
         }
 
@@ -226,9 +324,67 @@ impl Document {
                 .to_image();
         }
         if options.apply_backdrop && !backdrop_is_identity(self.backdrop()) {
-            canvas = apply_backdrop(&canvas, self.backdrop())?;
+            canvas = apply_backdrop(&canvas, self.backdrop(), &self.cache)?;
         }
         Ok(canvas)
+    }
+
+    /// The canvas with the raster and image `layers` drawn on the source. The cache keeps
+    /// the newest one, so a render whose layers did not change starts from a copy of it.
+    fn base(&self, layers: &[&Annotation], font_bytes: Option<&[u8]>) -> Result<Arc<RgbaImage>> {
+        let canvas_size = (self.width(), self.height());
+        // With nothing to draw, an opaque source of the canvas size is the base itself.
+        if layers.is_empty()
+            && self.original_is_opaque()
+            && self.original().dimensions() == canvas_size
+        {
+            return Ok(self.shared_original());
+        }
+        let font_key = font_bytes.map(|bytes| (bytes.as_ptr() as usize, bytes.len()));
+        if let Some(cached) = lock(&self.cache.base).as_ref()
+            && cached.canvas == canvas_size
+            && cached.font == font_key
+            && cached.annotations.len() == layers.len()
+            && cached
+                .annotations
+                .iter()
+                .zip(layers)
+                .all(|(cached, layer)| cached.kind == layer.kind && cached.style == layer.style)
+        {
+            return Ok(cached.image.clone());
+        }
+        let font = font(font_bytes)?;
+        let mut canvas = base_canvas(
+            self.original(),
+            self.original_is_opaque(),
+            canvas_size.0,
+            canvas_size.1,
+        );
+        let mut annotation_layer = None;
+        for annotation in layers {
+            draw_annotation(
+                &mut canvas,
+                self.original(),
+                annotation,
+                font.as_ref(),
+                &mut annotation_layer,
+                &self.cache,
+            )?;
+        }
+        lock(&self.cache.images).retain(|cached| {
+            layers.iter().any(|layer| {
+                matches!(&layer.kind, AnnotationKind::Image { png_bytes, size, .. }
+                    if *png_bytes == cached.png && *size == cached.size)
+            })
+        });
+        let image = Arc::new(canvas);
+        *lock(&self.cache.base) = Some(CachedBase {
+            annotations: layers.iter().copied().cloned().collect(),
+            canvas: canvas_size,
+            font: font_key,
+            image: image.clone(),
+        });
+        Ok(image)
     }
 
     /// Renders annotations over the full canvas coordinate space, ignoring crop and backdrop.
@@ -260,12 +416,15 @@ impl Document {
     }
 }
 
+/// Draws one annotation. `source` is what fills and magnifiers sample: the original for
+/// raster edits, and the base after them for drawings.
 fn draw_annotation(
     canvas: &mut RgbaImage,
     source: &RgbaImage,
     annotation: &Annotation,
     font: Option<&FontRef<'_>>,
     annotation_layer: &mut Option<RgbaImage>,
+    cache: &RenderCache,
 ) -> Result<()> {
     match &annotation.kind {
         AnnotationKind::Measurement { measurement } => {
@@ -293,22 +452,10 @@ fn draw_annotation(
             png_bytes,
             size,
         } => {
-            let pasted = decode_image(png_bytes)?;
-            let pasted = match size {
-                Some(size) if size.width > 0 && size.height > 0 => {
-                    check_image_size(size.width, size.height)?;
-                    image::imageops::resize(
-                        &pasted,
-                        size.width,
-                        size.height,
-                        image::imageops::FilterType::CatmullRom,
-                    )
-                }
-                _ => pasted,
-            };
+            let pasted = cache.image(png_bytes, *size)?;
             image::imageops::overlay(
                 canvas,
-                &pasted,
+                &*pasted,
                 origin.x.round() as i64,
                 origin.y.round() as i64,
             );
@@ -771,24 +918,43 @@ fn draw_spotlights(canvas: &mut RgbaImage, annotations: &[&Annotation]) {
             )
         })
         .collect();
-    let width = canvas.width();
-    for (index, pixel) in canvas.pixels_mut().enumerate() {
-        let (x, y) = (index as u32 % width, index as u32 / width);
-        if spans
-            .iter()
-            .any(|(columns, rows)| columns.contains(&x) && rows.contains(&y))
-        {
-            continue;
+    let shade = |pixels: &mut [u8]| {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            if pixel[3] == 255 {
+                *pixel = [
+                    opaque[pixel[0] as usize][0],
+                    opaque[pixel[1] as usize][1],
+                    opaque[pixel[2] as usize][2],
+                    opaque[0][3],
+                ];
+            } else {
+                let mut blended = Rgba(*pixel);
+                blended.blend(&dim);
+                *pixel = blended.0;
+            }
         }
-        if pixel[3] == 255 {
-            *pixel = Rgba([
-                opaque[pixel[0] as usize][0],
-                opaque[pixel[1] as usize][1],
-                opaque[pixel[2] as usize][2],
-                opaque[0][3],
-            ]);
-        } else {
-            pixel.blend(&dim);
+    };
+    let width = canvas.width();
+    if width == 0 {
+        return;
+    }
+    // Each row shades the runs between the spotlights that cross it.
+    let mut lit = Vec::with_capacity(spans.len());
+    for (y, row) in canvas.chunks_exact_mut(width as usize * 4).enumerate() {
+        lit.clear();
+        lit.extend(
+            spans
+                .iter()
+                .filter(|(_, rows)| rows.contains(&(y as u32)))
+                .map(|(columns, _)| columns.clone()),
+        );
+        lit.sort_by_key(|columns| columns.start);
+        let mut x = 0;
+        for columns in lit.iter().chain([&(width..width)]) {
+            if columns.start > x {
+                shade(&mut row[x as usize * 4..columns.start as usize * 4]);
+            }
+            x = x.max(columns.end);
         }
     }
 }
@@ -1585,7 +1751,7 @@ fn average_border(image: &RgbaImage, rect: ImageRect) -> Color {
 
 /// A backdrop that cannot change what a viewer sees. A visible background still fills
 /// transparent source pixels when there is no padding.
-fn backdrop_is_identity(backdrop: Backdrop) -> bool {
+pub(crate) fn backdrop_is_identity(backdrop: Backdrop) -> bool {
     let transparent_background = match backdrop.background {
         Background::Solid { color } => color.a == 0,
         Background::LinearGradient { start, end, .. } => start.a == 0 && end.a == 0,
@@ -1597,8 +1763,13 @@ fn backdrop_is_identity(backdrop: Backdrop) -> bool {
 }
 
 /// Pads `source` onto its backdrop. Padding may add at most [`MAX_IMAGE_PIXELS`], so a
-/// long, thin image cannot grow into a huge buffer.
-fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> Result<RgbaImage> {
+/// long, thin image cannot grow into a huge buffer. The background and its blurred shadow
+/// depend only on the backdrop and the sizes, so `cache` keeps them for the next render.
+fn apply_backdrop(
+    source: &RgbaImage,
+    backdrop: Backdrop,
+    cache: &RenderCache,
+) -> Result<RgbaImage> {
     let backdrop = Backdrop {
         padding: backdrop.padding.min(MAX_BACKDROP_PADDING),
         ..backdrop
@@ -1614,14 +1785,28 @@ fn apply_backdrop(source: &RgbaImage, backdrop: Backdrop) -> Result<RgbaImage> {
     if added > MAX_IMAGE_PIXELS {
         return Err(SnipletError::ImageTooLarge { width, height });
     }
-    let mut result = background(width, height, backdrop.background);
-    if let Some(shadow) = backdrop.shadow {
-        let layer = shadow_layer(width, height, source, backdrop, shadow);
-        let shadow = layer.as_chunks::<4>().0;
-        for (pixel, shadow) in result.as_chunks_mut::<4>().0.iter_mut().zip(shadow) {
-            blend_over(pixel, *shadow);
+    let key: BackdropKey = (backdrop, (width, height), source.dimensions());
+    let cached = lock(&cache.backdrop)
+        .as_ref()
+        .filter(|(cached, _)| *cached == key)
+        .map(|(_, plate)| plate.clone());
+    let plate = match cached {
+        Some(plate) => plate,
+        None => {
+            let mut plate = background(width, height, backdrop.background);
+            if let Some(shadow) = backdrop.shadow {
+                let layer = shadow_layer(width, height, source, backdrop, shadow);
+                let shadow = layer.as_chunks::<4>().0;
+                for (pixel, shadow) in plate.as_chunks_mut::<4>().0.iter_mut().zip(shadow) {
+                    blend_over(pixel, *shadow);
+                }
+            }
+            let plate = Arc::new(plate);
+            *lock(&cache.backdrop) = Some((key, plate.clone()));
+            plate
         }
-    }
+    };
+    let mut result = RgbaImage::clone(&plate);
     let radius = backdrop
         .corner_radius
         .min(source.width().min(source.height()) / 2);
@@ -1782,7 +1967,7 @@ fn round_to_u8(value: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AnnotationStyle;
+    use crate::{AnnotationStyle, Document};
     use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
 
     const TEST_FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSans.ttf");
@@ -1806,6 +1991,8 @@ mod tests {
             .collect();
         // Keep the full-canvas allocation path independent of the optimized
         // renderer, with the same required base/image/shade/drawing order.
+        // Magnifiers sample the canvas as it is before shade and drawings.
+        let mut lens_source = None;
         for layer in [
             CompositeLayer::Raster,
             CompositeLayer::Image,
@@ -1813,6 +2000,7 @@ mod tests {
             CompositeLayer::Drawing,
         ] {
             if layer == CompositeLayer::Spotlight {
+                lens_source = Some(canvas.clone());
                 legacy_draw_spotlights(&mut canvas, &annotations);
                 continue;
             }
@@ -1822,7 +2010,7 @@ mod tests {
             {
                 legacy_draw_annotation(
                     &mut canvas,
-                    document.original(),
+                    lens_source.as_ref().unwrap_or(document.original()),
                     annotation,
                     font.as_ref(),
                 )?;
@@ -1837,7 +2025,7 @@ mod tests {
                 .to_image();
         }
         if options.apply_backdrop {
-            canvas = apply_backdrop(&canvas, document.backdrop())?;
+            canvas = apply_backdrop(&canvas, document.backdrop(), &RenderCache::default())?;
         }
         Ok(canvas)
     }
@@ -2197,7 +2385,7 @@ mod tests {
         document.add_annotation(
             AnnotationKind::Image {
                 origin: Point::new(97.2, 67.6),
-                png_bytes: png,
+                png_bytes: png.into(),
                 size: Some(crate::ImageSize {
                     width: 11,
                     height: 8,

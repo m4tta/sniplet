@@ -14,7 +14,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velopack::{
-    UpdateInfo, UpdateManager, VelopackApp, VelopackAsset,
+    HttpOptions, UpdateInfo, UpdateManager, VelopackApp, VelopackAsset,
     locator::{LocationContext, auto_locate_app_manifest},
     sources::{HttpSource, NoneSource},
 };
@@ -280,8 +280,11 @@ pub fn check(channel: ReleaseChannel, current: &BuildIdentity) -> Result<Option<
             Some(releases)
         }
         ReleaseChannel::Nightly => {
+            // GitHub lists the newest releases first, so the newest nightly is near the top,
+            // after at most a few stables and drafts. 30 releases are about 750 KB of JSON,
+            // well under the size limit, which 100 releases pass.
             let releases: Vec<GitHubRelease> =
-                serde_json::from_slice(&fetch(&format!("{api}?per_page=100"), 2 * 1024 * 1024)?)?;
+                serde_json::from_slice(&fetch(&format!("{api}?per_page=30"), 2 * 1024 * 1024)?)?;
             // Older nightlies used other tag formats; only `vX.Y.Z-nightly.*` can update.
             releases
                 .into_iter()
@@ -340,13 +343,25 @@ fn verify_package(path: &Path, size: u64, sha256: &str) -> Result<()> {
     Ok(())
 }
 
+/// Velopack's timeout covers the whole download, so a stalled one fails instead of blocking
+/// forever: 10 minutes, plus one second for each 50 KB, so slow connections still finish.
+fn download_timeout(size: u64) -> Duration {
+    Duration::from_secs(10 * 60 + size / 50_000)
+}
+
 /// Download and verify only. The installed app is unchanged until `install`.
 pub fn download(release: &UpdateRelease) -> Result<DownloadedUpdate> {
     ensure!(!release.reinstall, "Download this version from the website");
-    let source = HttpSource::new(format!(
-        "https://github.com/{REPOSITORY}/releases/download/{}/",
-        release.tag
-    ));
+    let source = HttpSource::new_with_options(
+        format!(
+            "https://github.com/{REPOSITORY}/releases/download/{}/",
+            release.tag
+        ),
+        HttpOptions {
+            TimeoutMilliseconds: download_timeout(release.size).as_millis() as u64,
+            ..Default::default()
+        },
+    );
     #[cfg(target_os = "linux")]
     let locator = Some(updater_outside_appimage()?);
     #[cfg(not(target_os = "linux"))]

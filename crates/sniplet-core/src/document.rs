@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStyle, Color, ImageRect, Point, Result,
-    SnipletError, export::check_image_size, open_image,
+    SnipletError, export::check_image_size, open_image, render::RenderCache,
 };
 
 const PROJECT_VERSION: u32 = 1;
@@ -129,21 +129,36 @@ impl Project {
     }
 }
 
+/// What a render reads: the shared source pixels, the annotations, crop, backdrop and canvas
+/// size, without the selection or the undo history. A clone shares the source and the pixels
+/// cached by earlier renders, so a worker can render one while editing goes on.
 #[derive(Clone, Debug)]
-pub struct Document {
+pub struct Scene {
     original: Arc<RgbaImage>,
     original_is_opaque: bool,
     source_scale_factor: Option<f32>,
     canvas_size: ImageSize,
     annotations: Vec<Annotation>,
-    selected: Option<AnnotationId>,
     crop: Option<ImageRect>,
     backdrop: Backdrop,
+    /// Belongs to `original`: every entry was rendered from these source pixels.
+    pub(crate) cache: Arc<RenderCache>,
+}
+
+/// A [`Scene`] with its selection and undo history. It derefs to the scene, so it reads
+/// and renders like one; [`Document::snapshot`] gives a worker its own copy.
+#[derive(Clone, Debug)]
+pub struct Document {
+    scene: Scene,
+    selected: Option<AnnotationId>,
     next_id: u64,
     undo: Vec<EditState>,
     redo: Vec<EditState>,
     group_start: Option<EditState>,
 }
+
+/// Undo steps kept. A new step past this drops the oldest.
+const MAX_UNDO: usize = 200;
 
 #[derive(Clone, Debug, PartialEq)]
 struct EditState {
@@ -155,19 +170,15 @@ struct EditState {
     next_id: u64,
 }
 
-impl Document {
-    /// Base pixels after raster edits, without pasted images, drawings, crop, or backdrop.
-    pub(crate) fn raster_copy(&self) -> Self {
-        let mut raster = Self::new(self.original().clone());
-        raster.annotations = self
-            .annotations
-            .iter()
-            .filter(|a| a.kind.composite_layer() == crate::annotation::CompositeLayer::Raster)
-            .cloned()
-            .collect();
-        raster
-    }
+impl std::ops::Deref for Document {
+    type Target = Scene;
 
+    fn deref(&self) -> &Scene {
+        &self.scene
+    }
+}
+
+impl Document {
     pub fn new(original: RgbaImage) -> Self {
         let canvas_size = ImageSize {
             width: original.width(),
@@ -175,19 +186,27 @@ impl Document {
         };
         let original_is_opaque = original.pixels().all(|pixel| pixel[3] == 255);
         Self {
-            original: Arc::new(original),
-            original_is_opaque,
-            source_scale_factor: None,
-            canvas_size,
-            annotations: Vec::new(),
+            scene: Scene {
+                original: Arc::new(original),
+                original_is_opaque,
+                source_scale_factor: None,
+                canvas_size,
+                annotations: Vec::new(),
+                crop: None,
+                backdrop: Backdrop::default(),
+                cache: Arc::default(),
+            },
             selected: None,
-            crop: None,
-            backdrop: Backdrop::default(),
             next_id: 1,
             undo: Vec::new(),
             redo: Vec::new(),
             group_start: None,
         }
+    }
+
+    /// The scene as it is now, for a render or an export on another thread.
+    pub fn snapshot(&self) -> Scene {
+        self.scene.clone()
     }
 
     pub fn from_project(project: Project, original: RgbaImage) -> Result<Self> {
@@ -221,21 +240,22 @@ impl Document {
         if let Some(scale) = project.source_scale_factor {
             document.set_source_scale_factor(scale);
         }
-        document.canvas_size = project
+        let scene = &mut document.scene;
+        scene.canvas_size = project
             .canvas_size
             .map(|size| ImageSize {
                 width: size.width.max(actual.width),
                 height: size.height.max(actual.height),
             })
             .unwrap_or(actual);
-        if document.canvas_size != actual {
-            check_image_size(document.canvas_size.width, document.canvas_size.height)?;
+        if scene.canvas_size != actual {
+            check_image_size(scene.canvas_size.width, scene.canvas_size.height)?;
         }
-        document.annotations = project.annotations;
-        for annotation in &mut document.annotations {
+        scene.annotations = project.annotations;
+        for annotation in &mut scene.annotations {
             annotation
                 .kind
-                .normalize_and_clip(document.canvas_size.width, document.canvas_size.height);
+                .normalize_and_clip(scene.canvas_size.width, scene.canvas_size.height);
             if !annotation.is_finite() {
                 return Err(SnipletError::NonFiniteValue);
             }
@@ -243,21 +263,88 @@ impl Document {
         // A hand-edited file can repeat an id, or use ids that leave none for new
         // annotations. Renumber it, so each annotation stays editable on its own.
         let mut ids = HashSet::new();
-        if !document.annotations.iter().all(|a| ids.insert(a.id)) || next_id == u64::MAX {
-            for (index, annotation) in document.annotations.iter_mut().enumerate() {
+        if !scene.annotations.iter().all(|a| ids.insert(a.id)) || next_id == u64::MAX {
+            for (index, annotation) in scene.annotations.iter_mut().enumerate() {
                 annotation.id = AnnotationId(index as u64 + 1);
             }
-            next_id = document.annotations.len() as u64 + 1;
+            next_id = scene.annotations.len() as u64 + 1;
         }
         if !project.backdrop.is_finite() {
             return Err(SnipletError::NonFiniteValue);
         }
-        document.crop = project
+        scene.crop = project
             .crop
-            .map(|crop| crop.clipped(document.canvas_size.width, document.canvas_size.height));
-        document.backdrop = project.backdrop;
+            .map(|crop| crop.clipped(scene.canvas_size.width, scene.canvas_size.height));
+        scene.backdrop = project.backdrop;
         document.next_id = next_id;
         Ok(document)
+    }
+
+    pub fn set_source_scale_factor(&mut self, scale: f32) {
+        self.scene.source_scale_factor = scale.is_finite().then(|| scale.clamp(1.0, 8.0));
+    }
+
+    /// Grows the editable canvas to at least `width` by `height`, anchored at
+    /// the immutable source image's top-left. Returns whether it changed.
+    /// A canvas over the image size limit is refused.
+    pub fn expand_canvas_to(&mut self, width: u32, height: u32) -> bool {
+        let expanded = ImageSize {
+            width: self.width().max(width),
+            height: self.height().max(height),
+        };
+        if expanded == self.dimensions()
+            || check_image_size(expanded.width, expanded.height).is_err()
+        {
+            return false;
+        }
+        self.record_before_change();
+        self.scene.canvas_size = expanded;
+        true
+    }
+
+    pub fn selected(&self) -> Option<AnnotationId> {
+        self.selected
+    }
+
+    pub fn select(&mut self, id: Option<AnnotationId>) -> Result<()> {
+        if let Some(id) = id
+            && self.annotation(id).is_none()
+        {
+            return Err(SnipletError::UnknownAnnotation(id.0));
+        }
+        self.selected = id;
+        Ok(())
+    }
+}
+
+impl Scene {
+    /// This scene cut to `rect`, without its backdrop: what an export of a selection shows.
+    /// A selection with no area exports the whole canvas.
+    pub fn cropped_to(mut self, rect: ImageRect) -> Self {
+        self.crop = self.crop_within(rect);
+        self.backdrop = Backdrop::default();
+        self
+    }
+
+    /// `rect` clipped to the canvas, or none when no area is left.
+    fn crop_within(&self, rect: ImageRect) -> Option<ImageRect> {
+        let rect = rect.clipped(self.width(), self.height());
+        (rect.width > 0.0 && rect.height > 0.0).then_some(rect)
+    }
+
+    /// The source pixels when they already are this scene's render: nothing drawn, no crop
+    /// or backdrop, an opaque source and a canvas of its size. Showing them needs no render.
+    pub fn unedited(&self) -> Option<Arc<RgbaImage>> {
+        let source_size = ImageSize {
+            width: self.original.width(),
+            height: self.original.height(),
+        };
+        (self.annotations.is_empty()
+            && self.crop.is_none()
+            && crate::render::backdrop_is_identity(self.backdrop)
+            && self.original_is_opaque
+            && self.canvas_size == source_size)
+            .then(|| self.original.clone())
     }
 
     pub fn to_project(&self, source_image: impl Into<PathBuf>) -> Project {
@@ -279,10 +366,6 @@ impl Document {
     /// Capture scale, when recorded with the source image.
     pub fn source_scale_factor(&self) -> Option<f32> {
         self.source_scale_factor
-    }
-
-    pub fn set_source_scale_factor(&mut self, scale: f32) {
-        self.source_scale_factor = scale.is_finite().then(|| scale.clamp(1.0, 8.0));
     }
 
     /// The immutable, undecorated source pixels.
@@ -311,24 +394,6 @@ impl Document {
         self.canvas_size.height
     }
 
-    /// Grows the editable canvas to at least `width` by `height`, anchored at
-    /// the immutable source image's top-left. Returns whether it changed.
-    /// A canvas over the image size limit is refused.
-    pub fn expand_canvas_to(&mut self, width: u32, height: u32) -> bool {
-        let expanded = ImageSize {
-            width: self.canvas_size.width.max(width),
-            height: self.canvas_size.height.max(height),
-        };
-        if expanded == self.canvas_size
-            || check_image_size(expanded.width, expanded.height).is_err()
-        {
-            return false;
-        }
-        self.record_before_change();
-        self.canvas_size = expanded;
-        true
-    }
-
     pub fn annotations(&self) -> &[Annotation] {
         &self.annotations
     }
@@ -339,26 +404,26 @@ impl Document {
             .find(|annotation| annotation.id == id)
     }
 
-    pub fn selected(&self) -> Option<AnnotationId> {
-        self.selected
-    }
-
-    pub fn select(&mut self, id: Option<AnnotationId>) -> Result<()> {
-        if let Some(id) = id
-            && self.annotation(id).is_none()
-        {
-            return Err(SnipletError::UnknownAnnotation(id.0));
-        }
-        self.selected = id;
-        Ok(())
-    }
-
     pub fn crop(&self) -> Option<ImageRect> {
         self.crop
     }
 
     pub fn backdrop(&self) -> Backdrop {
         self.backdrop
+    }
+
+    /// Returns the topmost annotation under an image-space point.
+    pub fn hit_test(&self, point: Point, tolerance: f32) -> Option<AnnotationId> {
+        self.annotations
+            .iter()
+            .enumerate()
+            .filter(|(_, annotation)| {
+                annotation
+                    .kind
+                    .hit_test(point, tolerance.max(0.0), annotation.style.stroke_width)
+            })
+            .max_by_key(|(index, annotation)| (annotation.kind.composite_layer(), *index))
+            .map(|(_, annotation)| annotation.id)
     }
 
     pub fn sample_color(&self, point: Point) -> Option<Color> {
@@ -517,7 +582,9 @@ impl Document {
             (bottom - top + 1) as f32,
         ))
     }
+}
 
+impl Document {
     /// Adds an annotation and returns its id. An annotation with a NaN or
     /// infinite number is not added, and the returned id names no annotation.
     pub fn add_annotation(
@@ -533,8 +600,16 @@ impl Document {
         }
         self.record_before_change();
         self.next_id = self.next_id.saturating_add(1);
-        self.annotations.push(annotation);
+        self.scene.annotations.push(annotation);
         id
+    }
+
+    /// The position of annotation `id`, for an edit.
+    fn index_of(&self, id: AnnotationId) -> Result<usize> {
+        self.annotations
+            .iter()
+            .position(|annotation| annotation.id == id)
+            .ok_or(SnipletError::UnknownAnnotation(id.0))
     }
 
     pub fn update_annotation(
@@ -543,11 +618,7 @@ impl Document {
         mut kind: AnnotationKind,
         style: AnnotationStyle,
     ) -> Result<()> {
-        let index = self
-            .annotations
-            .iter()
-            .position(|annotation| annotation.id == id)
-            .ok_or(SnipletError::UnknownAnnotation(id.0))?;
+        let index = self.index_of(id)?;
         kind.normalize_and_clip(self.width(), self.height());
         let replacement = Annotation { id, kind, style };
         if !replacement.is_finite() {
@@ -555,17 +626,13 @@ impl Document {
         }
         if self.annotations[index] != replacement {
             self.record_before_change();
-            self.annotations[index] = replacement;
+            self.scene.annotations[index] = replacement;
         }
         Ok(())
     }
 
     pub fn move_annotation(&mut self, id: AnnotationId, delta: Point) -> Result<()> {
-        let index = self
-            .annotations
-            .iter()
-            .position(|annotation| annotation.id == id)
-            .ok_or(SnipletError::UnknownAnnotation(id.0))?;
+        let index = self.index_of(id)?;
         if !delta.x.is_finite() || !delta.y.is_finite() {
             return Err(SnipletError::NonFiniteValue);
         }
@@ -573,7 +640,7 @@ impl Document {
             return Ok(());
         }
         self.record_before_change();
-        self.annotations[index].kind.translate(delta);
+        self.scene.annotations[index].kind.translate(delta);
         Ok(())
     }
 
@@ -584,11 +651,7 @@ impl Document {
     /// Embedded PNG annotations scale non-destructively; their encoded pixels
     /// stay unchanged and the target pixel size is stored separately.
     pub fn resize_annotation(&mut self, id: AnnotationId, target_bounds: ImageRect) -> Result<()> {
-        let index = self
-            .annotations
-            .iter()
-            .position(|annotation| annotation.id == id)
-            .ok_or(SnipletError::UnknownAnnotation(id.0))?;
+        let index = self.index_of(id)?;
         if !target_bounds.x.is_finite()
             || !target_bounds.y.is_finite()
             || !target_bounds.width.is_finite()
@@ -605,37 +668,19 @@ impl Document {
         }
         if resized != self.annotations[index].kind {
             self.record_before_change();
-            self.annotations[index].kind = resized;
+            self.scene.annotations[index].kind = resized;
         }
         Ok(())
     }
 
     pub fn delete_annotation(&mut self, id: AnnotationId) -> Result<Annotation> {
-        let index = self
-            .annotations
-            .iter()
-            .position(|annotation| annotation.id == id)
-            .ok_or(SnipletError::UnknownAnnotation(id.0))?;
+        let index = self.index_of(id)?;
         self.record_before_change();
-        let removed = self.annotations.remove(index);
+        let removed = self.scene.annotations.remove(index);
         if self.selected == Some(id) {
             self.selected = None;
         }
         Ok(removed)
-    }
-
-    /// Returns the topmost annotation under an image-space point.
-    pub fn hit_test(&self, point: Point, tolerance: f32) -> Option<AnnotationId> {
-        self.annotations
-            .iter()
-            .enumerate()
-            .filter(|(_, annotation)| {
-                annotation
-                    .kind
-                    .hit_test(point, tolerance.max(0.0), annotation.style.stroke_width)
-            })
-            .max_by_key(|(index, annotation)| (annotation.kind.composite_layer(), *index))
-            .map(|(_, annotation)| annotation.id)
     }
 
     pub fn select_at(&mut self, point: Point, tolerance: f32) -> Option<AnnotationId> {
@@ -644,26 +689,25 @@ impl Document {
     }
 
     pub fn set_crop(&mut self, rect: ImageRect) {
-        let rect = rect.clipped(self.width(), self.height());
-        let crop = (rect.width > 0.0 && rect.height > 0.0).then_some(rect);
-        if self.crop != crop {
+        let crop = self.crop_within(rect);
+        if self.crop() != crop {
             self.record_before_change();
-            self.crop = crop;
+            self.scene.crop = crop;
         }
     }
 
     pub fn clear_crop(&mut self) {
-        if self.crop.is_some() {
+        if self.crop().is_some() {
             self.record_before_change();
-            self.crop = None;
+            self.scene.crop = None;
         }
     }
 
     /// A backdrop with a NaN or infinite number is ignored.
     pub fn set_backdrop(&mut self, backdrop: Backdrop) {
-        if self.backdrop != backdrop && backdrop.is_finite() {
+        if self.backdrop() != backdrop && backdrop.is_finite() {
             self.record_before_change();
-            self.backdrop = backdrop;
+            self.scene.backdrop = backdrop;
         }
     }
 
@@ -679,8 +723,7 @@ impl Document {
     pub fn end_group(&mut self) -> Result<()> {
         let start = self.group_start.take().ok_or(SnipletError::NoEditGroup)?;
         if start != self.state() {
-            self.undo.push(start);
-            self.redo.clear();
+            self.push_undo(start);
         }
         Ok(())
     }
@@ -723,9 +766,17 @@ impl Document {
 
     fn record_before_change(&mut self) {
         if self.group_start.is_none() {
-            self.undo.push(self.state());
-            self.redo.clear();
+            self.push_undo(self.state());
         }
+    }
+
+    /// A new undo step. It clears redo, and drops the oldest step past [`MAX_UNDO`].
+    fn push_undo(&mut self, state: EditState) {
+        if self.undo.len() >= MAX_UNDO {
+            self.undo.remove(0);
+        }
+        self.undo.push(state);
+        self.redo.clear();
     }
 
     fn state(&self) -> EditState {
@@ -740,15 +791,17 @@ impl Document {
     }
 
     fn restore(&mut self, state: EditState) {
-        self.canvas_size = state.canvas_size;
-        self.annotations = state.annotations;
+        let scene = &mut self.scene;
+        scene.canvas_size = state.canvas_size;
+        scene.annotations = state.annotations;
         self.selected = state.selected.filter(|id| {
-            self.annotations
+            scene
+                .annotations
                 .iter()
                 .any(|annotation| annotation.id == *id)
         });
-        self.crop = state.crop;
-        self.backdrop = state.backdrop;
+        scene.crop = state.crop;
+        scene.backdrop = state.backdrop;
         self.next_id = state.next_id;
     }
 }
