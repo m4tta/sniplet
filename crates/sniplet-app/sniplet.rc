@@ -1,2 +1,2 @@
-// GPUI loads resource 1 for the window and taskbar icon.
+// The icon File Explorer shows for Sniplet.exe. The windows get theirs from `rune::set_app_icon`.
 1 ICON "../../assets/icons/sniplet.ico"
