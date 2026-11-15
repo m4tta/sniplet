@@ -135,6 +135,15 @@ fn main() -> anyhow::Result<()> {
         .and_then(|monitors| monitors.into_iter().find(|m| m.is_primary))
         .map_or(1.0, |monitor| monitor.scale_factor);
 
+    // Each platform finds the window icon in a different place. A Mac reads it from the app
+    // bundle. A Linux desktop matches the window's app ID to the installed `.desktop` entry,
+    // which names the icon. Windows takes it from `set_app_icon`, not from the icon resource
+    // in the executable.
+    rune::set_app_id(sniplet_platform::APP_ID);
+    #[cfg(target_os = "windows")]
+    rune::set_app_icon(&include_bytes!("../../../assets/icons/sniplet-256.png")[..])
+        .expect("The bundled app icon is a PNG");
+
     rune::prewarm_gpu();
     let spec = AppSpec {
         min_size: Some((900.0, 560.0)),
