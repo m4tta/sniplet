@@ -1,4 +1,4 @@
-use std::{any::Any, panic::AssertUnwindSafe};
+use std::{any::Any, collections::HashMap, panic::AssertUnwindSafe};
 
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
@@ -28,19 +28,31 @@ pub struct MonitorInfo {
     pub is_primary: bool,
 }
 
+/// A monitor's identity, desktop origin, size in capture-image pixels, and scale. Unlike
+/// `MonitorInfo` it skips the display name, which is slow on Windows and needs the main thread
+/// on macOS, so captures and worker threads read this instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonitorGeometry {
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub id: u32,
     pub process_id: u32,
-    pub app_name: String,
     pub title: String,
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Larger values are nearer the front.
     pub z_order: i32,
     pub is_minimized: bool,
-    pub is_maximized: bool,
     pub is_focused: bool,
 }
 
@@ -66,7 +78,7 @@ impl WindowInfo {
 
 /// Returns the frontmost capturable application window at a desktop point.
 ///
-/// `xcap` reports larger z-order values for windows nearer the front on every
+/// `list_windows` gives larger z-order values to windows nearer the front on every
 /// supported desktop backend. Keeping this policy beside window enumeration
 /// makes hover selection and any future native picker agree.
 pub fn window_at_point(
@@ -108,17 +120,14 @@ fn property<T>(
     })
 }
 
+/// Every monitor with its display name. macOS reads the names through AppKit, so call this
+/// only on the main thread there; captures and workers use `list_monitor_geometry`.
 pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
     capture_backend("enumerate monitors", list_monitors_impl)
 }
 
 fn list_monitors_impl() -> Result<Vec<MonitorInfo>> {
-    let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
-        kind: "monitors",
-        source: Box::new(source),
-    })?;
-
-    monitors
+    all_monitors()?
         .iter()
         .enumerate()
         .map(|(index, monitor)| monitor_info(index, monitor))
@@ -128,20 +137,68 @@ fn list_monitors_impl() -> Result<Vec<MonitorInfo>> {
 fn monitor_info(index: usize, monitor: &Monitor) -> Result<MonitorInfo> {
     let name = property("monitor", "friendly_name", monitor.friendly_name())
         .or_else(|_| property("monitor", "name", monitor.name()))?;
+    let geometry = monitor_geometry(monitor)?;
+    Ok(MonitorInfo {
+        index,
+        id: geometry.id,
+        name,
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+        scale_factor: geometry.scale_factor,
+        is_primary: property("monitor", "is_primary", monitor.is_primary())?,
+    })
+}
+
+/// Every monitor's geometry, in enumeration order. Safe on any thread.
+pub fn list_monitor_geometry() -> Result<Vec<MonitorGeometry>> {
+    capture_backend("enumerate monitors", || {
+        all_monitors()?.iter().map(monitor_geometry).collect()
+    })
+}
+
+/// The geometry of the monitor with `id`.
+pub(crate) fn geometry_of(id: u32) -> Result<MonitorGeometry> {
+    capture_backend("find a monitor", || {
+        find_monitor(id).map(|(_, _, geometry)| geometry)
+    })
+}
+
+fn monitor_geometry(monitor: &Monitor) -> Result<MonitorGeometry> {
     let scale_factor = property("monitor", "scale_factor", monitor.scale_factor())?;
     let native_width = property("monitor", "width", monitor.width())?;
     let native_height = property("monitor", "height", monitor.height())?;
-    Ok(MonitorInfo {
-        index,
+    Ok(MonitorGeometry {
         id: property("monitor", "id", monitor.id())?,
-        name,
         x: property("monitor", "x", monitor.x())?,
         y: property("monitor", "y", monitor.y())?,
         width: capture_pixels(native_width, scale_factor),
         height: capture_pixels(native_height, scale_factor),
         scale_factor,
-        is_primary: property("monitor", "is_primary", monitor.is_primary())?,
     })
+}
+
+fn all_monitors() -> Result<Vec<Monitor>> {
+    Monitor::all().map_err(|source| PlatformError::Enumeration {
+        kind: "monitors",
+        source: Box::new(source),
+    })
+}
+
+/// The monitor with `id`, its place in the enumeration, and its geometry.
+fn find_monitor(id: u32) -> Result<(usize, Monitor, MonitorGeometry)> {
+    let (index, monitor) = all_monitors()?
+        .into_iter()
+        .enumerate()
+        .find(|(_, monitor)| monitor.id().is_ok_and(|candidate| candidate == id))
+        .ok_or_else(|| {
+            PlatformError::Capture(Box::new(xcap::XCapError::new(
+                "The display was disconnected",
+            )))
+        })?;
+    let geometry = monitor_geometry(&monitor)?;
+    Ok((index, monitor, geometry))
 }
 
 pub fn capture_monitor(index: usize) -> Result<CapturedFrame> {
@@ -152,10 +209,7 @@ pub fn capture_monitor(index: usize) -> Result<CapturedFrame> {
 /// editor's cached display index. Native hit testing handles display placement.
 pub fn capture_monitor_under_pointer() -> Result<CapturedFrame> {
     capture_backend("capture the monitor under the pointer", || {
-        let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
-            kind: "monitors",
-            source: Box::new(source),
-        })?;
+        let monitors = all_monitors()?;
         let point = pointer_position()?;
         // X11 returns physical pointer coordinates. xcap's Linux point lookup
         // expects desktop units and applies its global display scale itself.
@@ -185,7 +239,8 @@ pub fn capture_monitor_under_pointer() -> Result<CapturedFrame> {
         if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
             eprintln!("capture backend: pointer={point:?}; display id={id}; index={index}");
         }
-        capture_monitor_frame(index, &selected)
+        let geometry = monitor_geometry(&selected)?;
+        capture_monitor_frame(index, &selected, geometry)
     })
 }
 
@@ -236,19 +291,38 @@ fn pointer_position() -> Result<ScreenPoint> {
     Ok(ScreenPoint { x, y })
 }
 
-/// Captures every display before selection windows are shown. Enumerating once
-/// keeps the frame indices and display identities consistent within a session.
+/// Captures every display before selection windows are shown, one thread per display.
+/// Enumerating once keeps the frame indices and display identities consistent within a
+/// session. Windows monitor handles cannot cross threads, so each thread finds its display
+/// again by ID.
 pub fn capture_monitors() -> Result<Vec<CapturedFrame>> {
     capture_backend("capture all monitors", || {
-        let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
-            kind: "monitors",
-            source: Box::new(source),
-        })?;
-        monitors
+        let ids = all_monitors()?
             .iter()
-            .enumerate()
-            .map(|(index, monitor)| capture_monitor_frame(index, monitor))
-            .collect()
+            .map(|monitor| property("monitor", "id", monitor.id()))
+            .collect::<Result<Vec<_>>>()?;
+        std::thread::scope(|scope| {
+            let threads = ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    scope.spawn(move || {
+                        capture_backend("capture a monitor", || {
+                            let (_, monitor, geometry) = find_monitor(id)?;
+                            capture_monitor_frame(index, &monitor, geometry)
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| {
+                    thread
+                        .join()
+                        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+                })
+                .collect()
+        })
     })
 }
 
@@ -274,110 +348,133 @@ pub fn capture_desktop_region(
 fn capture_monitor_impl(index: usize) -> Result<CapturedFrame> {
     let started = std::time::Instant::now();
     let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
-    let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
-        kind: "monitors",
-        source: Box::new(source),
-    })?;
+    let monitors = all_monitors()?;
     let available = monitors.len();
     let monitor = monitors
         .into_iter()
         .nth(index)
         .ok_or(PlatformError::MonitorNotFound { index, available })?;
+    let geometry = monitor_geometry(&monitor)?;
     if trace {
         eprintln!("capture backend: display lookup {:?}", started.elapsed());
     }
-    capture_monitor_frame(index, &monitor)
+    capture_monitor_frame(index, &monitor, geometry)
 }
 
-fn capture_monitor_frame(index: usize, monitor: &Monitor) -> Result<CapturedFrame> {
+fn capture_monitor_frame(
+    index: usize,
+    monitor: &Monitor,
+    geometry: MonitorGeometry,
+) -> Result<CapturedFrame> {
     let started = std::time::Instant::now();
-    let trace = std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some();
-    let info = monitor_info(index, monitor)?;
-    if trace {
-        eprintln!("capture backend: display metadata {:?}", started.elapsed());
-    }
     let image = monitor
         .capture_image()
         .map_err(|source| PlatformError::Capture(Box::new(source)))?;
-    if trace {
+    if std::env::var_os("SNIPLET_CAPTURE_TRACE").is_some() {
         eprintln!("capture backend: image {:?}", started.elapsed());
     }
     Ok(CapturedFrame {
         image,
         origin: ScreenPoint {
-            x: info.x,
-            y: info.y,
+            x: geometry.x,
+            y: geometry.y,
         },
-        scale_factor: info.scale_factor,
-        source: CaptureSource::Monitor { index, id: info.id },
+        scale_factor: geometry.scale_factor,
+        source: CaptureSource::Monitor {
+            index,
+            id: geometry.id,
+        },
     })
 }
 
-/// Captures a rectangle using image pixels relative to the monitor capture's
-/// top-left corner. This stays pixel-accurate on Retina displays even though
-/// macOS screen APIs express desktop coordinates in points.
+/// Captures a rectangle of the monitor with ID `monitor_id`, in image pixels relative to the
+/// monitor capture's top-left corner. This stays pixel-accurate on Retina displays even
+/// though macOS screen APIs express desktop coordinates in points.
 pub fn capture_monitor_region(
-    index: usize,
+    monitor_id: u32,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
 ) -> Result<CapturedFrame> {
     capture_backend("capture a monitor region", || {
-        capture_monitor_region_impl(index, x, y, width, height)
+        capture_monitor_region_impl(monitor_id, x, y, width, height)
     })
 }
 
+/// Whether this is a Wayland session, as xcap decides it.
+fn wayland_session() -> bool {
+    std::env::var_os("XDG_SESSION_TYPE").is_some_and(|kind| kind.to_str() == Some("wayland"))
+        || std::env::var_os("WAYLAND_DISPLAY")
+            .is_some_and(|display| display.to_string_lossy().to_lowercase().contains("wayland"))
+}
+
 fn capture_monitor_region_impl(
-    index: usize,
+    monitor_id: u32,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
 ) -> Result<CapturedFrame> {
-    let monitors = Monitor::all().map_err(|source| PlatformError::Enumeration {
-        kind: "monitors",
-        source: Box::new(source),
-    })?;
-    let available = monitors.len();
-    let monitor = monitors
-        .into_iter()
-        .nth(index)
-        .ok_or(PlatformError::MonitorNotFound { index, available })?;
-    let info = monitor_info(index, &monitor)?;
-    if width == 0
-        || height == 0
-        || x.checked_add(width).is_none_or(|right| right > info.width)
-        || y.checked_add(height)
-            .is_none_or(|bottom| bottom > info.height)
-    {
-        return Err(PlatformError::InvalidCaptureRegion {
-            x,
-            y,
-            width,
-            height,
-            monitor_width: info.width,
-            monitor_height: info.height,
-        });
-    }
+    let (index, monitor, info) = find_monitor(monitor_id)?;
+    // The region must lie inside a monitor of this size, in image pixels.
+    let inside = |monitor_width: u32, monitor_height: u32| {
+        if width > 0
+            && height > 0
+            && x.checked_add(width)
+                .is_some_and(|right| right <= monitor_width)
+            && y.checked_add(height)
+                .is_some_and(|bottom| bottom <= monitor_height)
+        {
+            Ok(())
+        } else {
+            Err(PlatformError::InvalidCaptureRegion {
+                x,
+                y,
+                width,
+                height,
+                monitor_width,
+                monitor_height,
+            })
+        }
+    };
     let native_x = desktop_units(x, info.scale_factor);
     let native_y = desktop_units(y, info.scale_factor);
-    let native_width = desktop_units_ceil(width, info.scale_factor);
-    let native_height = desktop_units_ceil(height, info.scale_factor);
-    let mut image = monitor
-        .capture_region(native_x, native_y, native_width, native_height)
-        .map_err(|source| PlatformError::Capture(Box::new(source)))?;
-    // Rounding a Retina point rectangle outward can produce an extra pixel.
-    if image.width() > width || image.height() > height {
-        image = image::imageops::crop_imm(
-            &image,
-            0,
-            0,
-            width.min(image.width()),
-            height.min(image.height()),
-        )
-        .to_image();
-    }
+    // A Retina point rectangle rounds outward, so the image can start before the region.
+    let skip_x = x.saturating_sub(capture_pixels(native_x, info.scale_factor));
+    let skip_y = y.saturating_sub(capture_pixels(native_y, info.scale_factor));
+    // xcap gives the Wayland screenshot monitor-relative coordinates where it expects desktop
+    // ones, and on a scaled Linux desktop it checks a region against logical sizes. Both
+    // capture the whole monitor and crop it.
+    let image = if cfg!(target_os = "linux") && (wayland_session() || info.scale_factor != 1.0) {
+        let full = monitor
+            .capture_image()
+            .map_err(|source| PlatformError::Capture(Box::new(source)))?;
+        inside(full.width(), full.height())?;
+        image::imageops::crop_imm(&full, x, y, width, height).to_image()
+    } else {
+        inside(info.width, info.height)?;
+        let image = monitor
+            .capture_region(
+                native_x,
+                native_y,
+                desktop_units_ceil(skip_x + width, info.scale_factor),
+                desktop_units_ceil(skip_y + height, info.scale_factor),
+            )
+            .map_err(|source| PlatformError::Capture(Box::new(source)))?;
+        if skip_x == 0 && skip_y == 0 && image.dimensions() == (width, height) {
+            image
+        } else {
+            image::imageops::crop_imm(
+                &image,
+                skip_x.min(image.width()),
+                skip_y.min(image.height()),
+                width.min(image.width().saturating_sub(skip_x)),
+                height.min(image.height().saturating_sub(skip_y)),
+            )
+            .to_image()
+        }
+    };
     Ok(CapturedFrame {
         image,
         origin: ScreenPoint {
@@ -423,14 +520,24 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     capture_backend("enumerate windows", list_windows_impl)
 }
 
-fn list_windows_impl() -> Result<Vec<WindowInfo>> {
-    let windows = Window::all().map_err(|source| PlatformError::Enumeration {
+fn all_windows() -> Result<Vec<Window>> {
+    Window::all().map_err(|source| PlatformError::Enumeration {
         kind: "windows",
         source: Box::new(source),
-    })?;
+    })
+}
+
+fn list_windows_impl() -> Result<Vec<WindowInfo>> {
+    let windows = all_windows()?;
+    let count = windows.len();
     // Windows can disappear between enumeration and property reads. Omitting a
-    // stale entry keeps a single closing tooltip from breaking the picker.
-    let windows = windows.iter().filter_map(|window| window_info(window).ok());
+    // stale entry keeps a single closing tooltip from breaking the picker. xcap lists
+    // windows front to back on every desktop, so the position is the z-order; its own
+    // `z()` lists every window again for each one.
+    let windows = windows
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, window)| window_info(window, (count - index) as i32).ok());
     // Tool windows include notification toasts and floating helper overlays,
     // rather than the app windows offered by the capture picker.
     #[cfg(windows)]
@@ -452,20 +559,37 @@ fn list_windows_impl() -> Result<Vec<WindowInfo>> {
     Ok(windows.collect())
 }
 
-fn window_info(window: &Window) -> Result<WindowInfo> {
+fn window_info(window: &Window, z_order: i32) -> Result<WindowInfo> {
     Ok(WindowInfo {
         id: property("window", "id", window.id())?,
         process_id: property("window", "pid", window.pid())?,
-        app_name: property("window", "app_name", window.app_name())?,
         title: property("window", "title", window.title())?,
         x: property("window", "x", window.x())?,
         y: property("window", "y", window.y())?,
         width: property("window", "width", window.width())?,
         height: property("window", "height", window.height())?,
-        z_order: property("window", "z", window.z())?,
+        z_order,
         is_minimized: property("window", "is_minimized", window.is_minimized())?,
-        is_maximized: property("window", "is_maximized", window.is_maximized())?,
         is_focused: property("window", "is_focused", window.is_focused())?,
+    })
+}
+
+/// Each window's app name, by window ID. Windows reads the name from the app's file, so the
+/// window picker asks for it after it opens instead of while it lists windows.
+pub fn window_app_names() -> Result<HashMap<u32, String>> {
+    capture_backend("read window app names", || {
+        let mut by_process = HashMap::<u32, String>::new();
+        let mut names = HashMap::new();
+        for window in all_windows()? {
+            let (Ok(id), Ok(process_id)) = (window.id(), window.pid()) else {
+                continue;
+            };
+            let name = by_process
+                .entry(process_id)
+                .or_insert_with(|| window.app_name().unwrap_or_default());
+            names.insert(id, name.clone());
+        }
+        Ok(names)
     })
 }
 
@@ -513,23 +637,16 @@ pub fn capture_window_with_background(
 }
 
 fn capture_window_impl(id: u32) -> Result<CapturedFrame> {
-    let windows = Window::all().map_err(|source| PlatformError::Enumeration {
-        kind: "windows",
-        source: Box::new(source),
-    })?;
-    let mut selected = None;
-    for window in windows {
-        if window.id().is_ok_and(|window_id| window_id == id) {
-            selected = Some(window);
-            break;
-        }
-    }
-    let window = selected.ok_or(PlatformError::WindowNotFound { id })?;
+    let window = all_windows()?
+        .into_iter()
+        .find(|window| window.id().is_ok_and(|window_id| window_id == id))
+        .ok_or(PlatformError::WindowNotFound { id })?;
     capture_window_handle(window)
 }
 
 fn capture_window_handle(window: Window) -> Result<CapturedFrame> {
-    let info = window_info(&window)?;
+    // A single capture has no use for the z-order.
+    let info = window_info(&window, 0)?;
     if info.is_minimized {
         return Err(PlatformError::WindowMinimized { id: info.id });
     }
@@ -599,7 +716,6 @@ mod tests {
         WindowInfo {
             id,
             process_id,
-            app_name: format!("App {id}"),
             title: format!("Window {id}"),
             x,
             y,
@@ -607,7 +723,6 @@ mod tests {
             height: 200,
             z_order,
             is_minimized: false,
-            is_maximized: false,
             is_focused: false,
         }
     }
@@ -635,18 +750,16 @@ mod tests {
         let ids =
             macos::application_window_ids_from_info(&CFArray::from_CFTypes(&metadata).to_untyped());
         let mut dock = window(1, 10, 0, 0, 20);
-        dock.app_name = "Dock".into();
         dock.width = 2056;
         dock.height = 1329;
-        let mut preview = window(2, 20, 4, 43, 11);
-        preview.app_name = "Preview".into();
+        let preview = window(2, 20, 4, 43, 11);
         let windows: Vec<_> = [dock, preview]
             .into_iter()
             .filter(|window| ids.contains(&window.id))
             .collect();
 
         let selected = window_at_point(&windows, ScreenPoint { x: 100, y: 100 }, 0).unwrap();
-        assert_eq!(selected.app_name, "Preview");
+        assert_eq!(selected.id, 2, "the Preview window, not the Dock");
     }
 
     #[test]

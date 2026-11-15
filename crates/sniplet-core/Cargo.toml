@@ -8,7 +8,7 @@ license = "MIT"
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 imageproc = "0.25"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 tiny-skia = "0.11"

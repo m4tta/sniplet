@@ -1,5 +1,7 @@
 use image::{Rgba, RgbaImage};
-use sniplet_core::{Point, SnipletError, StitchOptions, ViewportTransform, stitch_vertical};
+use sniplet_core::{
+    Point, SnipletError, StitchOptions, Stitcher, ViewportTransform, stitch_vertical,
+};
 
 #[test]
 fn cursor_anchored_zoom_round_trips_coordinates() {
@@ -83,6 +85,65 @@ fn stitching_rejects_frames_it_cannot_measure() {
         result,
         Err(SnipletError::StitchOverlapNotFound { index: 1, .. })
     ));
+}
+
+#[test]
+fn sticky_header_and_footer_stay_out_of_matching_and_appear_once() {
+    let header = Rgba([200, 200, 200, 255]);
+    let footer = Rgba([90, 0, 90, 255]);
+    let page_row = |y: u32| Rgba([y as u8, (y * 7) as u8, 30, 255]);
+    // 16 rows: a 4-row header, 9 page rows from `start`, and a 3-row footer.
+    let frame = |start: u32| {
+        RgbaImage::from_fn(3, 16, |_, y| match y {
+            0..4 => header,
+            13.. => footer,
+            _ => page_row(start + y - 4),
+        })
+    };
+    // Each frame scrolls 6 page rows, so neighbours share 3.
+    let frames = [frame(0), frame(6), frame(12)];
+    assert!(
+        stitch_vertical(&frames, EXACT).is_err(),
+        "full frames never match"
+    );
+
+    // A redraw in place, such as a caret blink, also has bottom rows that stay the same. They
+    // are not a footer.
+    let mut redrawn = frames[0].clone();
+    redrawn.put_pixel(1, 8, Rgba([5, 28, 30, 255]));
+    let tolerant = StitchOptions {
+        max_mean_error: 1.0,
+        ..EXACT
+    };
+    let mut stitcher = Stitcher::with_sticky_bands(&frames[0], tolerant);
+    assert_eq!(stitcher.push(&redrawn).unwrap(), 0);
+    assert_eq!(stitcher.push(&frames[1]).unwrap(), 6);
+    assert_eq!(stitcher.push(&frames[2]).unwrap(), 6);
+    assert_eq!(
+        stitcher.push(&frames[2]).unwrap(),
+        0,
+        "a repeated frame adds nothing"
+    );
+    let expected = RgbaImage::from_fn(3, 28, |_, y| match y {
+        0..4 => header,
+        25.. => footer,
+        _ => page_row(y - 4),
+    });
+    assert_eq!(stitcher.into_image(), expected);
+}
+
+#[test]
+fn a_failed_push_keeps_the_page_stitched_so_far() {
+    let original = fixture();
+    let frames = fixture_frames(&original);
+    let mut stitcher = Stitcher::with_sticky_bands(&frames[0], EXACT);
+    stitcher.push(&frames[1]).unwrap();
+    let unrelated = RgbaImage::from_pixel(8, 7, Rgba([255, 0, 255, 255]));
+    assert!(stitcher.push(&unrelated).is_err());
+    assert_eq!(
+        stitcher.into_image(),
+        image::imageops::crop_imm(&original, 0, 0, 8, 12).to_image()
+    );
 }
 
 #[test]

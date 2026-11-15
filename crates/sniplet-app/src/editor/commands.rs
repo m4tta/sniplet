@@ -1,9 +1,9 @@
 //! Menu, toolbar and shortcut commands: files, the clipboard, captures and the camera.
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use rune::{FileDialogOptions, Tx};
 use sniplet_core::{
-    AnnotationKind, Backdrop, ColorFormat, Document, Point as ImagePoint, ViewportTransform,
+    AnnotationKind, ColorFormat, Document, Point as ImagePoint, Scene, ViewportTransform,
 };
 use sniplet_platform::{Clipboard, CloudUploadConfig};
 
@@ -65,12 +65,32 @@ struct ImageInsertion {
     append: bool,
 }
 
+/// What Copy, Save, Upload, Pin, OCR and a drag export: the scene, and the preview's pixels
+/// when they are exactly its render, so a worker need not render it again.
+pub(crate) struct Export {
+    scene: Scene,
+    rendered: Option<Arc<image::RgbaImage>>,
+}
+
+impl Export {
+    /// The exported pixels. Without a current preview this renders, so call it on a worker.
+    pub(crate) fn image(&self) -> sniplet_core::Result<Arc<image::RgbaImage>> {
+        match &self.rendered {
+            Some(image) => Ok(image.clone()),
+            None => Ok(Arc::new(self.scene.render(&render_options())?)),
+        }
+    }
+}
+
 impl Editor {
     pub fn command(&mut self, command: Command, tx: &mut Tx) {
-        if self.updates.installing() {
+        // Nothing may change after the recovery snapshot, but Quit still works: before the
+        // updater starts it quits without the update, after that the updater waits for it.
+        if self.updates.installing() && !matches!(command, Command::Quit) {
             return;
         }
         self.finish_size_edit();
+        self.end_key_group();
         self.panel = None;
         self.clear_measure();
         match command {
@@ -111,14 +131,20 @@ impl Editor {
             }
             Command::Undo | Command::Redo => {
                 if let Some(doc) = &mut self.document {
+                    // What sets the rendered size: the camera refits only when it changes.
+                    let frame =
+                        |doc: &Document| (doc.dimensions(), doc.crop(), doc.backdrop().padding);
+                    let before = frame(&*doc);
                     if matches!(command, Command::Undo) {
                         doc.undo();
                     } else {
                         doc.redo();
                     }
+                    if frame(&*doc) != before {
+                        self.fit = true;
+                    }
                 }
                 self.selection = None;
-                self.fit = true;
                 self.refresh();
             }
             Command::Crop => {
@@ -154,9 +180,9 @@ impl Editor {
                 self.refresh();
             }
             Command::Pin => {
-                if let Ok(document) = self.export_document() {
+                if let Ok(export) = self.export() {
                     self.inbox.spawn(
-                        move || document.render(&render_options()),
+                        move || export.image().map(Arc::unwrap_or_clone),
                         |editor, image, _| {
                             if let Ok(image) = image {
                                 capture::pin(image, &editor.inbox);
@@ -181,7 +207,6 @@ impl Editor {
             | Command::CaptureOcr => {
                 let request = capture::CaptureRequest {
                     command,
-                    monitor: self.monitor_index,
                     region: self.scroll_region,
                     last_capture: self.last_capture.clone(),
                 };
@@ -189,11 +214,7 @@ impl Editor {
                     self.status = error;
                 }
             }
-            Command::ActiveWindow => {
-                if let Err(error) = capture::active_window(self) {
-                    self.status = error;
-                }
-            }
+            Command::ActiveWindow => capture::active_window(self),
             Command::ShowEditor => crate::shell::show_editor(),
             Command::Settings => self.open_settings(crate::settings_window::Page::General),
             #[cfg(target_os = "linux")]
@@ -251,37 +272,61 @@ impl Editor {
         }
     }
 
-    fn export_document(&self) -> anyhow::Result<Document> {
-        let mut document = self
+    /// The image, or the selection with no backdrop. With no selection and a current
+    /// preview it carries the preview's pixels: the preview renders the same scene with
+    /// `render_options()` and no extra annotations, as an export does.
+    fn export(&self) -> anyhow::Result<Export> {
+        let document = self
             .document
-            .clone()
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Capture or open an image first"))?;
-        if let Some(rect) = self.selection {
-            document.set_crop(rect);
-            document.set_backdrop(Backdrop::default());
-        }
-        Ok(document)
+        Ok(match self.selection {
+            Some(rect) => Export {
+                scene: document.snapshot().cropped_to(rect),
+                rendered: None,
+            },
+            None => Export {
+                scene: document.snapshot(),
+                rendered: self.current_preview(),
+            },
+        })
     }
 
-    pub fn export_pixels(&self) -> anyhow::Result<image::RgbaImage> {
-        Ok(self.export_document()?.render(&render_options())?)
+    /// The export rendered from scratch, for tests to check what Copy and Save write.
+    #[cfg(test)]
+    pub(crate) fn export_pixels(&self) -> anyhow::Result<image::RgbaImage> {
+        let Export { scene, .. } = self.export()?;
+        Ok(scene.render(&render_options())?)
     }
 
-    /// Export to a temporary PNG for a drag into another app, so the file holds the same
-    /// pixels as Save and Copy.
+    /// The temporary PNG a drag into another app hands over, with the same pixels as Save
+    /// and Copy. The file written when the preview settled is used when it is current;
+    /// otherwise this writes one now.
     pub(crate) fn export_drag_file(&self) -> anyhow::Result<PathBuf> {
-        let image = self.export_pixels()?;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("Sniplet-{timestamp}.png"));
-        image.save(&path)?;
+        let mut slot = self
+            .drag_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let revision = (self.selection.is_none() && self.current_preview().is_some())
+            .then_some(self.preview_revision);
+        if let Some(file) = slot.current.as_mut()
+            && revision.is_some()
+            && file.revision == revision
+        {
+            file.taken = true;
+            return Ok(file.path.clone());
+        }
+        let image = self.export()?.image()?;
+        let mut file = crate::drag_out::DragFile::write(&image, revision)?;
+        file.taken = true;
+        let path = file.path.clone();
+        slot.replace(file);
         Ok(path)
     }
 
     fn copy_image(&mut self) {
-        let Ok(document) = self
-            .export_document()
+        let Ok(export) = self
+            .export()
             .inspect_err(|error| self.status = error.to_string())
         else {
             return;
@@ -290,7 +335,7 @@ impl Editor {
         let hide =
             self.selection.is_none() && self.settings.hide_after_export && crate::shell::has_tray();
         self.inbox.spawn(
-            clipboard_jobs::copy(Source::Rendered(document)),
+            clipboard_jobs::copy(Source::Rendered(export)),
             move |this, result, _| {
                 if this.preview_revision != revision || matches!(result, Ok(None)) {
                     return;
@@ -391,16 +436,21 @@ impl Editor {
     }
 
     fn save(&mut self, project: bool, tx: &mut Tx) {
-        let Some(mut document) = self.document.clone() else {
-            return;
+        // A project keeps the whole document; an image is the export.
+        let export = match &self.document {
+            Some(document) if project => Export {
+                scene: document.snapshot(),
+                rendered: None,
+            },
+            Some(_) => match self.export() {
+                Ok(export) => export,
+                Err(_) => return,
+            },
+            None => return,
         };
-        if !project && let Some(rect) = self.selection {
-            document.set_crop(rect);
-            document.set_backdrop(Backdrop::default());
-        }
         let format = self.settings.format;
         let scale = if self.settings.downscale_on_save {
-            document.source_scale_factor().unwrap_or(1.0)
+            export.scene.source_scale_factor().unwrap_or(1.0)
         } else {
             1.0
         };
@@ -447,7 +497,7 @@ impl Editor {
             };
             let destination = path.clone();
             this.inbox.spawn(
-                move || write_export(document, &destination, project, scale),
+                move || write_export(export, &destination, project, scale),
                 move |this, result, _| {
                     if this.preview_revision != revision {
                         return;
@@ -466,8 +516,8 @@ impl Editor {
     }
 
     pub(super) fn recognize(&mut self, qr_only: bool) {
-        let Ok(document) = self
-            .export_document()
+        let Ok(export) = self
+            .export()
             .inspect_err(|error| self.status = error.to_string())
         else {
             return;
@@ -478,7 +528,7 @@ impl Editor {
         self.recognition_revision += 1;
         let revision = (self.load_revision, self.recognition_revision);
         self.inbox.spawn(
-            clipboard_jobs::recognize(document, qr_only),
+            clipboard_jobs::recognize(export, qr_only),
             move |this, result, _| {
                 if (this.load_revision, this.recognition_revision) != revision {
                     return;
@@ -510,26 +560,39 @@ impl Editor {
             self.open_settings(crate::settings_window::Page::Share);
             return;
         };
-        let Ok(document) = self
-            .export_document()
+        let Ok(export) = self
+            .export()
             .inspect_err(|error| self.status = error.to_string())
         else {
             return;
         };
-        // A signed URL names one object, so it uploads one image. Spend it now, so a second
-        // upload cannot replace the image behind a link already shared.
-        if matches!(config, CloudUploadConfig::PresignedPut { .. }) {
-            self.settings.cloud_upload = None;
-            self.persist_settings();
+        // A signed URL names one object, so it uploads one image. A good upload spends it,
+        // so a later upload cannot replace the image behind a link already shared. Only one
+        // upload runs at a time, so a second one cannot start before the URL is spent.
+        if std::mem::replace(&mut self.uploading, true) {
+            return;
         }
+        let used = config.clone();
         self.status = "Uploading image…".into();
         self.inbox.spawn(
             move || {
-                let image = document.render(&render_options())?;
-                let key = upload_key()?;
-                Ok::<_, anyhow::Error>(sniplet_platform::upload_image(&image, &key, &config)?)
+                // A panic must still reach the callback, which lets the next upload start.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let image = export.image()?;
+                    let key = upload_key()?;
+                    Ok::<_, anyhow::Error>(sniplet_platform::upload_image(&image, &key, &config)?)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the upload stopped unexpectedly")))
             },
-            |this, result, _| {
+            move |this, result, _| {
+                this.uploading = false;
+                if result.is_ok()
+                    && matches!(used, CloudUploadConfig::PresignedPut { .. })
+                    && this.settings.cloud_upload.as_ref() == Some(&used)
+                {
+                    this.settings.cloud_upload = None;
+                    this.persist_settings();
+                }
                 this.status = match result {
                     Ok(upload) => match Clipboard::new().and_then(|mut c| c.set_text(upload.url)) {
                         Ok(_) => "Uploaded · image link copied".into(),
@@ -602,6 +665,7 @@ impl Editor {
                 return;
             }
         };
+        self.end_key_group();
         let Some(doc) = self.document.as_mut() else {
             return;
         };
@@ -632,7 +696,7 @@ impl Editor {
         let id = doc.add_annotation(
             AnnotationKind::Image {
                 origin: insertion.origin,
-                png_bytes: insertion.png,
+                png_bytes: insertion.png.into(),
                 size: insertion.size,
             },
             self.style,
@@ -666,19 +730,21 @@ pub(super) fn upload_key() -> anyhow::Result<String> {
 
 /// Write an image export, or a project with its source image beside it.
 fn write_export(
-    document: Document,
+    export: Export,
     path: &std::path::Path,
     project: bool,
     scale: f32,
 ) -> anyhow::Result<()> {
     if project {
         let source = path.with_extension("source.png");
-        document.original().save(&source)?;
-        document
+        export.scene.original().save(&source)?;
+        export
+            .scene
             .to_project(PathBuf::from(source.file_name().unwrap()))
             .save(path)?;
     } else {
-        let image = sniplet_platform::image_at_1x(document.render(&render_options())?, scale);
+        let rendered = export.image()?;
+        let image = sniplet_platform::image_at_1x(&rendered, scale);
         let extension = path
             .extension()
             .map(|x| x.to_string_lossy().to_ascii_lowercase());

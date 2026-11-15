@@ -1,14 +1,16 @@
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 
 use sniplet_core::Document;
 use sniplet_platform::Clipboard;
 
+use crate::editor::Export;
+
 pub(crate) enum Source {
     Original(Document),
-    Rendered(Document),
+    Rendered(Export),
     Text(String),
 }
 
@@ -59,7 +61,7 @@ pub(crate) fn copy(source: Source) -> impl FnOnce() -> anyhow::Result<Option<()>
     move || {
         // Rendering is outside the write lock. Clipboard writes alone are ordered.
         let rendered = match &source {
-            Source::Rendered(document) => Some(document.render(&crate::editor::render_options())?),
+            Source::Rendered(export) => Some(export.image()?),
             _ => None,
         };
         ORDER.write(request, || {
@@ -78,12 +80,19 @@ pub(crate) fn copy(source: Source) -> impl FnOnce() -> anyhow::Result<Option<()>
 /// The order slot is taken now, so a slow recognition cannot replace a newer copy.
 /// The text comes back even when the clipboard write fails, so the editor can show it.
 pub(crate) fn recognize(
-    document: Document,
+    export: Export,
     qr_only: bool,
 ) -> impl FnOnce() -> anyhow::Result<Recognized> + Send + 'static {
     let request = ORDER.request();
     move || {
-        let image = document.render(&crate::editor::render_options())?;
+        let image = export.image()?;
+        // OCR runs beside the QR scan. A QR code wins, and its answer does not wait for OCR.
+        let ocr = (!qr_only).then(|| {
+            let image = Arc::clone(&image);
+            std::thread::spawn(move || {
+                sniplet_platform::recognize_text(&image, &Default::default())
+            })
+        });
         let codes = sniplet_platform::scan_qr_codes(&image)?;
         let text = if !codes.is_empty() {
             codes
@@ -91,10 +100,11 @@ pub(crate) fn recognize(
                 .map(|code| code.content)
                 .collect::<Vec<_>>()
                 .join("\n")
-        } else if qr_only {
-            anyhow::bail!("No QR code found in the selected image");
+        } else if let Some(ocr) = ocr {
+            ocr.join()
+                .map_err(|_| anyhow::anyhow!("Text recognition stopped unexpectedly"))??
         } else {
-            sniplet_platform::recognize_text(&image, &Default::default())?
+            anyhow::bail!("No QR code found in the selected image");
         };
         if text.trim().is_empty() {
             anyhow::bail!("No text found in the selected image");

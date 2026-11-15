@@ -8,20 +8,21 @@ use url::Url;
 use crate::{PlatformError, Result, sanitize_filename};
 
 const PNG_CONTENT_TYPE: &str = "image/png";
-// The longest one upload request may take, so a stalled server ends in an error.
+// The longest a server may take to connect or to answer, so a stalled server ends in an error.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 // AWS Signature Version 4 caps presigned URLs at seven days.
 const PRESIGNED_GET_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// An explicit cloud destination. S3 credentials are deliberately not represented
-/// here: they are read from the standard AWS environment variables only when
-/// [`upload_image`] is called. A presigned PUT URL is itself a write credential.
+/// here: [`upload_image`] reads them from the standard AWS environment variables or
+/// the shared AWS credentials file. A presigned PUT URL is itself a write credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CloudUploadConfig {
     /// A one-use URL obtained from an external service. It names one object, so a
     /// second upload would replace the first image behind its shared link. The
-    /// editor removes it from settings when an upload starts.
+    /// editor removes it from settings when an upload starts, and puts it back when
+    /// the upload fails.
     PresignedPut {
         url: String,
         public_url: Option<String>,
@@ -79,10 +80,25 @@ pub struct UploadedImage {
     pub key: String,
 }
 
-/// Reports whether S3 uploads can read credentials from the environment.
-/// Reads only environment variables, never the network.
+/// Reports whether S3 uploads can find credentials. Never uses the network.
 pub fn s3_credentials_available() -> bool {
-    Auth::from_env().is_ok()
+    s3_auth().is_ok()
+}
+
+/// S3 credentials from the standard AWS environment variables, or else from the shared
+/// credentials file (`~/.aws/credentials`, profile `AWS_PROFILE` or `default`), which an
+/// app started from the desktop or at login can still read.
+fn s3_auth() -> Result<Auth> {
+    match Auth::from_env() {
+        Ok(auth) => Ok(auth),
+        Err(_) => Auth::from_profile_env().map_err(s3_error),
+    }
+}
+
+/// The extra time to send `size` bytes of image: one second for each 50 KB, so a large
+/// screenshot on a slow connection still finishes.
+fn send_time(size: usize) -> Duration {
+    Duration::from_secs(size as u64 / 50_000)
 }
 
 /// Encode and upload an RGBA image as PNG.
@@ -108,7 +124,7 @@ pub fn upload_image(
             key_prefix,
             public_base_url,
         } => {
-            let auth = Auth::from_env().map_err(s3_error)?;
+            let auth = s3_auth()?;
             upload_s3_with_auth(
                 png,
                 &filename,
@@ -162,9 +178,15 @@ fn upload_presigned_put(
     let mut parsed_upload_url = parse_http_url(upload_url, "presigned PUT URL")?;
 
     // A followed 301/302/303 turns the PUT into a GET without the image, so the
-    // upload succeeds only when this URL itself answers 2xx.
+    // upload succeeds only when this URL itself answers 2xx. Each step has its own timeout,
+    // so a large image is not cut off while a stalled server still fails fast.
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
+        .timeout_resolve(Some(timeout))
+        .timeout_connect(Some(timeout))
+        .timeout_send_request(Some(timeout))
+        .timeout_send_body(Some(timeout + send_time(png.len())))
+        .timeout_recv_response(Some(timeout))
+        .timeout_recv_body(Some(timeout))
         .max_redirects(0)
         .http_status_as_error(false)
         .build()
@@ -228,12 +250,13 @@ fn upload_s3_with_auth(
         .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", destination.region));
     parse_http_url(&endpoint, "S3 endpoint")?;
 
+    // The S3 client has one timeout for the whole request, so it grows with the image.
     let client = BlockingClient::builder(&endpoint)
         .map_err(s3_error)?
         .region(destination.region)
         .auth(auth)
         .addressing_style(AddressingStyle::Path)
-        .timeout(UPLOAD_TIMEOUT)
+        .timeout(UPLOAD_TIMEOUT + send_time(png.len()))
         .build()
         .map_err(s3_error)?;
 

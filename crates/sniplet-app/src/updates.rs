@@ -1281,6 +1281,16 @@ mod tests {
     }
 
     #[test]
+    fn quit_still_works_while_an_update_installs() {
+        let (mut editor, _fake, _directory) = fixture();
+        editor.updates.phase = Phase::Installing(scene_release());
+        let mut rt = rune::Runtime::new(editor, crate::editor::view, (1280.0, 850.0), env());
+        rt.frame(0.0);
+        rt.update(|editor, tx| editor.command(crate::editor::Command::Quit, tx));
+        assert_eq!(rt.shell_request, Some(rune::Shell::Quit));
+    }
+
+    #[test]
     fn later_leaves_a_menu_dot_and_the_menu_brings_the_notice_back() {
         let (mut editor, _fake, _directory) = fixture();
         editor.check_for_updates(true);

@@ -30,7 +30,7 @@ fn expanded_canvas_renders_source_and_pasted_capture_side_by_side() {
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(2.0, 0.0),
-            png_bytes: png(&pasted),
+            png_bytes: png(&pasted).into(),
             size: None,
         },
         AnnotationStyle::default(),
@@ -61,7 +61,7 @@ fn canvas_expansion_and_overlay_share_one_undo_group_and_crop_to_expansion() {
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(2.0, 0.0),
-            png_bytes: png(&pasted),
+            png_bytes: png(&pasted).into(),
             size: None,
         },
         AnnotationStyle::default(),

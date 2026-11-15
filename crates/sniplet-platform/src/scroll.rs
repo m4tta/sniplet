@@ -7,13 +7,15 @@ use std::time::{Duration, Instant};
 use enigo::{Axis, Coordinate, Enigo, Mouse, Settings};
 use image::RgbaImage;
 
-use crate::{PlatformError, Result, capture_monitor_region, list_monitors};
+use crate::{PlatformError, Result, capture_monitor_region};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomaticScrollStop {
     EndReached,
     Cancelled,
     FrameLimit,
+    /// A frame did not overlap the page so far, so the capture kept the page up to it.
+    OverlapLost,
 }
 
 #[derive(Debug, Clone)]
@@ -65,13 +67,13 @@ pub struct AutomaticScrollCapture {
     pub stop: AutomaticScrollStop,
 }
 
-/// Captures and stitches a vertically scrolling monitor region.
+/// Captures and stitches a vertically scrolling region of the monitor with ID `monitor_id`.
 ///
 /// The region is expressed in capture-image pixels. The cursor is temporarily
 /// placed at its center so wheel events reach the selected content, then restored
 /// before this function returns. Call this only after hiding the selection overlay.
 pub fn capture_scrolling_region(
-    monitor_index: usize,
+    monitor_id: u32,
     x: u32,
     y: u32,
     width: u32,
@@ -80,15 +82,7 @@ pub fn capture_scrolling_region(
     cancellation: &ScrollCancellation,
 ) -> Result<AutomaticScrollCapture> {
     validate_automatic_options(&options)?;
-    let monitors = list_monitors()?;
-    let available = monitors.len();
-    let monitor = monitors
-        .into_iter()
-        .find(|monitor| monitor.index == monitor_index)
-        .ok_or(PlatformError::MonitorNotFound {
-            index: monitor_index,
-            available,
-        })?;
+    let monitor = crate::capture::geometry_of(monitor_id)?;
 
     // xcap's macOS capture rectangle is in points while its returned bitmap is
     // in Retina pixels. Enigo consumes desktop coordinates, so convert only the
@@ -110,10 +104,10 @@ pub fn capture_scrolling_region(
         .map_err(PlatformError::Input)?;
     wait_for_settle(cancellation, options.settle_delay);
 
-    let collected = collect_automatic_frames(
+    let captured = collect_automatic_frames(
         &options,
         cancellation,
-        || capture_monitor_region(monitor_index, x, y, width, height).map(|frame| frame.image),
+        || capture_monitor_region(monitor_id, x, y, width, height).map(|frame| frame.image),
         || {
             enigo
                 .scroll(options.scroll_clicks, Axis::Vertical)
@@ -124,26 +118,9 @@ pub fn capture_scrolling_region(
     let restore = enigo
         .move_mouse(original_cursor.0, original_cursor.1, Coordinate::Abs)
         .map_err(PlatformError::Input);
-    let collected = collected?;
+    let captured = captured?;
     restore?;
-    finish_capture(collected, &options)
-}
-
-fn finish_capture(
-    mut collected: CollectedFrames,
-    options: &AutomaticScrollOptions,
-) -> Result<AutomaticScrollCapture> {
-    if options.scroll_clicks < 0 {
-        collected.frames.reverse();
-    }
-    let frame_count = collected.frames.len();
-    let image = sniplet_core::stitch_vertical(&collected.frames, options.stitch)
-        .map_err(PlatformError::Stitch)?;
-    Ok(AutomaticScrollCapture {
-        image,
-        frame_count,
-        stop: collected.stop,
-    })
+    Ok(captured)
 }
 
 fn validate_automatic_options(options: &AutomaticScrollOptions) -> Result<()> {
@@ -165,61 +142,66 @@ fn validate_automatic_options(options: &AutomaticScrollOptions) -> Result<()> {
     Ok(())
 }
 
-struct CollectedFrames {
-    frames: Vec<RgbaImage>,
-    stop: AutomaticScrollStop,
-}
-
+/// Capture, scroll and stitch until the page ends, the frame limit, a lost overlap, or
+/// cancellation. Each frame stitches as it arrives. A frame that adds no rows, such as one
+/// that differs from the last only by a blinking caret, counts as the end of the page.
 fn collect_automatic_frames<Capture, Advance>(
     options: &AutomaticScrollOptions,
     cancellation: &ScrollCancellation,
     mut capture: Capture,
     mut advance: Advance,
-) -> Result<CollectedFrames>
+) -> Result<AutomaticScrollCapture>
 where
     Capture: FnMut() -> Result<RgbaImage>,
     Advance: FnMut() -> Result<bool>,
 {
-    let mut frames = vec![capture()?];
+    // Scrolling up stitches upside-down frames, so each new frame still continues the page
+    // below; the page turns back over at the end.
+    let upward = options.scroll_clicks < 0;
+    let mut take = || {
+        capture().map(|mut frame| {
+            if upward {
+                image::imageops::flip_vertical_in_place(&mut frame);
+            }
+            frame
+        })
+    };
+    let mut stitcher = sniplet_core::Stitcher::with_sticky_bands(&take()?, options.stitch);
+    let mut frame_count = 1;
     let mut identical_frames = 0;
-    loop {
+    let stop = loop {
         if cancellation.is_cancelled() {
-            return Ok(CollectedFrames {
-                frames,
-                stop: AutomaticScrollStop::Cancelled,
-            });
+            break AutomaticScrollStop::Cancelled;
         }
-        if frames.len() >= options.max_frames {
-            return Ok(CollectedFrames {
-                frames,
-                stop: AutomaticScrollStop::FrameLimit,
-            });
+        if frame_count >= options.max_frames {
+            break AutomaticScrollStop::FrameLimit;
         }
         if !advance()? || cancellation.is_cancelled() {
-            return Ok(CollectedFrames {
-                frames,
-                stop: AutomaticScrollStop::Cancelled,
-            });
+            break AutomaticScrollStop::Cancelled;
         }
-
-        let next = capture()?;
-        if same_pixels(frames.last().expect("the initial frame is retained"), &next) {
-            identical_frames += 1;
-            if identical_frames >= options.identical_frames_to_stop {
-                return Ok(CollectedFrames {
-                    frames,
-                    stop: AutomaticScrollStop::EndReached,
-                });
+        match stitcher.push(&take()?) {
+            Ok(0) => {
+                identical_frames += 1;
+                if identical_frames >= options.identical_frames_to_stop {
+                    break AutomaticScrollStop::EndReached;
+                }
             }
-        } else {
-            identical_frames = 0;
-            frames.push(next);
+            Ok(_) => {
+                identical_frames = 0;
+                frame_count += 1;
+            }
+            Err(_) => break AutomaticScrollStop::OverlapLost,
         }
+    };
+    let mut page = stitcher.into_image();
+    if upward {
+        image::imageops::flip_vertical_in_place(&mut page);
     }
-}
-
-fn same_pixels(left: &RgbaImage, right: &RgbaImage) -> bool {
-    left.dimensions() == right.dimensions() && left.as_raw() == right.as_raw()
+    Ok(AutomaticScrollCapture {
+        image: page,
+        frame_count,
+        stop,
+    })
 }
 
 fn wait_for_settle(cancellation: &ScrollCancellation, duration: Duration) -> bool {
@@ -242,45 +224,46 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
 
-    fn solid(value: u8) -> RgbaImage {
-        RgbaImage::from_pixel(2, 2, Rgba([value, value, value, 255]))
+    /// `height` rows of a page from row `start`, each row its own color, `width` wide.
+    fn page(start: u32, width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |_, y| Rgba([(start + y) as u8, 0, 0, 255]))
     }
 
     fn test_options(max_frames: usize) -> AutomaticScrollOptions {
         AutomaticScrollOptions {
             max_frames,
             settle_delay: Duration::ZERO,
+            stitch: sniplet_core::StitchOptions {
+                min_overlap: 2,
+                max_overlap: None,
+                max_mean_error: 0.0,
+            },
             ..AutomaticScrollOptions::default()
         }
+    }
+
+    /// Run a collection over `frames` that scrolls without stopping.
+    fn collect(options: &AutomaticScrollOptions, frames: Vec<RgbaImage>) -> AutomaticScrollCapture {
+        let mut frames = frames.into_iter();
+        collect_automatic_frames(
+            options,
+            &ScrollCancellation::new(),
+            || Ok(frames.next().expect("the test supplies enough frames")),
+            || Ok(true),
+        )
+        .unwrap()
     }
 
     #[test]
     fn upward_capture_stitches_frames_in_document_order() {
         let options = AutomaticScrollOptions {
             scroll_clicks: -5,
-            stitch: sniplet_core::StitchOptions {
-                min_overlap: 2,
-                max_overlap: Some(2),
-                max_mean_error: 0.0,
-            },
-            ..AutomaticScrollOptions::default()
+            ..test_options(2)
         };
         validate_automatic_options(&options).unwrap();
-        let bottom = RgbaImage::from_fn(2, 4, |_x, y| Rgba([(y + 2) as u8, 0, 0, 255]));
-        let top = RgbaImage::from_fn(2, 4, |_x, y| Rgba([y as u8, 0, 0, 255]));
-        let capture = finish_capture(
-            CollectedFrames {
-                frames: vec![bottom, top],
-                stop: AutomaticScrollStop::EndReached,
-            },
-            &options,
-        )
-        .unwrap();
+        let capture = collect(&options, vec![page(2, 2, 4), page(0, 2, 4)]);
         assert_eq!(capture.frame_count, 2);
-        assert_eq!(
-            capture.image,
-            RgbaImage::from_fn(2, 6, |_x, y| Rgba([y as u8, 0, 0, 255]))
-        );
+        assert_eq!(capture.image, page(0, 2, 6));
         assert!(
             validate_automatic_options(&AutomaticScrollOptions {
                 scroll_clicks: 0,
@@ -292,35 +275,46 @@ mod tests {
 
     #[test]
     fn automatic_collection_stops_at_an_identical_end_frame() {
-        let mut captures = vec![solid(1), solid(1)].into_iter();
-        let cancellation = ScrollCancellation::new();
-        let result = collect_automatic_frames(
-            &test_options(10),
-            &cancellation,
-            || Ok(captures.next().unwrap()),
-            || Ok(true),
-        )
-        .unwrap();
-        assert_eq!(result.stop, AutomaticScrollStop::EndReached);
-        assert_eq!(result.frames.len(), 1);
+        let capture = collect(&test_options(10), vec![page(0, 2, 8), page(0, 2, 8)]);
+        assert_eq!(capture.stop, AutomaticScrollStop::EndReached);
+        assert_eq!(capture.frame_count, 1);
+    }
+
+    #[test]
+    fn a_blinking_caret_does_not_keep_the_page_scrolling() {
+        let mut caret = page(0, 40, 8);
+        caret.get_pixel_mut(5, 6).0[0] += 30;
+        let options = AutomaticScrollOptions {
+            stitch: sniplet_core::StitchOptions {
+                max_mean_error: 3.0,
+                ..test_options(10).stitch
+            },
+            ..test_options(10)
+        };
+        let capture = collect(&options, vec![page(0, 40, 8), caret]);
+        assert_eq!(capture.stop, AutomaticScrollStop::EndReached);
+        assert_eq!(capture.image, page(0, 40, 8));
     }
 
     #[test]
     fn automatic_collection_obeys_the_frame_limit() {
-        let mut value = 0;
-        let cancellation = ScrollCancellation::new();
-        let result = collect_automatic_frames(
-            &test_options(3),
-            &cancellation,
-            || {
-                value += 1;
-                Ok(solid(value))
-            },
-            || Ok(true),
-        )
-        .unwrap();
-        assert_eq!(result.stop, AutomaticScrollStop::FrameLimit);
-        assert_eq!(result.frames.len(), 3);
+        let frames = (0..5).map(|step| page(step * 2, 2, 8)).collect();
+        let capture = collect(&test_options(3), frames);
+        assert_eq!(capture.stop, AutomaticScrollStop::FrameLimit);
+        assert_eq!(capture.frame_count, 3);
+        assert_eq!(capture.image, page(0, 2, 12));
+    }
+
+    #[test]
+    fn a_lost_overlap_keeps_the_frames_stitched_before_it() {
+        let unrelated = RgbaImage::from_pixel(2, 8, Rgba([0, 200, 0, 255]));
+        let capture = collect(
+            &test_options(10),
+            vec![page(0, 2, 8), page(2, 2, 8), unrelated],
+        );
+        assert_eq!(capture.stop, AutomaticScrollStop::OverlapLost);
+        assert_eq!(capture.frame_count, 2);
+        assert_eq!(capture.image, page(0, 2, 10));
     }
 
     #[test]
@@ -331,7 +325,7 @@ mod tests {
         let result = collect_automatic_frames(
             &test_options(10),
             &cancellation,
-            || Ok(solid(1)),
+            || Ok(page(0, 2, 8)),
             || {
                 advances += 1;
                 Ok(true)
@@ -339,7 +333,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.stop, AutomaticScrollStop::Cancelled);
-        assert_eq!(result.frames.len(), 1);
+        assert_eq!(result.frame_count, 1);
         assert_eq!(advances, 0);
     }
 }

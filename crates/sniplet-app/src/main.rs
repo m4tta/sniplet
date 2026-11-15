@@ -19,6 +19,7 @@ mod settings_window;
 mod shell;
 mod single_instance;
 mod startup;
+mod system_shortcuts;
 mod tools;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray_panel;
@@ -70,12 +71,28 @@ fn main() -> anyhow::Result<()> {
         match single_instance::claim(&args) {
             Ok(single_instance::Claim::First(instance)) => Some(instance),
             Ok(single_instance::Claim::Forwarded) => return Ok(()),
+            // Another Sniplet holds the lock but did not answer. A second copy would fight it
+            // for the shortcuts and the tray.
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                eprintln!("Sniplet is already running, but it did not answer: {error}");
+                return Ok(());
+            }
             Err(error) => {
                 eprintln!("Sniplet could not check for a running copy: {error}");
                 None
             }
         }
     };
+    rune::prewarm_gpu();
+    // Answer later launches now, so a slow start does not make them time out. Their
+    // arguments wait here until the editor exists.
+    let forwarded = instance.map(|instance| {
+        let (forward, forwarded) = std::sync::mpsc::channel::<Vec<String>>();
+        single_instance::serve(instance, move |args| {
+            let _ = forward.send(args);
+        });
+        forwarded
+    });
     let mut startup_messages = Vec::new();
     let restoring = args.iter().any(|arg| arg == updates::RESTORE_ARG);
     let document_result = if restoring {
@@ -144,7 +161,6 @@ fn main() -> anyhow::Result<()> {
     rune::set_app_icon(&include_bytes!("../../../assets/icons/sniplet-256.png")[..])
         .expect("The bundled app icon is a PNG");
 
-    rune::prewarm_gpu();
     let spec = AppSpec {
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
@@ -161,10 +177,12 @@ fn main() -> anyhow::Result<()> {
     let app = rune::App::new(spec)
         .init(move || {
             let mut editor = Editor::new(document, settings, scale);
-            if let Some(instance) = instance {
+            if let Some(forwarded) = forwarded {
                 let inbox = editor.inbox.clone();
-                single_instance::serve(instance, move |args| {
-                    inbox.send(move |editor, _| relaunched(editor, &args));
+                std::thread::spawn(move || {
+                    for args in forwarded {
+                        inbox.send(move |editor, _| relaunched(editor, &args));
+                    }
                 });
             }
             if !startup_messages.is_empty() {
@@ -264,6 +282,18 @@ fn setup(editor: &mut Editor, waker: Waker) {
     if MINIMIZED.load(Ordering::Relaxed) && !shell::has_tray() {
         shell::show_editor();
     }
+    // Tell the user one time that macOS uses some of Sniplet's shortcuts. A start in the tray
+    // stays quiet: the notice then opens with Settings.
+    if !MINIMIZED.load(Ordering::Relaxed)
+        && !editor.settings.shortcut_conflicts_shown
+        && !system_shortcuts::conflicts(
+            &editor.settings.hotkeys.slots(),
+            &sniplet_platform::system_shortcuts(),
+        )
+        .is_empty()
+    {
+        editor.open_settings(settings_window::Page::Shortcuts);
+    }
     editor.schedule_updates();
 }
 
@@ -274,11 +304,6 @@ fn poll(editor: &mut Editor, _: f64, tx: &mut Tx) -> bool {
         shell::sync_hotkeys(editor);
     }
     settings_window::sync(editor);
-    #[cfg(target_os = "windows")]
-    if shell::has_tray() {
-        shell::refresh_tray_theme();
-        tx.wake_after(std::time::Duration::from_secs(1));
-    }
     changed
 }
 

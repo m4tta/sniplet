@@ -34,16 +34,71 @@ pub fn stitch_vertical(frames: &[RgbaImage], options: StitchOptions) -> Result<R
 
 /// Stitch shared frames without making a second copy of each input image.
 pub fn stitch_vertical_refs(frames: &[&RgbaImage], options: StitchOptions) -> Result<RgbaImage> {
-    let Some(first) = frames.first() else {
+    let Some((first, rest)) = frames.split_first() else {
         return Err(SnipletError::NoStitchFrames);
     };
-    let width = first.width();
-    let row_bytes = width as usize * 4;
-    let mut height = first.height();
-    // One buffer grows by the new rows of each frame, so earlier rows are not copied per frame.
-    let mut output = pixels(first).to_vec();
+    let mut stitcher = Stitcher::new(first, options);
+    for frame in rest {
+        stitcher.push(frame)?;
+    }
+    Ok(stitcher.into_image())
+}
 
-    for (index, frame) in frames.iter().copied().enumerate().skip(1) {
+/// Stitches frames one at a time, as a scrolling capture takes them. Each frame continues the
+/// page below the frames before it.
+pub struct Stitcher {
+    options: StitchOptions,
+    width: u32,
+    /// The stitched rows, without a sticky footer. One buffer grows by the new rows of each
+    /// frame, so earlier rows are not copied per frame.
+    output: Vec<u8>,
+    height: u32,
+    /// Frames seen so far, the first included.
+    frames: usize,
+    sticky: Option<Sticky>,
+}
+
+/// What sticky-band stitching remembers between frames.
+struct Sticky {
+    /// The last frame that stitched, to find the rows that stayed in place.
+    previous: Vec<u8>,
+    /// The height of the footer that stays in place, known from the second frame on.
+    footer: Option<u32>,
+}
+
+impl Stitcher {
+    /// Start a page with its top frame. Frames match at their full height, as
+    /// `stitch_vertical` does.
+    pub fn new(first: &RgbaImage, options: StitchOptions) -> Self {
+        Self {
+            options,
+            width: first.width(),
+            output: pixels(first).to_vec(),
+            height: first.height(),
+            frames: 1,
+            sticky: None,
+        }
+    }
+
+    /// `new`, but rows at the top and bottom that stay the same between frames, such as a
+    /// fixed header or footer, are left out of matching and of the appended rows. The page
+    /// keeps the first frame's header and the last frame's footer.
+    pub fn with_sticky_bands(first: &RgbaImage, options: StitchOptions) -> Self {
+        Self {
+            sticky: Some(Sticky {
+                previous: pixels(first).to_vec(),
+                footer: None,
+            }),
+            ..Self::new(first, options)
+        }
+    }
+
+    /// Add the next frame and return how many rows it added. Zero means the frame showed
+    /// nothing new, as at the end of the page. On an error the page stays as it was.
+    pub fn push(&mut self, frame: &RgbaImage) -> Result<u32> {
+        let index = self.frames;
+        self.frames += 1;
+        let width = self.width;
         if frame.width() != width {
             return Err(SnipletError::StitchWidthMismatch {
                 index,
@@ -51,34 +106,119 @@ pub fn stitch_vertical_refs(frames: &[&RgbaImage], options: StitchOptions) -> Re
                 actual: frame.width(),
             });
         }
+        let row_bytes = width as usize * 4;
+        let frame_pixels = pixels(frame);
+        let (top, footer, first_footer) = match &self.sticky {
+            None => (0, 0, false),
+            Some(sticky) => {
+                let (top, bottom) = static_bands(&sticky.previous, frame_pixels, row_bytes);
+                if top == frame.height() {
+                    return Ok(0);
+                }
+                match sticky.footer {
+                    Some(footer) => (top, footer, false),
+                    // Kept only when this frame adds rows: a page that redraws in place also
+                    // has bottom rows that stay the same, and they are not a footer.
+                    None => (top, bottom.min(self.height), true),
+                }
+            }
+        };
+        // The page to match against, without the first frame's footer.
+        let page = if first_footer {
+            self.height - footer
+        } else {
+            self.height
+        };
+        let end = frame.height().saturating_sub(footer);
+        if top >= end {
+            // Only the bands changed.
+            self.remember(frame_pixels);
+            return Ok(0);
+        }
+        let next = &frame_pixels[top as usize * row_bytes..end as usize * row_bytes];
+        let rows = end - top;
         let not_found = |best_error| SnipletError::StitchOverlapNotFound { index, best_error };
-        let maximum = options
+        let mut maximum = self
+            .options
             .max_overlap
             .unwrap_or(u32::MAX)
-            .min(height)
-            .min(frame.height());
-        let minimum = options.min_overlap.max(1);
+            .min(page)
+            .min(rows);
+        let mut minimum = self.options.min_overlap.max(1);
+        // Bands can leave fewer rows than the minimum overlap, as a blinking caret on a page
+        // that did not move does. Those rows can only be in the same place, so test only that.
+        if self.sticky.is_some() && rows < minimum {
+            (minimum, maximum) = (rows, rows.min(page));
+        }
         // Zero-width frames have no pixels, so no overlap can be measured.
         if maximum < minimum || width == 0 {
             return Err(not_found(f32::INFINITY));
         }
-        let next = pixels(frame);
         let search = Search {
-            existing: &output,
+            existing: &self.output[..page as usize * row_bytes],
             next,
             row_bytes,
         };
-        let (overlap, error) = search.best(minimum..=maximum, options.max_mean_error);
+        let (overlap, error) = search.best(minimum..=maximum, self.options.max_mean_error);
         // False for a NaN threshold, so that accepts nothing.
-        let accepted = error <= options.max_mean_error;
+        let accepted = error <= self.options.max_mean_error;
         if !accepted {
             return Err(not_found(error));
         }
-        output.extend_from_slice(&next[overlap as usize * row_bytes..]);
-        height += frame.height() - overlap;
+        let added = rows - overlap;
+        if added > 0 {
+            if first_footer && let Some(sticky) = &mut self.sticky {
+                // The first frame's footer leaves the page; `into_image` puts the last frame's
+                // footer back below it.
+                self.output.truncate(page as usize * row_bytes);
+                self.height = page;
+                sticky.footer = Some(footer);
+            }
+            self.output
+                .extend_from_slice(&next[overlap as usize * row_bytes..]);
+            self.height += added;
+        }
+        self.remember(frame_pixels);
+        Ok(added)
     }
-    output.shrink_to_fit();
-    Ok(RgbaImage::from_raw(width, height, output).expect("stitched buffer matches its size"))
+
+    fn remember(&mut self, frame_pixels: &[u8]) {
+        if let Some(sticky) = &mut self.sticky {
+            sticky.previous.clear();
+            sticky.previous.extend_from_slice(frame_pixels);
+        }
+    }
+
+    /// The stitched page.
+    pub fn into_image(self) -> RgbaImage {
+        let mut output = self.output;
+        let mut height = self.height;
+        if let Some(Sticky {
+            previous,
+            footer: Some(footer),
+        }) = &self.sticky
+        {
+            let row_bytes = (self.width as usize * 4).max(1);
+            // A shorter last frame cannot give more rows than it has.
+            let bytes = (*footer as usize * row_bytes).min(previous.len() / row_bytes * row_bytes);
+            output.extend_from_slice(&previous[previous.len() - bytes..]);
+            height += (bytes / row_bytes) as u32;
+        }
+        output.shrink_to_fit();
+        RgbaImage::from_raw(self.width, height, output).expect("stitched buffer matches its size")
+    }
+}
+
+/// How many rows at the top, and at the bottom, are the same in two frames of one size.
+/// Frames of different sizes share none.
+fn static_bands(a: &[u8], b: &[u8], row_bytes: usize) -> (u32, u32) {
+    if a.len() != b.len() || row_bytes == 0 {
+        return (0, 0);
+    }
+    let rows = || a.chunks_exact(row_bytes).zip(b.chunks_exact(row_bytes));
+    let top = rows().take_while(|(a, b)| a == b).count();
+    let bottom = rows().rev().take_while(|(a, b)| a == b).count();
+    (top as u32, bottom as u32)
 }
 
 /// The image's pixel bytes, without any spare bytes a caller left past the last row.

@@ -1,7 +1,8 @@
 //! Cross-platform screenshot document and raster editing engine for Sniplet.
 //!
 //! [`Document`] never mutates its source pixels. Cropping and annotations are
-//! retained as an editable project and composited only by [`Document::render`].
+//! retained as an editable project and composited only by [`Scene::render`]. A
+//! document derefs to its [`Scene`], and [`Document::snapshot`] hands one to a worker.
 
 mod annotation;
 mod color;
@@ -20,11 +21,11 @@ pub use annotation::{
 };
 pub use color::{Color, ColorFormat};
 pub use demo::demo_image;
-pub use document::{Backdrop, Background, Document, ImageSize, Project, Shadow};
+pub use document::{Backdrop, Background, Document, ImageSize, Project, Scene, Shadow};
 pub use error::{Result, SnipletError};
 pub use export::{ExportFormat, decode_image, open_image};
 pub use geometry::{ImageRect, Point};
 pub use measurement::{Measurement, MeasurementAxis, measure_at};
-pub use render::RenderOptions;
-pub use stitch::{StitchOptions, stitch_vertical, stitch_vertical_refs};
+pub use render::{FONT, RenderOptions};
+pub use stitch::{StitchOptions, Stitcher, stitch_vertical, stitch_vertical_refs};
 pub use transform::ViewportTransform;

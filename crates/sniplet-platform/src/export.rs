@@ -1,7 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 use directories::UserDirs;
-use image::{DynamicImage, RgbaImage};
+use image::{RgbImage, RgbaImage};
 
 use crate::{ExportFormat, PlatformError, Result};
 
@@ -11,14 +14,16 @@ pub fn default_export_directory() -> Result<PathBuf> {
     Ok(base.join("Sniplet"))
 }
 
-/// Saving at 1x leaves the editable source and clipboard image at full resolution.
-pub fn image_at_1x(image: RgbaImage, scale: f32) -> RgbaImage {
+/// Saving at 1x leaves the editable source and clipboard image at full resolution. An image
+/// already at 1x is borrowed, not copied.
+pub fn image_at_1x(image: &RgbaImage, scale: f32) -> Cow<'_, RgbaImage> {
     if !scale.is_finite() || scale <= 1.0 {
-        return image;
+        return Cow::Borrowed(image);
     }
     let width = (image.width() as f32 / scale).round().max(1.0) as u32;
     let height = (image.height() as f32 / scale).round().max(1.0) as u32;
-    image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3)
+    let filter = image::imageops::FilterType::Lanczos3;
+    Cow::Owned(image::imageops::resize(image, width, height, filter))
 }
 
 /// Removes path separators, control characters, reserved Windows characters,
@@ -73,20 +78,24 @@ pub fn export_image(image: &RgbaImage, path: &Path, format: ExportFormat) -> Res
         path: parent.to_owned(),
         source,
     })?;
-    let dynamic = match format {
+    let saved = match format {
+        // JPEG has no alpha: drop it, as `DynamicImage::into_rgb8` does.
         ExportFormat::Jpeg => {
-            DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(image.clone()).into_rgb8())
+            let rgb = image
+                .as_raw()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[red, green, blue, _]| [red, green, blue])
+                .collect();
+            RgbImage::from_raw(image.width(), image.height(), rgb)
+                .expect("three channels for every pixel")
+                .save_with_format(path, image::ImageFormat::Jpeg)
         }
-        ExportFormat::Png | ExportFormat::Webp => DynamicImage::ImageRgba8(image.clone()),
+        ExportFormat::Png => image.save_with_format(path, image::ImageFormat::Png),
+        ExportFormat::Webp => image.save_with_format(path, image::ImageFormat::WebP),
     };
-    let image_format = match format {
-        ExportFormat::Png => image::ImageFormat::Png,
-        ExportFormat::Jpeg => image::ImageFormat::Jpeg,
-        ExportFormat::Webp => image::ImageFormat::WebP,
-    };
-    dynamic
-        .save_with_format(path, image_format)
-        .map_err(PlatformError::Image)
+    saved.map_err(PlatformError::Image)
 }
 
 #[cfg(test)]
@@ -96,10 +105,10 @@ mod tests {
     #[test]
     fn saving_at_1x_uses_the_capture_scale_and_preserves_standard_images() {
         let image = RgbaImage::from_pixel(600, 400, image::Rgba([20, 40, 60, 255]));
-        assert_eq!(image_at_1x(image.clone(), 2.0).dimensions(), (300, 200));
-        assert_eq!(image_at_1x(image.clone(), 1.5).dimensions(), (400, 267));
+        assert_eq!(image_at_1x(&image, 2.0).dimensions(), (300, 200));
+        assert_eq!(image_at_1x(&image, 1.5).dimensions(), (400, 267));
         for scale in [1.0, 0.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(image_at_1x(image.clone(), scale), image);
+            assert!(matches!(image_at_1x(&image, scale), Cow::Borrowed(same) if *same == image));
         }
     }
 

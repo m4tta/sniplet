@@ -178,7 +178,28 @@ mod linux {
             .join(format!("{}.desktop", sniplet_platform::APP_ID)))
     }
 
+    /// The program that login starts: the AppImage file itself when Sniplet runs from one,
+    /// because the running executable sits in a temporary mount that is gone after it exits.
+    #[cfg(target_os = "linux")]
+    fn launcher() -> anyhow::Result<std::path::PathBuf> {
+        match std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            Some(appimage) => Ok(appimage),
+            None => Ok(std::env::current_exe()?),
+        }
+    }
+
     fn desktop_entry(executable: &Path) -> anyhow::Result<String> {
+        Ok(format!(
+            "[Desktop Entry]\nType=Application\nName=Sniplet\nExec={}\nTerminal=false\n",
+            exec(executable)?
+        ))
+    }
+
+    /// The entry's `Exec` value that starts `executable` in the tray.
+    fn exec(executable: &Path) -> anyhow::Result<String> {
         let path = executable
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("The app path is not valid UTF-8"))?;
@@ -199,12 +220,13 @@ mod linux {
                 _ => quoted.push(character),
             }
         }
-        Ok(format!(
-            "[Desktop Entry]\nType=Application\nName=Sniplet\nExec=\"{quoted}\" --minimized\nTerminal=false\n"
-        ))
+        Ok(format!("\"{quoted}\" --minimized"))
     }
 
-    fn registered(path: &Path) -> anyhow::Result<bool> {
+    /// True when the entry is on and starts `executable`. An entry for another path, such as
+    /// an old AppImage mount, would not start this copy, so it counts as off.
+    fn registered(path: &Path, executable: &Path) -> anyhow::Result<bool> {
+        let expected = exec(executable).ok();
         let entry = match fs::read_to_string(path) {
             Ok(entry) => entry,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -223,7 +245,7 @@ mod linux {
                     return Ok(false);
                 }
                 if key == "Exec" {
-                    has_command = !value.is_empty();
+                    has_command = expected.as_deref() == Some(value);
                 }
             }
         }
@@ -242,17 +264,17 @@ mod linux {
                 Err(error) => return Err(error.into()),
             }
         }
-        registered(path)
+        registered(path, executable)
     }
 
     #[cfg(target_os = "linux")]
     pub fn enabled() -> anyhow::Result<bool> {
-        registered(&entry_path()?)
+        registered(&entry_path()?, &launcher()?)
     }
 
     #[cfg(target_os = "linux")]
     pub fn set_enabled(enabled: bool) -> anyhow::Result<bool> {
-        update(&entry_path()?, &std::env::current_exe()?, enabled)
+        update(&entry_path()?, &launcher()?, enabled)
     }
 
     #[cfg(test)]
@@ -271,9 +293,11 @@ mod linux {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("autostart/sniplet.desktop");
             let executable = Path::new("/opt/Sniplet/sniplet");
-            assert!(!registered(&path).unwrap());
+            assert!(!registered(&path, executable).unwrap());
             assert!(update(&path, executable, true).unwrap());
             assert!(update(&path, executable, true).unwrap());
+            // An entry for an old AppImage mount would not start this copy.
+            assert!(!registered(&path, Path::new("/tmp/.mount_SnipletA/sniplet")).unwrap());
             for disabled in [
                 "Hidden=true",
                 "Hidden = true",
@@ -284,7 +308,7 @@ mod linux {
                     format!("{}\n{disabled}\n", desktop_entry(executable).unwrap()),
                 )
                 .unwrap();
-                assert!(!registered(&path).unwrap());
+                assert!(!registered(&path, executable).unwrap());
             }
             assert!(!update(&path, executable, false).unwrap());
             assert!(!path.exists());

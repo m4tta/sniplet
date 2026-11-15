@@ -12,6 +12,8 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 use crate::editor::{Command, Editor};
 
 const TRAY_TOOLTIP: &str = "Sniplet";
+/// The tooltip while a shortcut could not be enabled, so a start in the tray still tells.
+const SHORTCUTS_OFF_TOOLTIP: &str = "Sniplet: some shortcuts are off. See Settings > Shortcuts.";
 
 struct Services {
     editor: Option<AppHandle<Editor>>,
@@ -22,13 +24,12 @@ struct Services {
     /// The shortcuts registered now, and the settings they came from.
     registered: Vec<(HotKey, Command)>,
     hotkeys: Option<HotkeySettings>,
+    /// A shortcut from the settings could not be enabled.
+    shortcuts_off: bool,
     escape: Option<EscapeRegistration>,
     next_escape_id: u64,
     #[cfg(target_os = "windows")]
     tray_light_theme: bool,
-    /// When the taskbar theme was last read, so frames read it at most once a second.
-    #[cfg(target_os = "windows")]
-    tray_theme_checked: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -40,12 +41,11 @@ thread_local! {
         native_menu: None,
         registered: Vec::new(),
         hotkeys: None,
+        shortcuts_off: false,
         escape: None,
         next_escape_id: 1,
         #[cfg(target_os = "windows")]
         tray_light_theme: true,
-        #[cfg(target_os = "windows")]
-        tray_theme_checked: None,
     }) };
 }
 
@@ -93,17 +93,20 @@ pub fn show_editor() {
 }
 
 /// Move the editor out of the way of a capture. Returns how long it needs to leave the
-/// screen. Mac selectors use live capture, which can leave the editor in place.
+/// screen: nothing when it is hidden already. Mac selectors use live capture, which can leave
+/// the editor in place. Rune counts a minimized window as shown, so a minimized editor still
+/// waits.
 pub fn hide_for_capture() -> Duration {
     if cfg!(target_os = "macos") {
         return Duration::ZERO;
     }
-    with(|services| {
-        if let Some(editor) = &services.editor {
+    with(|services| match &services.editor {
+        Some(editor) if editor.is_visible() => {
             editor.minimize();
+            Duration::from_millis(220)
         }
-    });
-    Duration::from_millis(220)
+        _ => Duration::ZERO,
+    })
 }
 
 /// Hide the tray tooltip while the tray panel is open, so it cannot cover the panel.
@@ -111,9 +114,17 @@ pub fn hide_for_capture() -> Duration {
 pub(crate) fn show_tray_tooltip(show: bool) {
     with(|services| {
         if let Some(tray) = &services.tray {
-            let _ = tray.set_tooltip(show.then_some(TRAY_TOOLTIP));
+            let _ = tray.set_tooltip(show.then_some(tray_tooltip(services)));
         }
     });
+}
+
+fn tray_tooltip(services: &Services) -> &'static str {
+    if services.shortcuts_off {
+        SHORTCUTS_OFF_TOOLTIP
+    } else {
+        TRAY_TOOLTIP
+    }
 }
 
 /// Create the tray and register the shortcuts. Runs once from the editor's setup, on the UI
@@ -151,17 +162,36 @@ pub fn install(editor: &mut Editor) {
                             .as_ref()
                             .and_then(|menu| menu.command(&event.id))
                     });
+                    let _ = tx;
                     if let Some(command) = command {
-                        run(command, editor, tx);
+                        // The command can capture the screen, so it starts once the desktop's
+                        // menu has left it.
+                        editor.inbox.spawn(
+                            || std::thread::sleep(Duration::from_millis(150)),
+                            move |editor, (), tx| run(command, editor, tx),
+                        );
                     }
                 });
             },
         ));
     }
-    let manager = GlobalHotKeyManager::new().ok();
+    // global-hotkey's X11 backend reports success without an X server, so the user is told
+    // here. In a Wayland session its grabs work only where the desktop passes keys to X11
+    // apps, so they stay registered there.
+    #[cfg(target_os = "linux")]
+    let available = std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty());
+    #[cfg(not(target_os = "linux"))]
+    let available = true;
+    let manager = available
+        .then(GlobalHotKeyManager::new)
+        .and_then(Result::ok);
     with(|services| services.manager = manager);
     match create_tray(&editor.settings.hotkeys) {
-        Ok(tray) => with(|services| services.tray = Some(tray)),
+        Ok(tray) => {
+            with(|services| services.tray = Some(tray));
+            #[cfg(target_os = "windows")]
+            watch_tray_theme(editor.inbox.clone());
+        }
         Err(error) => {
             editor.status = format!(
                 "Menu bar unavailable: {error}. Close the editor or use Ctrl/Cmd Q to quit"
@@ -198,22 +228,39 @@ fn create_tray(hotkeys: &HotkeySettings) -> anyhow::Result<TrayIcon> {
     Ok(tray)
 }
 
-/// Follow the taskbar's light or dark theme with the tray icon's ink. The editor's poll calls
-/// it on every frame; it reads the theme at most once a second.
+/// Follow the taskbar's light or dark theme with the tray icon's ink. A worker waits for the
+/// theme key to change, so the app does not wake to check it.
 #[cfg(target_os = "windows")]
-pub fn refresh_tray_theme() {
-    let due = with(|services| {
-        let due = services
-            .tray_theme_checked
-            .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(1));
-        if due {
-            services.tray_theme_checked = Some(std::time::Instant::now());
+fn watch_tray_theme(inbox: crate::ui::Inbox<Editor>) {
+    use windows::Win32::System::Registry::{
+        HKEY, REG_NOTIFY_CHANGE_LAST_SET, RegNotifyChangeKeyValue,
+    };
+    std::thread::spawn(move || {
+        let Ok(key) = windows_registry::CURRENT_USER.open(crate::menu_bar::PERSONALIZE_KEY) else {
+            return;
+        };
+        loop {
+            // SAFETY: `key` is an open handle with notify access, and it outlives the call.
+            // The call blocks until a value in the key changes.
+            let changed = unsafe {
+                RegNotifyChangeKeyValue(
+                    HKEY(key.as_raw()),
+                    false,
+                    REG_NOTIFY_CHANGE_LAST_SET,
+                    None,
+                    false,
+                )
+            };
+            if changed.is_err() {
+                return;
+            }
+            inbox.send(|_, _| refresh_tray_theme());
         }
-        due
     });
-    if !due {
-        return;
-    }
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_tray_theme() {
     let light = crate::menu_bar::taskbar_uses_light_theme();
     with(|services| {
         if light != services.tray_light_theme
@@ -244,6 +291,10 @@ pub fn sync_hotkeys(editor: &mut Editor) {
         }
         let (bindings, mut errors) = register_hotkeys(services.manager.as_ref(), &hotkeys);
         services.registered = bindings;
+        services.shortcuts_off = !errors.is_empty();
+        if let Some(tray) = &services.tray {
+            let _ = tray.set_tooltip(Some(tray_tooltip(services)));
+        }
         #[cfg(target_os = "linux")]
         if let Some(menu) = &mut services.native_menu
             && let Err(error) = menu.update_hotkeys(&hotkeys)

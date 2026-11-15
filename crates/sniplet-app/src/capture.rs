@@ -1,6 +1,6 @@
 //! Screen, window, delayed and scrolling captures, and pinned images. Area selection lives in
 //! `area_capture`, and the window picker in `window_picker`.
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use image::RgbaImage;
 use rune::{
@@ -18,41 +18,36 @@ use crate::{
 
 pub struct CaptureRequest {
     pub command: Command,
-    pub monitor: usize,
-    pub region: Option<ImageRect>,
+    pub region: Option<ScrollRegion>,
     pub last_capture: Option<crate::area_capture::Region>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum CaptureTarget {
-    Monitor(usize),
-    UnderPointer,
+/// A manual scrolling capture's area: the monitor's ID and the rectangle in its image pixels.
+#[derive(Clone, Copy)]
+pub struct ScrollRegion {
+    pub monitor: u32,
+    pub rect: ImageRect,
 }
 
-impl CaptureTarget {
-    fn for_command(command: Command, monitor: usize) -> Self {
-        if matches!(command, Command::Screen | Command::Delayed) {
-            Self::UnderPointer
-        } else {
-            Self::Monitor(monitor)
-        }
-    }
+/// What the capture worker hands back.
+enum Captured {
+    /// The screen under the pointer, for Screen and Delayed.
+    Screen(Document, f32),
+    /// The page of a manual scrolling capture with one more frame, for the editor that was
+    /// at `revision`.
+    Appended {
+        page: sniplet_core::Result<Document>,
+        revision: u64,
+        scale_factor: f32,
+    },
+    /// The screen under the pointer, to select the area of a scrolling capture on.
+    Scroll(crate::area_capture::Screen),
 }
-
-/// What the capture worker hands back: the frame, a stitched manual scrolling capture, or
-/// the screen as a document.
-type Captured = (
-    sniplet_platform::CapturedFrame,
-    Option<Stitched>,
-    Option<Document>,
-);
-type Stitched = (Vec<Arc<RgbaImage>>, sniplet_core::Result<Document>, u64);
 
 /// Start the capture `request` names. Results reach the editor through its inbox.
 pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String> {
     let CaptureRequest {
         command,
-        monitor,
         region,
         last_capture,
     } = request;
@@ -65,8 +60,8 @@ pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String>
     let escape = shell::begin_escape_session();
     let manual = region
         .filter(|_| matches!(command, Command::ManualScroll))
-        .map(|rect| (rect, editor.scroll_frames.clone(), editor.load_revision));
-    let target = CaptureTarget::for_command(command, monitor);
+        .zip(editor.scroll_image.clone())
+        .map(|(region, page)| (region, page, editor.load_revision));
     let hide_delay = shell::hide_for_capture();
     let delay = if matches!(command, Command::Delayed) {
         Duration::from_secs(3)
@@ -81,20 +76,33 @@ pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String>
             if session.is_cancelled() {
                 return None;
             }
-            Some((|| {
-                let mut frame = match target {
-                    CaptureTarget::UnderPointer => sniplet_platform::capture_monitor_under_pointer(),
-                    CaptureTarget::Monitor(index) => sniplet_platform::capture_monitor(index),
-                }?;
-                let stitched = manual.map(|(rect, mut frames, revision)| {
-                    frames.push(Arc::new(crop_image(&frame.image, rect)));
-                    let refs = frames.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                    let result = sniplet_core::stitch_vertical_refs(&refs, Default::default())
+            Some((|| -> sniplet_platform::Result<Captured> {
+                if let Some((region, page, revision)) = manual {
+                    // Only the stored area, on the monitor it was selected on.
+                    let rect = region.rect;
+                    let frame = sniplet_platform::capture_monitor_region(
+                        region.monitor,
+                        rect.x as u32,
+                        rect.y as u32,
+                        rect.width as u32,
+                        rect.height as u32,
+                    )?;
+                    // Only the page so far and the new frame: earlier frames are in the page.
+                    let pages = [&*page, &frame.image];
+                    let page = sniplet_core::stitch_vertical_refs(&pages, Default::default())
                         .map(Document::new);
-                    (frames, result, revision)
-                });
-                let document = screen.then(|| Document::new(std::mem::take(&mut frame.image)));
-                Ok::<Captured, sniplet_platform::PlatformError>((frame, stitched, document))
+                    return Ok(Captured::Appended {
+                        page,
+                        revision,
+                        scale_factor: frame.scale_factor,
+                    });
+                }
+                let frame = sniplet_platform::capture_monitor_under_pointer()?;
+                Ok(if screen {
+                    Captured::Screen(Document::new(frame.image), frame.scale_factor)
+                } else {
+                    Captured::Scroll(crate::area_capture::Screen::new(frame))
+                })
             })())
         },
         move |editor, result, _| {
@@ -103,20 +111,21 @@ pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String>
                 return;
             };
             match result {
-                Ok((frame, Some((frames, result, revision)), _)) => {
+                Ok(Captured::Appended {
+                    page,
+                    revision,
+                    scale_factor,
+                }) => {
                     if editor.load_revision == revision {
-                        match result {
+                        match page {
                             Ok(document) => {
-                                let count = frames.len();
-                                editor.scroll_frames = frames;
+                                editor.scroll_image = Some(document.shared_original());
                                 copy_capture_if_enabled(editor, &document);
                                 editor.load(
                                     document,
-                                    &format!(
-                                        "Scrolling capture · {count} frames · scroll, then choose Append scrolling frame from the Sniplet menu"
-                                    ),
+                                    "Scrolling capture · frame added · scroll, then choose Append scrolling frame from the Sniplet menu",
                                 );
-                                editor.set_measure_scale(frame.scale_factor);
+                                editor.set_measure_scale(scale_factor);
                             }
                             Err(error) => {
                                 editor.status = format!(
@@ -126,14 +135,14 @@ pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String>
                         }
                     }
                 }
-                Ok((frame, None, Some(document))) => {
+                Ok(Captured::Screen(document, scale_factor)) => {
                     copy_capture_if_enabled(editor, &document);
                     editor.load(document, "Screen captured");
-                    editor.set_measure_scale(frame.scale_factor);
+                    editor.set_measure_scale(scale_factor);
                 }
-                Ok((frame, None, None)) => {
+                Ok(Captured::Scroll(screen)) => {
                     // Scrolling captures start by selecting the area that scrolls.
-                    crate::area_capture::open_scroll(frame, command, &editor.inbox, &escape);
+                    crate::area_capture::open_scroll(screen, command, &editor.inbox, &escape);
                     return;
                 }
                 Err(error) => editor.status = error.to_string(),
@@ -148,7 +157,8 @@ pub fn start(request: CaptureRequest, editor: &mut Editor) -> Result<(), String>
 /// The area a scrolling capture selected, in pixels of the monitor image `source`.
 pub(crate) struct ScrollSelection<'a> {
     pub command: Command,
-    pub monitor: usize,
+    /// The monitor's ID.
+    pub monitor: u32,
     pub scale_factor: f32,
     pub source: &'a RgbaImage,
     pub rect: ImageRect,
@@ -176,8 +186,8 @@ pub(crate) fn scroll_selected(
         let document = Document::new(crop_image(source, rect));
         editor.send(move |editor, _| {
             copy_capture_if_enabled(editor, &document);
-            editor.scroll_region = Some(rect);
-            editor.scroll_frames = vec![document.shared_original()];
+            editor.scroll_region = Some(ScrollRegion { monitor, rect });
+            editor.scroll_image = Some(document.shared_original());
             editor.load(
                 document,
                 "Scrolling capture · scroll the source, then choose Append scrolling frame from the Sniplet menu",
@@ -230,11 +240,16 @@ pub(crate) fn scroll_selected(
                 }
                 match result {
                     Ok((document, frame_count, stop)) => {
+                        let lost = stop == sniplet_platform::AutomaticScrollStop::OverlapLost;
+                        let status = if lost {
+                            format!(
+                                "Scrolling capture · {frame_count} frames · stopped where the frames no longer overlapped. Scroll less per step with manual scrolling from the Sniplet menu."
+                            )
+                        } else {
+                            format!("Scrolling capture · {frame_count} frames · {stop:?}")
+                        };
                         copy_capture_if_enabled(editor, &document);
-                        editor.load(
-                            document,
-                            &format!("Scrolling capture · {frame_count} frames · {stop:?}"),
-                        );
+                        editor.load(document, &status);
                         editor.set_measure_scale(scale_factor);
                     }
                     Err(error) => {
@@ -249,25 +264,31 @@ pub(crate) fn scroll_selected(
     });
 }
 
-/// Capture the focused window of another app.
-pub fn active_window(editor: &mut Editor) -> Result<(), String> {
-    let windows = sniplet_platform::list_windows().map_err(|error| error.to_string())?;
-    let active = windows
-        .into_iter()
-        .find(|candidate| {
-            candidate.is_focused
-                && (cfg!(target_os = "macos") || candidate.process_id != std::process::id())
-        })
-        .ok_or_else(|| "No focused window is available for capture".to_owned())?;
-    window(active.id, editor);
-    Ok(())
+/// Capture the focused window of another app. The windows are listed on a worker, before the
+/// editor moves away and focus changes.
+pub fn active_window(editor: &mut Editor) {
+    editor
+        .inbox
+        .spawn(sniplet_platform::list_windows, |editor, windows, _| {
+            // Mac captures may take Sniplet's own windows.
+            let own = (!cfg!(target_os = "macos")).then(std::process::id);
+            let active = windows.map(|windows| {
+                windows
+                    .into_iter()
+                    .find(|candidate| candidate.is_focused && Some(candidate.process_id) != own)
+            });
+            match active {
+                Ok(Some(active)) => window(active.id, editor, shell::hide_for_capture()),
+                Ok(None) => editor.status = "No focused window is available for capture".into(),
+                Err(error) => editor.status = error.to_string(),
+            }
+        });
 }
 
-/// Capture the window `id` with the window capture style from Settings.
-pub(crate) fn window(id: u32, editor: &mut Editor) {
+/// Capture the window `id` with the window capture style from Settings, after `delay`.
+pub(crate) fn window(id: u32, editor: &mut Editor, delay: Duration) {
     let style = editor.settings.window_capture.clone();
     let escape = shell::begin_escape_session();
-    let delay = shell::hide_for_capture();
     let session = escape.clone();
     editor.inbox.spawn(
         move || {
@@ -504,20 +525,6 @@ mod tests {
     use rune::{Env, Runtime};
 
     use super::*;
-
-    #[test]
-    fn screen_capture_uses_pointer_instead_of_cached_primary_display() {
-        for command in [Command::Screen, Command::Delayed] {
-            assert_eq!(
-                CaptureTarget::for_command(command, 0),
-                CaptureTarget::UnderPointer
-            );
-        }
-        assert_eq!(
-            CaptureTarget::for_command(Command::ManualScroll, 2),
-            CaptureTarget::Monitor(2)
-        );
-    }
 
     #[test]
     fn pin_opacity_and_resize_keep_their_user_facing_limits() {

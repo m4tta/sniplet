@@ -172,10 +172,14 @@ fn tray_icon_pixels(light_background: bool) -> anyhow::Result<Vec<u8>> {
     Ok(pixels)
 }
 
+/// The registry key that holds the taskbar theme.
+#[cfg(target_os = "windows")]
+pub const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+
 #[cfg(target_os = "windows")]
 pub fn taskbar_uses_light_theme() -> bool {
     windows_registry::CURRENT_USER
-        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .open(PERSONALIZE_KEY)
         .and_then(|key| key.get_u32("SystemUsesLightTheme"))
         .is_ok_and(|value| value != 0)
 }

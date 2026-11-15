@@ -159,6 +159,25 @@ fn saved_shortcuts_round_trip_through_recorded_chords() {
 }
 
 #[test]
+fn the_conflict_sheet_moves_sniplet_to_keys_that_the_system_does_not_use() {
+    let mut h = Harness::new(Page::Shortcuts, (680.0, 1400.0), true);
+    let defaults = HotkeySettings::default();
+    let system = [&defaults.capture_window, &defaults.scrolling_capture]
+        .map(|text| system_shortcuts::system_form(text).unwrap())
+        .to_vec();
+    h.ui.update(|ui, _| ui.system = system);
+    h.turn();
+    assert_eq!(h.ui.state.conflicts(), [2, 3]);
+    h.click("fix-conflicts");
+    h.click("move-conflicts");
+    assert!(h.ui.state.conflicts().is_empty());
+    assert!(h.ui.find("shortcut-conflict-notice").is_none());
+    assert_eq!(h.settings().hotkeys.capture_area, defaults.capture_area);
+    h.until("the save", |h| h.saved().hotkeys == h.settings().hotkeys);
+    assert_eq!(h.editor.state.settings.hotkeys, h.settings().hotkeys);
+}
+
+#[test]
 fn scroll_limit_steps_to_multiples_of_ten_within_bounds() {
     assert_eq!(
         [40, 45, 2, 200, 10].map(|limit| step_limit(limit, true)),
@@ -428,31 +447,78 @@ fn upload_validates_before_saving_and_turns_off() {
     h.until("the save", |h| h.saved().cloud_upload.is_none());
 }
 
-#[test]
-fn an_upload_spends_the_signed_url_in_the_editor_and_this_window() {
-    let mut h = Harness::new(Page::Share, (680.0, 1400.0), true);
+/// Saves `url` as the signed upload URL, uploads a small image, and waits for `status`.
+fn upload_to(h: &mut Harness, url: &str, status: &str) {
     h.click("upload-enabled");
-    // Port 0 refuses at once, so the upload fails fast. The URL is spent either way.
-    h.ui.update(|s, _| s.upload[0].replace_text("http://127.0.0.1:0/shot.png?signature=s"));
+    h.ui.update(|s, _| s.upload[0].replace_text(url));
     h.click("save-upload");
     h.until("the save", |h| h.saved().cloud_upload.is_some());
-
     h.editor.update(|editor, tx| {
         editor.document = Some(sniplet_core::Document::new(sniplet_core::demo_image(4, 3)));
         editor.command(crate::editor::Command::Upload, tx);
     });
-    h.until("the upload", |h| {
-        h.editor.state.status.starts_with("Upload failed")
+    h.until("the upload", |h| h.editor.state.status.starts_with(status));
+}
+
+#[test]
+fn a_good_upload_spends_the_signed_url_in_the_editor_and_this_window() {
+    use std::io::{Read, Write};
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    // Answers one PUT with 200 after it has read the whole request.
+    std::thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            request.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let Some(head) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let length: usize = text[..head]
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap());
+            if read == 0 || request.len() >= head + 4 + length {
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .unwrap();
     });
+    let mut h = Harness::new(Page::Share, (680.0, 1400.0), true);
+    upload_to(
+        &mut h,
+        &format!("http://127.0.0.1:{port}/shot.png?signature=s"),
+        "Uploaded",
+    );
 
     assert!(h.editor.state.settings.cloud_upload.is_none());
-    assert!(h.saved().cloud_upload.is_none());
+    h.until("the save", |h| h.saved().cloud_upload.is_none());
     assert!(h.settings().cloud_upload.is_none());
     assert!(h.ui.state.upload[0].text.is_empty());
     // With the URL gone, Save has nothing to send back to the editor.
     h.click("save-upload");
     assert!(h.ui.state.field_error(Field::Upload).is_some());
     assert!(h.editor.state.settings.cloud_upload.is_none());
+}
+
+#[test]
+fn a_failed_upload_keeps_the_signed_url() {
+    let mut h = Harness::new(Page::Share, (680.0, 1400.0), true);
+    // Port 0 refuses at once, so the upload fails fast. It shared no link.
+    upload_to(
+        &mut h,
+        "http://127.0.0.1:0/shot.png?signature=s",
+        "Upload failed",
+    );
+
+    assert!(h.editor.state.settings.cloud_upload.is_some());
+    assert!(h.saved().cloud_upload.is_some());
+    assert!(!h.ui.state.upload[0].text.is_empty());
 }
 
 /// Renders every page in both themes to `target/settings-snapshots` for a look:

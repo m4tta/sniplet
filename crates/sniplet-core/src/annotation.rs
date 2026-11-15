@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,6 +10,7 @@ use crate::{
         ArrowHeadGeometry, ImageRect, Point, arrow_geometry, distance_to_quadratic,
         distance_to_segment, point_in_triangle, quadratic_bounds, quadratic_control,
     },
+    render::text_extent,
 };
 
 #[derive(
@@ -111,10 +114,11 @@ pub enum AnnotationKind {
         rect: ImageRect,
         sample: Option<Point>,
     },
-    /// A pasted PNG stored with the project and composited at `origin`.
+    /// A pasted PNG stored with the project and composited at `origin`. Clones share the
+    /// bytes, so undo steps and render snapshots do not copy them.
     Image {
         origin: Point,
-        png_bytes: Vec<u8>,
+        png_bytes: Arc<[u8]>,
         #[serde(default)]
         size: Option<ImageSize>,
     },
@@ -209,12 +213,10 @@ impl AnnotationKind {
                 origin,
                 text,
                 font_size,
-            } => ImageRect::new(
-                origin.x,
-                origin.y,
-                text.chars().count() as f32 * font_size * 0.62,
-                font_size * 1.25,
-            ),
+            } => {
+                let (width, height) = text_extent(text);
+                ImageRect::new(origin.x, origin.y, width * font_size, height * font_size)
+            }
             Self::Counter {
                 center, font_size, ..
             } => ImageRect::new(
@@ -413,10 +415,11 @@ impl AnnotationKind {
                 font_size,
             } => {
                 *origin = Point::new(target.x, target.y);
-                let by_height = target.height / 1.25;
-                let character_width = text.chars().count() as f32 * 0.62;
-                let by_width = if character_width > f32::EPSILON {
-                    target.width / character_width
+                // The inverse of `bounds`, which grows linearly with the font size.
+                let (width, height) = text_extent(text);
+                let by_height = target.height / height.max(f32::EPSILON);
+                let by_width = if width > f32::EPSILON {
+                    target.width / width
                 } else {
                     f32::INFINITY
                 };

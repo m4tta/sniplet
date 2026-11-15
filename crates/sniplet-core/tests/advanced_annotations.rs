@@ -49,7 +49,7 @@ fn raster_tools_preserve_drawings_and_image_objects() {
         document.add_annotation(
             AnnotationKind::Image {
                 origin: Point::new(10.0, 10.0),
-                png_bytes: png(&RgbaImage::from_pixel(3, 3, Rgba([0, 220, 80, 255]))),
+                png_bytes: png(&RgbaImage::from_pixel(3, 3, Rgba([0, 220, 80, 255]))).into(),
                 size: None,
             },
             AnnotationStyle::default(),
@@ -96,7 +96,7 @@ fn pasted_images_stay_below_drawings_and_spotlight_shading() {
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(4.0, 4.0),
-            png_bytes: png(&RgbaImage::from_pixel(8, 8, Rgba([0, 120, 220, 255]))),
+            png_bytes: png(&RgbaImage::from_pixel(8, 8, Rgba([0, 120, 220, 255]))).into(),
             size: None,
         },
         AnnotationStyle::default(),
@@ -144,7 +144,7 @@ fn pasted_png_has_bounds_hit_testing_movement_and_alpha_compositing() {
     let id = document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(4.0, 5.0),
-            png_bytes: png(&pasted),
+            png_bytes: png(&pasted).into(),
             size: None,
         },
         AnnotationStyle::default(),
@@ -259,7 +259,7 @@ fn new_annotation_variants_round_trip_through_project_json() {
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(2.0, 3.0),
-            png_bytes: pasted,
+            png_bytes: pasted.into(),
             size: None,
         },
         AnnotationStyle::default(),

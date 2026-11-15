@@ -140,7 +140,7 @@ fn measurement_source_includes_raster_edits_and_excludes_image_objects_and_drawi
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::new(0.0, 0.0),
-            png_bytes: png.into_inner(),
+            png_bytes: png.into_inner().into(),
             size: None,
         },
         AnnotationStyle::default(),

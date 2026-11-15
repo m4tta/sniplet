@@ -138,7 +138,7 @@ fn oversized_image_annotation_is_a_render_error() {
     document.add_annotation(
         AnnotationKind::Image {
             origin: Point::default(),
-            png_bytes: png(&RgbaImage::new(2, 2)),
+            png_bytes: png(&RgbaImage::new(2, 2)).into(),
             size: Some(ImageSize {
                 width: 100_000,
                 height: 100_000,
@@ -186,7 +186,7 @@ fn image_size_comes_from_the_header_before_any_pixels_are_decoded() {
     ));
     let pasted = AnnotationKind::Image {
         origin: Point::new(1.0, 2.0),
-        png_bytes: bomb,
+        png_bytes: bomb.into(),
         size: None,
     };
     assert_eq!(

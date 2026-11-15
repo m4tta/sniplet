@@ -23,15 +23,21 @@ impl Default for OcrOptions {
 }
 
 /// Recognizes text entirely offline. Windows uses its built-in OCR engine first
-/// and falls back to the configured Tesseract executable if WinRT OCR fails.
+/// and falls back to the configured Tesseract executable if WinRT OCR fails. When
+/// Tesseract is missing too, the Windows error is the one that explains the failure.
 /// macOS and Linux use Tesseract directly.
 pub fn recognize_text(image: &RgbaImage, options: &OcrOptions) -> Result<String> {
     #[cfg(windows)]
-    if let Ok(text) = recognize_text_native_windows(image, None) {
-        return Ok(text);
+    let native = match recognize_text_native_windows(image, None) {
+        Ok(text) => return Ok(text),
+        Err(error) => Some(error),
+    };
+    #[cfg(not(windows))]
+    let native = None;
+    match (recognize_text_tesseract(image, options), native) {
+        (Err(PlatformError::TesseractMissing { .. }), Some(native)) => Err(native),
+        (result, _) => result,
     }
-
-    recognize_text_tesseract(image, options)
 }
 
 /// Runs the installed Tesseract command locally. No image or text leaves the machine.
@@ -91,12 +97,13 @@ pub fn recognize_text_native_windows(
     image: &RgbaImage,
     language_tag: Option<&str>,
 ) -> Result<String> {
-    use image::ImageEncoder;
+    use std::sync::Mutex;
+
     use windows::{
         Globalization::Language,
-        Graphics::Imaging::BitmapDecoder,
+        Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap},
         Media::Ocr::OcrEngine,
-        Storage::Streams::{DataWriter, InMemoryRandomAccessStream},
+        Storage::Streams::DataWriter,
         core::HSTRING,
     };
 
@@ -106,49 +113,46 @@ pub fn recognize_text_native_windows(
         move |source| PlatformError::WindowsOcr { operation, source }
     }
 
-    let mut png = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(PlatformError::Image)?;
+    /// The engine for the user's languages, made once.
+    static USER_ENGINE: Mutex<Option<OcrEngine>> = Mutex::new(None);
 
-    let stream =
-        InMemoryRandomAccessStream::new().map_err(windows_ocr_error("create an image stream"))?;
-    let writer = DataWriter::CreateDataWriter(&stream)
-        .map_err(windows_ocr_error("create an image writer"))?;
+    // The bitmap takes the pixels directly, as BGRA.
+    let mut bgra = image.as_raw()[..image.width() as usize * image.height() as usize * 4].to_vec();
+    for pixel in bgra.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let writer = DataWriter::new().map_err(windows_ocr_error("create an image writer"))?;
     writer
-        .WriteBytes(&png)
+        .WriteBytes(&bgra)
         .map_err(windows_ocr_error("write the image"))?;
-    writer
-        .StoreAsync()
-        .map_err(windows_ocr_error("start storing the image"))?
-        .join()
+    let buffer = writer
+        .DetachBuffer()
         .map_err(windows_ocr_error("store the image"))?;
-    stream
-        .Seek(0)
-        .map_err(windows_ocr_error("rewind the image stream"))?;
-
-    let decoder = BitmapDecoder::CreateAsync(&stream)
-        .map_err(windows_ocr_error("start decoding the image"))?
-        .join()
-        .map_err(windows_ocr_error("decode the image"))?;
-    let bitmap = decoder
-        .GetSoftwareBitmapAsync()
-        .map_err(windows_ocr_error("start reading image pixels"))?
-        .join()
-        .map_err(windows_ocr_error("read image pixels"))?;
+    let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+        &buffer,
+        BitmapPixelFormat::Bgra8,
+        image.width() as i32,
+        image.height() as i32,
+    )
+    .map_err(windows_ocr_error("read image pixels"))?;
     let engine = if let Some(language_tag) = language_tag {
         let language = Language::CreateLanguage(&HSTRING::from(language_tag))
             .map_err(windows_ocr_error("select the OCR language"))?;
         OcrEngine::TryCreateFromLanguage(&language)
             .map_err(windows_ocr_error("create the OCR engine"))?
     } else {
-        OcrEngine::TryCreateFromUserProfileLanguages()
-            .map_err(windows_ocr_error("create the OCR engine"))?
+        let mut cached = USER_ENGINE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match (*cached).clone() {
+            Some(engine) => engine,
+            None => {
+                let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+                    .map_err(windows_ocr_error("create the OCR engine"))?;
+                *cached = Some(engine.clone());
+                engine
+            }
+        }
     };
     let result = engine
         .RecognizeAsync(&bitmap)

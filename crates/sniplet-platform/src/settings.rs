@@ -130,10 +130,12 @@ pub struct Settings {
     pub scroll_max_frames: usize,
     pub scroll_settle_ms: u64,
     pub annotation_color: AnnotationColor,
-    /// Upload destination. S3 credentials are loaded from the environment at
-    /// upload time and are never persisted here. A presigned PUT URL is a write
-    /// credential: it stays here only until an upload uses it.
+    /// Upload destination. S3 credentials are loaded from the environment or the
+    /// AWS credentials file at upload time and are never persisted here. A presigned
+    /// PUT URL is a write credential: it stays here only until an upload uses it.
     pub cloud_upload: Option<CloudUploadConfig>,
+    /// The notice about shortcuts that macOS also uses has opened by itself. It does so once.
+    pub shortcut_conflicts_shown: bool,
 }
 
 impl Default for Settings {
@@ -154,6 +156,7 @@ impl Default for Settings {
             scroll_settle_ms: 250,
             annotation_color: AnnotationColor::default(),
             cloud_upload: None,
+            shortcut_conflicts_shown: false,
         }
     }
 }
@@ -180,6 +183,9 @@ impl SettingsStore {
         &self.path
     }
 
+    /// Missing settings are the defaults. Unreadable settings move aside to
+    /// `settings.json.bad-<unix seconds>`, and the error names that file, so the next save
+    /// cannot overwrite the user's only copy.
     pub fn load(&self) -> Result<Settings> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -193,9 +199,17 @@ impl SettingsStore {
                 });
             }
         };
-        serde_json::from_slice(&bytes).map_err(|source| PlatformError::InvalidSettings {
-            path: self.path.clone(),
-            source,
+        serde_json::from_slice(&bytes).map_err(|source| {
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let mut bad = self.path.clone().into_os_string();
+            bad.push(format!(".bad-{seconds}"));
+            let path = match fs::rename(&self.path, &bad) {
+                Ok(()) => PathBuf::from(bad),
+                Err(_) => self.path.clone(),
+            };
+            PlatformError::InvalidSettings { path, source }
         })
     }
 
@@ -286,17 +300,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_settings_are_reported_without_rewriting_the_file() {
+    fn malformed_settings_move_aside_so_a_save_cannot_overwrite_them() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
         fs::write(&path, b"{").unwrap();
         let store = SettingsStore::at(path.clone());
 
-        assert!(matches!(
-            store.load(),
-            Err(PlatformError::InvalidSettings { path: invalid_path, .. }) if invalid_path == path
-        ));
-        assert_eq!(fs::read(path).unwrap(), b"{");
+        let Err(PlatformError::InvalidSettings { path: moved, .. }) = store.load() else {
+            panic!("malformed settings must be reported");
+        };
+        assert!(
+            moved
+                .to_string_lossy()
+                .starts_with(&format!("{}.bad-", path.display()))
+        );
+        store.save(&Settings::default()).unwrap();
+        assert_eq!(fs::read(moved).unwrap(), b"{");
+        assert_eq!(store.load().unwrap(), Settings::default());
     }
 
     #[test]
