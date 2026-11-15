@@ -118,7 +118,7 @@ pub fn recognize_text_native_windows(
 
     // The bitmap takes the pixels directly, as BGRA.
     let mut bgra = image.as_raw()[..image.width() as usize * image.height() as usize * 4].to_vec();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let writer = DataWriter::new().map_err(windows_ocr_error("create an image writer"))?;

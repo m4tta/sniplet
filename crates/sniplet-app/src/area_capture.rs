@@ -168,7 +168,7 @@ fn compose(screens: &[Screen], bounds: Rect) -> Option<(RgbaImage, f32)> {
                     row.copy_from_slice(&source[first * 4..first * 4 + row.len()]);
                 }
                 _ => {
-                    for (pixel, &x) in row.chunks_exact_mut(4).zip(&source_xs) {
+                    for (pixel, &x) in row.as_chunks_mut::<4>().0.iter_mut().zip(&source_xs) {
                         pixel.copy_from_slice(&source[x * 4..x * 4 + 4]);
                     }
                 }

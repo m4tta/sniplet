@@ -107,7 +107,16 @@ fn sticky_header_and_footer_stay_out_of_matching_and_appear_once() {
         "full frames never match"
     );
 
-    let mut stitcher = Stitcher::with_sticky_bands(&frames[0], EXACT);
+    // A redraw in place, such as a caret blink, also has bottom rows that stay the same. They
+    // are not a footer.
+    let mut redrawn = frames[0].clone();
+    redrawn.put_pixel(1, 8, Rgba([5, 28, 30, 255]));
+    let tolerant = StitchOptions {
+        max_mean_error: 1.0,
+        ..EXACT
+    };
+    let mut stitcher = Stitcher::with_sticky_bands(&frames[0], tolerant);
+    assert_eq!(stitcher.push(&redrawn).unwrap(), 0);
     assert_eq!(stitcher.push(&frames[1]).unwrap(), 6);
     assert_eq!(stitcher.push(&frames[2]).unwrap(), 6);
     assert_eq!(

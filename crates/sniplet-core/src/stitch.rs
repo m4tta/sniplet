@@ -108,27 +108,26 @@ impl Stitcher {
         }
         let row_bytes = width as usize * 4;
         let frame_pixels = pixels(frame);
-        let (top, footer) = match &mut self.sticky {
-            None => (0, 0),
+        let (top, footer, first_footer) = match &self.sticky {
+            None => (0, 0, false),
             Some(sticky) => {
                 let (top, bottom) = static_bands(&sticky.previous, frame_pixels, row_bytes);
                 if top == frame.height() {
                     return Ok(0);
                 }
-                let footer = match sticky.footer {
-                    Some(footer) => footer,
-                    None => {
-                        // The first frame's footer leaves the page; `into_image` puts the last
-                        // frame's footer back below it.
-                        let footer = bottom.min(self.height);
-                        self.height -= footer;
-                        self.output.truncate(self.height as usize * row_bytes);
-                        sticky.footer = Some(footer);
-                        footer
-                    }
-                };
-                (top, footer)
+                match sticky.footer {
+                    Some(footer) => (top, footer, false),
+                    // Kept only when this frame adds rows: a page that redraws in place also
+                    // has bottom rows that stay the same, and they are not a footer.
+                    None => (top, bottom.min(self.height), true),
+                }
             }
+        };
+        // The page to match against, without the first frame's footer.
+        let page = if first_footer {
+            self.height - footer
+        } else {
+            self.height
         };
         let end = frame.height().saturating_sub(footer);
         if top >= end {
@@ -143,20 +142,20 @@ impl Stitcher {
             .options
             .max_overlap
             .unwrap_or(u32::MAX)
-            .min(self.height)
+            .min(page)
             .min(rows);
         let mut minimum = self.options.min_overlap.max(1);
         // Bands can leave fewer rows than the minimum overlap, as a blinking caret on a page
         // that did not move does. Those rows can only be in the same place, so test only that.
         if self.sticky.is_some() && rows < minimum {
-            (minimum, maximum) = (rows, rows.min(self.height));
+            (minimum, maximum) = (rows, rows.min(page));
         }
         // Zero-width frames have no pixels, so no overlap can be measured.
         if maximum < minimum || width == 0 {
             return Err(not_found(f32::INFINITY));
         }
         let search = Search {
-            existing: &self.output,
+            existing: &self.output[..page as usize * row_bytes],
             next,
             row_bytes,
         };
@@ -166,11 +165,21 @@ impl Stitcher {
         if !accepted {
             return Err(not_found(error));
         }
-        self.output
-            .extend_from_slice(&next[overlap as usize * row_bytes..]);
-        self.height += rows - overlap;
+        let added = rows - overlap;
+        if added > 0 {
+            if first_footer && let Some(sticky) = &mut self.sticky {
+                // The first frame's footer leaves the page; `into_image` puts the last frame's
+                // footer back below it.
+                self.output.truncate(page as usize * row_bytes);
+                self.height = page;
+                sticky.footer = Some(footer);
+            }
+            self.output
+                .extend_from_slice(&next[overlap as usize * row_bytes..]);
+            self.height += added;
+        }
         self.remember(frame_pixels);
-        Ok(rows - overlap)
+        Ok(added)
     }
 
     fn remember(&mut self, frame_pixels: &[u8]) {

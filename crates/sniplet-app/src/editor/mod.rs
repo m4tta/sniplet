@@ -442,6 +442,8 @@ impl Editor {
             move || DragFile::write(&image, Some(revision)),
             move |this, result, _| {
                 this.drag_file_running = false;
+                // A failed write is not tried again until the preview changes.
+                let written = result.is_ok();
                 // A file for an older preview is dropped, which deletes it. So is one that a
                 // drag already wrote for this preview, so the dragged file stays.
                 let slot = this
@@ -457,7 +459,9 @@ impl Editor {
                 {
                     slot.replace(file);
                 }
-                this.prepare_drag_file();
+                if written {
+                    this.prepare_drag_file();
+                }
             },
         );
     }
