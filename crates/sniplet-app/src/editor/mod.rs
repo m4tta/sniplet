@@ -108,6 +108,8 @@ pub struct Editor {
     pub tool: Tool,
     pub selection: Option<ImageRect>,
     pub status: String,
+    /// Set when Sniplet started without the macOS Screen Recording permission.
+    pub(crate) screen_access: Option<crate::screen_access::ScreenAccess>,
     /// An upload is running. A second one waits for it, see `upload`.
     pub(crate) uploading: bool,
     pub settings: Settings,
@@ -197,6 +199,7 @@ impl Editor {
             tool: Tool::Select,
             selection: None,
             status: "Ready".into(),
+            screen_access: None,
             uploading: false,
             settings,
             hotkey_error: None,

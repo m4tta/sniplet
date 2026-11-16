@@ -192,6 +192,9 @@ impl Editor {
                 }
             }
             Command::Window => {
+                if !crate::screen_access::allows_capture(self) {
+                    return;
+                }
                 if let Err(error) = crate::window_picker::open(self) {
                     self.status = error;
                 }
@@ -205,6 +208,9 @@ impl Editor {
             | Command::ManualScroll
             | Command::Repeat
             | Command::CaptureOcr => {
+                if !crate::screen_access::allows_capture(self) {
+                    return;
+                }
                 let request = capture::CaptureRequest {
                     command,
                     region: self.scroll_region,
@@ -214,7 +220,11 @@ impl Editor {
                     self.status = error;
                 }
             }
-            Command::ActiveWindow => capture::active_window(self),
+            Command::ActiveWindow => {
+                if crate::screen_access::allows_capture(self) {
+                    capture::active_window(self);
+                }
+            }
             Command::ShowEditor => crate::shell::show_editor(),
             Command::Settings => self.open_settings(crate::settings_window::Page::General),
             #[cfg(target_os = "linux")]
