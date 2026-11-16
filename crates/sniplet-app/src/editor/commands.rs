@@ -192,6 +192,9 @@ impl Editor {
                 }
             }
             Command::Window => {
+                if !crate::screen_access::allows_capture(self) {
+                    return;
+                }
                 if let Err(error) = crate::window_picker::open(self) {
                     self.status = error;
                 }
@@ -205,6 +208,9 @@ impl Editor {
             | Command::ManualScroll
             | Command::Repeat
             | Command::CaptureOcr => {
+                if !crate::screen_access::allows_capture(self) {
+                    return;
+                }
                 let request = capture::CaptureRequest {
                     command,
                     region: self.scroll_region,

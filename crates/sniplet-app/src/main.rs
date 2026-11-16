@@ -14,6 +14,7 @@ mod editor;
 mod macos;
 mod menu_bar;
 mod quick_menu;
+mod screen_access;
 mod self_test;
 mod settings_window;
 mod shell;
@@ -260,15 +261,16 @@ fn setup(editor: &mut Editor, waker: Waker) {
         return;
     }
     shell::install(editor);
-    // Ask at startup, so that the first capture does not meet the system prompt. The request
-    // waits on the macOS permission service, so it runs on a worker.
+    // Check on every start, so that the first capture does not meet the system prompt. The
+    // check waits on the macOS permission service, so it runs on a worker.
     #[cfg(target_os = "macos")]
     editor.inbox.spawn(
         sniplet_platform::request_screen_recording,
         |editor, allowed, _| {
             if !allowed {
-                // Opening Sniplet again only shows this copy, so the user must quit first.
-                editor.status = "To capture, allow Sniplet in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen Sniplet.".into();
+                editor.screen_access.get_or_insert_with(Default::default);
+                // A start in the menu bar hides the editor, and with it the setup steps.
+                shell::show_editor();
             }
         },
     );

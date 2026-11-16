@@ -326,12 +326,19 @@ pub fn capture_monitors() -> Result<Vec<CapturedFrame>> {
     })
 }
 
-/// Ask macOS for the Screen Recording permission that captures need, and return whether
-/// Sniplet has it. macOS shows its prompt one time and does not wait for the answer. Later
-/// calls only read the state.
+/// Whether Sniplet has the Screen Recording permission. This never shows a prompt.
+#[cfg(target_os = "macos")]
+pub fn screen_recording_allowed() -> bool {
+    core_graphics::access::ScreenCaptureAccess.preflight()
+}
+
+/// Check for the Screen Recording permission that captures need, ask macOS for it when it is
+/// missing, and return whether Sniplet has it. macOS shows its prompt one time per app and
+/// does not wait for the answer, so a later start that is still not allowed gets no prompt.
 #[cfg(target_os = "macos")]
 pub fn request_screen_recording() -> bool {
-    core_graphics::access::ScreenCaptureAccess.request()
+    let access = core_graphics::access::ScreenCaptureAccess;
+    access.preflight() || access.request()
 }
 
 /// Capture a live rectangle in Quartz desktop points, excluding selector windows.

@@ -229,7 +229,10 @@ fn canvas(s: &Editor, k: &Kit) -> El {
             .child(dock(s, k))
             .children(color_peek(s, k, width, height));
     } else if s.document.is_none() {
-        canvas = canvas.child(welcome(s, k));
+        canvas = canvas.child(match &s.screen_access {
+            Some(access) => crate::screen_access::setup_card(access, false, k),
+            None => welcome(s, k),
+        });
     }
     canvas = canvas.child(
         ui::chip(
@@ -242,6 +245,17 @@ fn canvas(s: &Editor, k: &Kit) -> El {
         .absolute(12.0, 12.0)
         .max_w((width - 24.0).max(0.0)),
     );
+    if let Some(access) = &s.screen_access
+        && s.document.is_some()
+    {
+        canvas = canvas.child(if access.blocked() {
+            crate::screen_access::setup_card(access, true, k)
+        } else {
+            crate::screen_access::notice(k)
+                .absolute(12.0, 44.0)
+                .max_w((width - 24.0).max(0.0))
+        });
+    }
     canvas
         .children(s.render_update_notice(k))
         .children(super::panels::floating_panel(s, k, height))
