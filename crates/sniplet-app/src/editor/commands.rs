@@ -220,7 +220,11 @@ impl Editor {
                     self.status = error;
                 }
             }
-            Command::ActiveWindow => capture::active_window(self),
+            Command::ActiveWindow => {
+                if crate::screen_access::allows_capture(self) {
+                    capture::active_window(self);
+                }
+            }
             Command::ShowEditor => crate::shell::show_editor(),
             Command::Settings => self.open_settings(crate::settings_window::Page::General),
             #[cfg(target_os = "linux")]

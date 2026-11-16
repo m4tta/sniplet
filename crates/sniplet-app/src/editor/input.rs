@@ -528,6 +528,22 @@ impl Editor {
             }
             return false;
         }
+        if self.document.is_some()
+            && self
+                .screen_access
+                .as_ref()
+                .is_some_and(|access| access.blocked())
+        {
+            // The setup card covers the image, so keys must not edit it. Escape closes the
+            // card, and Cmd shortcuts such as Save still work.
+            if key == "escape" {
+                crate::screen_access::not_now(self);
+                return true;
+            }
+            if !event.command {
+                return true;
+            }
+        }
         if key == "escape" {
             // Rune ends a slider drag on Escape before keys arrive: see `cancel_size_edit`.
             self.panel = None;

@@ -41,7 +41,7 @@ pub fn allows_capture(s: &mut Editor) -> bool {
     true
 }
 
-fn not_now(s: &mut Editor) {
+pub fn not_now(s: &mut Editor) {
     if let Some(access) = &mut s.screen_access {
         access.blocked = false;
     }
