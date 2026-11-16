@@ -535,12 +535,12 @@ impl Editor {
                 .is_some_and(|access| access.blocked())
         {
             // The setup card covers the image, so keys must not edit it. Escape closes the
-            // card, and Cmd shortcuts such as Save still work.
+            // card, and Save and Quit still work, so the user can save before a restart.
             if key == "escape" {
                 crate::screen_access::not_now(self);
                 return true;
             }
-            if !event.command {
+            if !(event.command && matches!(key, "s" | "q")) {
                 return true;
             }
         }
