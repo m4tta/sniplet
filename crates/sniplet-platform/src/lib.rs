@@ -35,6 +35,8 @@ pub use export::{default_export_directory, export_image, image_at_1x, sanitize_f
 pub use image::RgbaImage;
 #[cfg(windows)]
 pub use ocr::recognize_text_native_windows;
+#[cfg(target_os = "macos")]
+pub use ocr::recognize_text_native_macos;
 pub use ocr::{OcrOptions, recognize_text, recognize_text_tesseract};
 pub use qr::{QrCode, QrPoint, scan_qr_codes};
 pub use scroll::{

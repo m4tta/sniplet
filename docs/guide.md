@@ -77,7 +77,7 @@ places a new capture to the right on an expanded canvas as an editable object.
 - **Windows:** Visual Studio 2022 Build Tools with Desktop development with C++;
   a graphics driver supporting Direct3D. Windows OCR is used when available.
 - **macOS:** Xcode with the macOS SDK and Metal toolchain; Screen Recording permission for capture.
-  The current OCR fallback requires `tesseract` and its language data.
+  OCR uses the Vision framework included with macOS, so it needs no install.
 - **Linux:** Vulkan-capable graphics and X11 or Wayland. On Ubuntu/Debian install
   `build-essential clang cmake pkg-config libxcb1-dev libxkbcommon-dev
   libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig1-dev

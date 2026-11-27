@@ -22,17 +22,21 @@ impl Default for OcrOptions {
     }
 }
 
-/// Recognizes text entirely offline. Windows uses its built-in OCR engine first
-/// and falls back to the configured Tesseract executable if WinRT OCR fails. When
-/// Tesseract is missing too, the Windows error is the one that explains the failure.
-/// macOS and Linux use Tesseract directly.
+/// Recognizes text entirely offline. Windows and macOS use the OCR engine built into
+/// the system first and fall back to the configured Tesseract executable if it fails.
+/// When Tesseract is missing too, the system error is the one that explains the
+/// failure. Linux uses Tesseract directly.
 pub fn recognize_text(image: &RgbaImage, options: &OcrOptions) -> Result<String> {
     #[cfg(windows)]
-    let native = match recognize_text_native_windows(image, None) {
+    let native = recognize_text_native_windows(image, None);
+    #[cfg(target_os = "macos")]
+    let native = recognize_text_native_macos(image);
+    #[cfg(any(windows, target_os = "macos"))]
+    let native = match native {
         Ok(text) => return Ok(text),
         Err(error) => Some(error),
     };
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let native = None;
     match (recognize_text_tesseract(image, options), native) {
         (Err(PlatformError::TesseractMissing { .. }), Some(native)) => Err(native),
@@ -165,6 +169,52 @@ pub fn recognize_text_native_windows(
         .map_err(windows_ocr_error("read recognized text"))
 }
 
+/// Uses the Vision framework included with macOS. The image stays in memory, and
+/// recognition is performed entirely by the operating system. Each recognized line
+/// becomes one line of text, in the order Vision returns them.
+#[cfg(target_os = "macos")]
+pub fn recognize_text_native_macos(image: &RgbaImage) -> Result<String> {
+    use objc2::AnyThread;
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::{NSArray, NSData, NSDictionary};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
+    };
+
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(PlatformError::Image)?;
+
+    // OCR runs on worker threads, which have no autorelease pool of their own.
+    autoreleasepool(|_| {
+        let handler = VNImageRequestHandler::initWithData_options(
+            VNImageRequestHandler::alloc(),
+            &NSData::with_bytes(&png),
+            &NSDictionary::new(),
+        );
+        let request = VNRecognizeTextRequest::new();
+        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        request.setUsesLanguageCorrection(true);
+        request.setAutomaticallyDetectsLanguage(true);
+        let base: &VNRequest = &request;
+        handler
+            .performRequests_error(&NSArray::from_slice(&[base]))
+            .map_err(|error| PlatformError::MacOcr(error.localizedDescription().to_string()))?;
+        let lines: Vec<String> = request
+            .results()
+            .map(|observations| {
+                observations
+                    .iter()
+                    .filter_map(|observation| observation.topCandidates(1).firstObject())
+                    .map(|candidate| candidate.string().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(lines.join("\n"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,10 +229,12 @@ mod tests {
         assert!(matches!(error, PlatformError::TesseractMissing { .. }));
     }
 
-    #[cfg(windows)]
+    /// Proves the system engine reads text without Tesseract. Vision is always
+    /// present on macOS, so the test runs there; Windows needs a language pack.
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    #[ignore = "requires an installed Windows OCR language pack"]
-    fn native_windows_ocr_reads_rendered_text() {
+    #[cfg_attr(windows, ignore = "requires an installed Windows OCR language pack")]
+    fn native_ocr_reads_rendered_text() {
         use image::Rgba;
         use sniplet_core::{
             AnnotationKind, AnnotationStyle, Color, Document, Point, RenderOptions,

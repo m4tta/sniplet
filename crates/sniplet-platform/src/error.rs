@@ -87,6 +87,10 @@ pub enum PlatformError {
         source: windows::core::Error,
     },
 
+    #[cfg(target_os = "macos")]
+    #[error("macOS text recognition failed: {0}")]
+    MacOcr(String),
+
     #[error("QR code decoding failed: {0}")]
     QrDecode(#[source] rqrr::DeQRError),
 
