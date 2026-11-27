@@ -173,7 +173,7 @@ pub fn recognize_text_native_windows(
 /// recognition is performed entirely by the operating system. Each recognized line
 /// becomes one line of text, in the order Vision returns them.
 #[cfg(target_os = "macos")]
-pub fn recognize_text_native_macos(image: &RgbaImage) -> Result<String> {
+fn recognize_text_native_macos(image: &RgbaImage) -> Result<String> {
     use objc2::AnyThread;
     use objc2::rc::autoreleasepool;
     use objc2_foundation::{NSArray, NSData, NSDictionary};
@@ -201,16 +201,15 @@ pub fn recognize_text_native_macos(image: &RgbaImage) -> Result<String> {
         handler
             .performRequests_error(&NSArray::from_slice(&[base]))
             .map_err(|error| PlatformError::MacOcr(error.localizedDescription().to_string()))?;
-        let lines: Vec<String> = request
+        // No results means the request failed; an empty array means no text was found.
+        let observations = request
             .results()
-            .map(|observations| {
-                observations
-                    .iter()
-                    .filter_map(|observation| observation.topCandidates(1).firstObject())
-                    .map(|candidate| candidate.string().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .ok_or_else(|| PlatformError::MacOcr("the request returned no results".to_owned()))?;
+        let lines: Vec<String> = observations
+            .iter()
+            .filter_map(|observation| observation.topCandidates(1).firstObject())
+            .map(|candidate| candidate.string().to_string())
+            .collect();
         Ok(lines.join("\n"))
     })
 }
